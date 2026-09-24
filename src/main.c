@@ -388,7 +388,6 @@ static void Home(uint8_t lowerDir)
     g_sineRunning = 0U;
     g_parametricRunning = 0U;
     g_run = 0U;
-    g_liveTelemetry = 1U;
 
     UartPrint("homing: moving to lower limit\r\n");
     SetDirection(lowerDir);
@@ -402,7 +401,6 @@ static void Home(uint8_t lowerDir)
         lowerSteps++;
         g_positionSteps += (lowerDir == 0U) ? 1 : -1;
         ReportSwitchChanges();
-        PrintLiveTelemetry();
     }
 
     if (UpperLimitPressed() == 0U && LowerLimitPressed() == 0U)
@@ -427,7 +425,6 @@ static void Home(uint8_t lowerDir)
         spanSteps++;
         g_positionSteps += (oppositeDir == 0U) ? 1 : -1;
         ReportSwitchChanges();
-        PrintLiveTelemetry();
     }
 
     if ((firstLimitIsLower != 0U ? UpperLimitPressed() : LowerLimitPressed()) == 0U)
@@ -458,7 +455,6 @@ static void Home(uint8_t lowerDir)
             return;
         }
         g_positionSteps += (firstLimitIsLower != 0U ? lowerDir : oppositeDir) == 0U ? 1 : -1;
-        PrintLiveTelemetry();
         ReportSwitchChanges();
     }
     g_travelSteps = spanSteps;
