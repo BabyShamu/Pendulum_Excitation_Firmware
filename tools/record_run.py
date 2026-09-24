@@ -10,10 +10,9 @@ import serial
 
 
 def send_command(port: serial.Serial, command: str) -> None:
-    """Send one character at a time because firmware UART polling is periodic."""
-    for character in command + "\r\n":
-        port.write(character.encode("ascii"))
-        time.sleep(0.02)
+    """Send a full command line using the firmware's ring-buffer UART RX."""
+    port.write((command + "\r\n").encode("ascii"))
+    port.flush()
 
 
 def main() -> None:

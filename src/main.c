@@ -85,10 +85,14 @@ static UART_HandleTypeDef huart2;
 static I2C_HandleTypeDef hi2c1;
 static char g_rxBuf[UART_RX_BUF_SIZE];
 static uint32_t g_rxIdx = 0U;
+static uint8_t g_rxLineTooLong = 0U;
+static uint8_t g_lastRxWasCr = 0U;
 static volatile uint8_t g_uartRxByte = 0U;
 static volatile uint8_t g_uartRxRing[UART_RX_RING_SIZE];
 static volatile uint16_t g_uartRxHead = 0U;
 static volatile uint16_t g_uartRxTail = 0U;
+static volatile uint8_t g_uartRxOverflow = 0U;
+static volatile uint32_t g_uartRxOverflowCount = 0U;
 static uint8_t g_uartTxRing[UART_TX_RING_SIZE];
 static volatile uint16_t g_uartTxHead = 0U;
 static volatile uint16_t g_uartTxTail = 0U;
@@ -150,6 +154,11 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
         {
             g_uartRxRing[g_uartRxHead] = g_uartRxByte;
             g_uartRxHead = nextHead;
+        }
+        else
+        {
+            g_uartRxOverflow = 1U;
+            g_uartRxOverflowCount++;
         }
         HAL_UART_Receive_IT(&huart2, (uint8_t *)&g_uartRxByte, 1U);
     }
@@ -1180,12 +1189,46 @@ static void PollUart(void)
 {
     uint8_t ch;
 
+    if (g_uartRxOverflow != 0U)
+    {
+        char msg[80];
+        snprintf(msg, sizeof(msg), "uart rx overflow (%lu)\r\n",
+                 (unsigned long)g_uartRxOverflowCount);
+        UartPrint(msg);
+        g_uartRxOverflow = 0U;
+    }
+
     while (g_uartRxTail != g_uartRxHead)
     {
         ch = g_uartRxRing[g_uartRxTail];
         g_uartRxTail = (uint16_t)((g_uartRxTail + 1U) % UART_RX_RING_SIZE);
+
         if (ch == '\r' || ch == '\n')
         {
+            if (ch == '\n' && g_lastRxWasCr != 0U)
+            {
+                g_lastRxWasCr = 0U;
+                continue;
+            }
+
+            g_lastRxWasCr = (ch == '\r') ? 1U : 0U;
+
+            if (g_rxLineTooLong != 0U)
+            {
+                UartPrint("command too long\r\n");
+                g_rxIdx = 0U;
+                g_rxLineTooLong = 0U;
+                if (g_suppressPromptOnce != 0U)
+                {
+                    g_suppressPromptOnce = 0U;
+                }
+                else if (g_recording == 0U)
+                {
+                    UartPrint("> ");
+                }
+                continue;
+            }
+
             UartPrint("\r\n");
             g_rxBuf[g_rxIdx] = '\0';
 
@@ -1206,14 +1249,24 @@ static void PollUart(void)
             continue;
         }
 
-        if (g_rxIdx < (UART_RX_BUF_SIZE - 1U))
+        if (g_rxLineTooLong != 0U)
         {
-            g_rxBuf[g_rxIdx++] = (char)ch;
-            if (g_recording == 0U)
-            {
-                char echo[2] = {(char)ch, '\0'};
-                UartPrint(echo);
-            }
+            continue;
+        }
+
+        if (g_rxIdx >= (UART_RX_BUF_SIZE - 1U))
+        {
+            g_rxLineTooLong = 1U;
+            g_rxIdx = UART_RX_BUF_SIZE - 1U;
+            continue;
+        }
+
+        g_lastRxWasCr = 0U;
+        g_rxBuf[g_rxIdx++] = (char)ch;
+        if (g_recording == 0U)
+        {
+            char echo[2] = {(char)ch, '\0'};
+            UartPrint(echo);
         }
     }
 }
