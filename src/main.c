@@ -11,6 +11,8 @@
 // DIR = D6 = PB10
 #define DIR_PORT  GPIOB
 #define DIR_PIN   GPIO_PIN_10
+#define DIR_UP    0U
+#define DIR_DOWN  1U
 
 // UPPER LIMIT = D7 = PA8; LOWER LIMIT = D8 = PA9.
 // Wiring: COM -> GND, NO -> GPIO with internal pull-up enabled.
@@ -63,7 +65,7 @@ static HAL_StatusTypeDef AS5600_ReadAngle(uint16_t *angle);
 static void SetDirection(uint8_t dir);
 static uint8_t StepOne(uint32_t hz, uint8_t stopUpper, uint8_t stopLower);
 static void Jog(uint8_t dir, uint32_t steps);
-static void Home(uint8_t lowerDir);
+static void Home(void);
 static void ReturnToCenter(void);
 static void UpdateSine(void);
 static void UpdateParametric(void);
@@ -377,12 +379,10 @@ static void Jog(uint8_t dir, uint32_t steps)
     UartPrint("jog complete\r\n");
 }
 
-static void Home(uint8_t lowerDir)
+static void Home(void)
 {
     uint32_t lowerSteps = 0U;
     uint32_t spanSteps = 0U;
-    uint8_t firstLimitIsLower;
-    uint8_t oppositeDir = (lowerDir == 0U) ? 1U : 0U;
 
     g_homed = 0U;
     g_sineRunning = 0U;
@@ -390,46 +390,43 @@ static void Home(uint8_t lowerDir)
     g_run = 0U;
 
     UartPrint("homing: moving to lower limit\r\n");
-    SetDirection(lowerDir);
-    while (UpperLimitPressed() == 0U && LowerLimitPressed() == 0U &&
-           lowerSteps < MAX_HOMING_STEPS)
+    SetDirection(DIR_DOWN);
+    while (LowerLimitPressed() == 0U && lowerSteps < MAX_HOMING_STEPS)
     {
-        if (StepOne(HOMING_SPEED_HZ, 1U, 1U) == 0U)
+        if (StepOne(HOMING_SPEED_HZ, 0U, 1U) == 0U)
         {
             break;
         }
         lowerSteps++;
-        g_positionSteps += (lowerDir == 0U) ? 1 : -1;
+        g_positionSteps += (DIR_DOWN == 0U) ? 1 : -1;
         ReportSwitchChanges();
     }
 
-    if (UpperLimitPressed() == 0U && LowerLimitPressed() == 0U)
+    if (LowerLimitPressed() == 0U)
     {
-        UartPrint("homing failed: first limit not found\r\n");
+        UartPrint("homing failed: lower limit not found\r\n");
         return;
     }
 
-    firstLimitIsLower = (LowerLimitPressed() != 0U) ? 1U : 0U;
     PrintSwitches();
-    UartPrint(firstLimitIsLower != 0U
-                  ? "homing: lower limit found; reversing\r\n"
-                  : "homing: upper limit found; reversing\r\n");
-    SetDirection(oppositeDir);
-    while ((firstLimitIsLower != 0U ? UpperLimitPressed() : LowerLimitPressed()) == 0U &&
-           spanSteps < MAX_HOMING_STEPS)
+    UartPrint("homing: lower limit found; reversing\r\n");
+
+    UartPrint("homing: moving to upper limit\r\n");
+    SetDirection(DIR_UP);
+    while (UpperLimitPressed() == 0U && spanSteps < MAX_HOMING_STEPS)
     {
-        if (StepOne(HOMING_SPEED_HZ, firstLimitIsLower, firstLimitIsLower == 0U) == 0U)
+        if (StepOne(HOMING_SPEED_HZ, 1U, 0U) == 0U)
         {
             break;
         }
         spanSteps++;
-        g_positionSteps += (oppositeDir == 0U) ? 1 : -1;
+        g_positionSteps += (DIR_UP == 0U) ? 1 : -1;
         ReportSwitchChanges();
     }
 
-    if ((firstLimitIsLower != 0U ? UpperLimitPressed() : LowerLimitPressed()) == 0U)
+    if (UpperLimitPressed() == 0U)
     {
-        UartPrint("homing failed: opposite limit not found\r\n");
+        UartPrint("homing failed: upper limit not found\r\n");
         return;
     }
 
@@ -445,18 +442,20 @@ static void Home(uint8_t lowerDir)
         UartPrint(calibrationMessage);
     }
     PrintSwitches();
+
     UartPrint("homing: moving to midpoint\r\n");
-    SetDirection(firstLimitIsLower != 0U ? lowerDir : oppositeDir);
+    SetDirection(DIR_DOWN);
     for (uint32_t i = 0U; i < spanSteps / 2U; i++)
     {
-        if (StepOne(HOMING_SPEED_HZ, firstLimitIsLower == 0U, firstLimitIsLower != 0U) == 0U)
+        if (StepOne(HOMING_SPEED_HZ, 0U, 1U) == 0U)
         {
-            UartPrint("homing failed: unexpected limit\r\n");
+            UartPrint("homing failed: unexpected lower limit during midpoint move\r\n");
             return;
         }
-        g_positionSteps += (firstLimitIsLower != 0U ? lowerDir : oppositeDir) == 0U ? 1 : -1;
+        g_positionSteps += (DIR_DOWN == 0U) ? 1 : -1;
         ReportSwitchChanges();
     }
+
     g_travelSteps = spanSteps;
     g_positionSteps = 0;
     g_homed = 1U;
@@ -681,7 +680,7 @@ static void PrintHelp(void)
     UartPrint("  scale <steps/mm> - set pivot position conversion\r\n");
     UartPrint("  stop            - stop live output or recording\r\n");
     UartPrint("  jog <dir> <steps> - move a bounded number of steps\r\n");
-    UartPrint("  home <dir>      - find both limits and move to midpoint\r\n");
+    UartPrint("  home            - find both limits and move to midpoint\r\n");
     UartPrint("  sine <amp> <hz> - start sine motion after homing\r\n");
     UartPrint("  sine stop       - stop sine motion\r\n");
     UartPrint("  parametric <amp_mm> <phi_deg> - drive pivot at 2x pendulum phase rate\r\n");
@@ -999,15 +998,9 @@ static void ProcessLine(char *line)
         return;
     }
 
-    if (strncmp(line, "home ", 5) == 0)
+    if (strcmp(line, "home") == 0)
     {
-        value = strtoul(line + 5, NULL, 10);
-        if (value > 1U)
-        {
-            UartPrint("usage: home <lower direction 0|1>\r\n");
-            return;
-        }
-        Home((uint8_t)value);
+        Home();
         return;
     }
 
