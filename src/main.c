@@ -173,6 +173,7 @@ void HAL_UARTEx_RxEventCallback(UART_HandleTypeDef *huart, uint16_t Size)
         {
             Error_Handler();
         }
+        __HAL_DMA_DISABLE_IT(huart2.hdmarx, DMA_IT_HT);
     }
 }
 
@@ -897,8 +898,8 @@ static void ProcessLine(char *line)
         char debugMsg[200];
         size_t offset = 0U;
         offset += snprintf(debugMsg + offset, sizeof(debugMsg) - offset,
-                           "RX DEBUG len=%zu bytes=",
-                           length);
+                           "RX DEBUG len=%lu bytes=",
+                           (unsigned long)length);
         for (size_t i = 0U; i < length; i++)
         {
             offset += snprintf(debugMsg + offset, sizeof(debugMsg) - offset,
@@ -1361,6 +1362,7 @@ static void I2C1_Init(void)
 static void USART2_Init(void)
 {
     __HAL_RCC_USART2_CLK_ENABLE();
+    __HAL_RCC_DMAMUX1_CLK_ENABLE();
     __HAL_RCC_DMA1_CLK_ENABLE();
 
     HAL_NVIC_SetPriority(USART2_IRQn, 0U, 0U);
@@ -1400,12 +1402,12 @@ static void USART2_Init(void)
     }
 
     __HAL_LINKDMA(&huart2, hdmarx, hdma_usart2_rx);
-    __HAL_DMA_DISABLE_IT(huart2.hdmarx, DMA_IT_HT);
 
     if (HAL_UARTEx_ReceiveToIdle_DMA(&huart2, g_uartDmaRxBuf, sizeof(g_uartDmaRxBuf)) != HAL_OK)
     {
         Error_Handler();
     }
+    __HAL_DMA_DISABLE_IT(huart2.hdmarx, DMA_IT_HT);
 }
 
 static void Error_Handler(void)
