@@ -83,12 +83,13 @@ static void UartPrint(const char *text);
 static void Error_Handler(void);
 
 static UART_HandleTypeDef huart2;
+static DMA_HandleTypeDef hdma_usart2_rx;
 static I2C_HandleTypeDef hi2c1;
 static char g_rxBuf[UART_RX_BUF_SIZE];
 static uint32_t g_rxIdx = 0U;
 static uint8_t g_rxLineTooLong = 0U;
 static uint8_t g_lastRxWasCr = 0U;
-static volatile uint8_t g_uartRxByte = 0U;
+static uint8_t g_uartDmaRxBuf[64U];
 static volatile uint8_t g_uartRxRing[UART_RX_RING_SIZE];
 static volatile uint16_t g_uartRxHead = 0U;
 static volatile uint16_t g_uartRxTail = 0U;
@@ -146,22 +147,32 @@ void USART2_IRQHandler(void)
     HAL_UART_IRQHandler(&huart2);
 }
 
-void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
+void DMA1_Channel6_IRQHandler(void)
+{
+    HAL_DMA_IRQHandler(&hdma_usart2_rx);
+}
+
+void HAL_UARTEx_RxEventCallback(UART_HandleTypeDef *huart, uint16_t Size)
 {
     if (huart->Instance == USART2)
     {
-        uint16_t nextHead = (uint16_t)((g_uartRxHead + 1U) % UART_RX_RING_SIZE);
-        if (nextHead != g_uartRxTail)
+        for (uint16_t i = 0U; i < Size; i++)
         {
-            g_uartRxRing[g_uartRxHead] = g_uartRxByte;
+            uint16_t nextHead = (uint16_t)((g_uartRxHead + 1U) % UART_RX_RING_SIZE);
+            if (nextHead == g_uartRxTail)
+            {
+                g_uartRxOverflow = 1U;
+                g_uartRxOverflowCount++;
+                break;
+            }
+            g_uartRxRing[g_uartRxHead] = g_uartDmaRxBuf[i];
             g_uartRxHead = nextHead;
         }
-        else
+
+        if (HAL_UARTEx_ReceiveToIdle_DMA(&huart2, g_uartDmaRxBuf, sizeof(g_uartDmaRxBuf)) != HAL_OK)
         {
-            g_uartRxOverflow = 1U;
-            g_uartRxOverflowCount++;
+            Error_Handler();
         }
-        HAL_UART_Receive_IT(&huart2, (uint8_t *)&g_uartRxByte, 1U);
     }
 }
 
@@ -1350,9 +1361,12 @@ static void I2C1_Init(void)
 static void USART2_Init(void)
 {
     __HAL_RCC_USART2_CLK_ENABLE();
+    __HAL_RCC_DMA1_CLK_ENABLE();
 
     HAL_NVIC_SetPriority(USART2_IRQn, 0U, 0U);
     HAL_NVIC_EnableIRQ(USART2_IRQn);
+    HAL_NVIC_SetPriority(DMA1_Channel6_IRQn, 0U, 0U);
+    HAL_NVIC_EnableIRQ(DMA1_Channel6_IRQn);
 
     huart2.Instance = USART2;
     huart2.Init.BaudRate = UART_BAUDRATE;
@@ -1370,7 +1384,25 @@ static void USART2_Init(void)
         Error_Handler();
     }
 
-    if (HAL_UART_Receive_IT(&huart2, (uint8_t *)&g_uartRxByte, 1U) != HAL_OK)
+    hdma_usart2_rx.Instance = DMA1_Channel6;
+    hdma_usart2_rx.Init.Request = DMA_REQUEST_USART2_RX;
+    hdma_usart2_rx.Init.Direction = DMA_PERIPH_TO_MEMORY;
+    hdma_usart2_rx.Init.PeriphInc = DMA_PINC_DISABLE;
+    hdma_usart2_rx.Init.MemInc = DMA_MINC_ENABLE;
+    hdma_usart2_rx.Init.PeriphDataAlignment = DMA_PDATAALIGN_BYTE;
+    hdma_usart2_rx.Init.MemDataAlignment = DMA_MDATAALIGN_BYTE;
+    hdma_usart2_rx.Init.Mode = DMA_NORMAL;
+    hdma_usart2_rx.Init.Priority = DMA_PRIORITY_LOW;
+
+    if (HAL_DMA_Init(&hdma_usart2_rx) != HAL_OK)
+    {
+        Error_Handler();
+    }
+
+    __HAL_LINKDMA(&huart2, hdmarx, hdma_usart2_rx);
+    __HAL_DMA_DISABLE_IT(huart2.hdmarx, DMA_IT_HT);
+
+    if (HAL_UARTEx_ReceiveToIdle_DMA(&huart2, g_uartDmaRxBuf, sizeof(g_uartDmaRxBuf)) != HAL_OK)
     {
         Error_Handler();
     }
