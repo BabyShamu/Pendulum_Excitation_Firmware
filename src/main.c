@@ -40,7 +40,6 @@
 #define DEFAULT_ACCEL_HZPS  900U
 #define CONTROL_PERIOD_MS   10U
 #define MAX_HOMING_STEPS    20000U
-#define CALIBRATED_TRAVEL_MM 170.0f
 #define JOG_SPEED_HZ        150U
 #define HOMING_SPEED_HZ     1100U
 #define PARAMETRIC_SPEED_HZ 4000U
@@ -51,7 +50,7 @@
 #define PARAMETRIC_AGC_MIN_PEAK       1e-6f
 #define PARAMETRIC_SLEW_MM_PER_SEC    250.0f
 #define LIVE_PERIOD_MS      20U
-#define DEFAULT_STEPS_PER_MM 1.0f
+#define DEFAULT_STEPS_PER_MM 40.0f
 #define MAX_SINE_FREQUENCY_HZ 10.0f
 #define PI_F                3.14159265358979323846f
 
@@ -430,15 +429,14 @@ static void Home(void)
         return;
     }
 
-    if (spanSteps > 0U)
     {
-        g_stepsPerMm = (float)spanSteps / CALIBRATED_TRAVEL_MM;
-    }
-    {
-        char calibrationMessage[100];
+        float travelMm = (float)spanSteps / g_stepsPerMm;
+        char calibrationMessage[120];
         snprintf(calibrationMessage, sizeof(calibrationMessage),
-                 "homing calibration: span=%lu steps scale=%.3f steps/mm\r\n",
-                 (unsigned long)spanSteps, (double)g_stepsPerMm);
+                 "homing calibration: span=%lu steps scale=%.3f steps/mm travel=%.3f mm\r\n",
+                 (unsigned long)spanSteps,
+                 (double)g_stepsPerMm,
+                 (double)travelMm);
         UartPrint(calibrationMessage);
     }
     PrintSwitches();
