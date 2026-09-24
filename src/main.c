@@ -881,6 +881,24 @@ static void ProcessLine(char *line)
         return;
     }
 
+    // TEMPORARY UART/PARSER DEBUG
+    {
+        char debugMsg[200];
+        size_t offset = 0U;
+        offset += snprintf(debugMsg + offset, sizeof(debugMsg) - offset,
+                           "RX DEBUG len=%zu bytes=",
+                           length);
+        for (size_t i = 0U; i < length; i++)
+        {
+            offset += snprintf(debugMsg + offset, sizeof(debugMsg) - offset,
+                               "%s%02X",
+                               (i == 0U) ? "" : " ",
+                               (unsigned int)((unsigned char)line[i]));
+        }
+        offset += snprintf(debugMsg + offset, sizeof(debugMsg) - offset, "\r\n");
+        UartPrint(debugMsg);
+    }
+
     for (size_t i = 0U; i < length; i++)
     {
         if (line[i] >= 'A' && line[i] <= 'Z')
@@ -1011,7 +1029,8 @@ static void ProcessLine(char *line)
             arguments++;
         }
 
-        char *end;
+        char *endAmp;
+        char *endFreq;
         float amplitudeMm;
         float frequency;
 
@@ -1030,8 +1049,19 @@ static void ProcessLine(char *line)
             return;
         }
 
-        amplitudeMm = strtof(arguments, &end);
-        frequency = strtof(end, NULL);
+        // TEMPORARY UART/PARSER DEBUG
+        amplitudeMm = strtof(arguments, &endAmp);
+        frequency = strtof(endAmp, &endFreq);
+        {
+            char debugMsg[160];
+            snprintf(debugMsg, sizeof(debugMsg),
+                     "SINE DEBUG amp=%.3f freq=%.3f remAmp='%s' remFreq='%s'\r\n",
+                     (double)amplitudeMm,
+                     (double)frequency,
+                     endAmp,
+                     endFreq);
+            UartPrint(debugMsg);
+        }
 
         if (g_homed == 0U)
         {
