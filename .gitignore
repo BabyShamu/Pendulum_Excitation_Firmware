@@ -1,0 +1,41 @@
+# ============================================
+# Pendulum Excitation Firmware - .gitignore
+# ============================================
+
+# PlatformIO build files
+.pio/
+*.code-workspace
+
+# VS Code local settings
+.vscode/
+
+
+# Compiled / generated files
+*.o
+*.bin
+*.elf
+*.hex
+*.map
+
+# ============================================
+# Experimental recordings
+# Keep the recordings folder locally,
+# but do not upload recorded data to GitHub
+# ============================================
+recordings/*.csv
+
+# Python cache / virtual environments
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Windows temporary files
+Thumbs.db
+desktop.ini
+
+# General temporary files
+*.log
+*.tmp
+*.bak
+*~
