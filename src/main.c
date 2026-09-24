@@ -118,7 +118,7 @@ static float g_parametricThetaSqDc = 0.0f;
 static float g_parametricPrevAcSignal = 0.0f;
 static float g_parametricCosPeak = 0.0f;
 static float g_parametricSinPeak = 0.0f;
-static uint8_t g_liveTelemetry = 1U;
+static uint8_t g_liveTelemetry = 0U;
 static uint8_t g_recording = 0U;
 static uint8_t g_suppressPromptOnce = 0U;
 static uint32_t g_lastLiveMs = 0U;
@@ -669,7 +669,6 @@ static void PrintHelp(void)
     UartPrint("  help            - show commands\r\n");
     UartPrint("  status          - print current settings\r\n");
     UartPrint("  switches        - show upper/lower switch states\r\n");
-    UartPrint("  switch          - same as switches\r\n");
     UartPrint("  angle           - read AS5600 raw angle (0..4095)\r\n");
     UartPrint("  zero            - set current pendulum angle to 0 degrees\r\n");
     UartPrint("  live 0|1        - stop/start angle and position stream\r\n");
@@ -679,7 +678,6 @@ static void PrintHelp(void)
     UartPrint("  jog <dir> <steps> - move a bounded number of steps\r\n");
     UartPrint("  home <dir>      - find both limits and move to midpoint\r\n");
     UartPrint("  sine <amp> <hz> - start sine motion after homing\r\n");
-    UartPrint("  sin <amp> <hz>  - same as sine\r\n");
     UartPrint("  sine stop       - stop sine motion\r\n");
     UartPrint("  parametric <amp_mm> <phi_deg> - drive pivot at 2x pendulum phase rate\r\n");
     UartPrint("  parametric stop - stop parametric drive\r\n");
@@ -975,7 +973,7 @@ static void ProcessLine(char *line)
         return;
     }
 
-    if (strncmp(line, "switch", 6) == 0)
+    if (strcmp(line, "switches") == 0)
     {
         PrintSwitches();
         return;
