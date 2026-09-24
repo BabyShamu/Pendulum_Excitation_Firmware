@@ -109,7 +109,7 @@ static uint8_t g_homed = 0U;
 static uint8_t g_sineRunning = 0U;
 static uint32_t g_travelSteps = 0U;
 static int32_t g_positionSteps = 0;
-static uint32_t g_sineAmplitude = 0U;
+static float g_sineAmplitudeMm = 0.0f;
 static float g_sineFrequencyHz = 0.0f;
 static uint32_t g_sineStartMs = 0U;
 static uint8_t g_parametricRunning = 0U;
@@ -485,15 +485,15 @@ static void UpdateSine(void)
     uint32_t elapsedMs = HAL_GetTick() - g_sineStartMs;
     float elapsedSeconds = (float)elapsedMs / 1000.0f;
     float phase = 2.0f * PI_F * g_sineFrequencyHz * elapsedSeconds;
-    float targetFloat = sinf(phase) * (float)g_sineAmplitude;
-    int32_t targetSteps = (targetFloat >= 0.0f) ?
-        (int32_t)(targetFloat + 0.5f) : (int32_t)(targetFloat - 0.5f);
+    float targetMm = g_sineAmplitudeMm * sinf(phase);
+    int32_t targetSteps = (int32_t)lroundf(targetMm * g_stepsPerMm);
 
     while (g_positionSteps != targetSteps)
     {
         uint8_t direction = (targetSteps > g_positionSteps) ? 0U : 1U;
+        float amplitudeSteps = g_sineAmplitudeMm * g_stepsPerMm;
         uint32_t speedHz = (uint32_t)(2.0f * PI_F * g_sineFrequencyHz *
-                                      (float)g_sineAmplitude) + 20U;
+                                      amplitudeSteps) + 20U;
 
         if (speedHz < JOG_SPEED_HZ)
         {
@@ -679,7 +679,7 @@ static void PrintHelp(void)
     UartPrint("  stop            - stop live output or recording\r\n");
     UartPrint("  jog <dir> <steps> - move a bounded number of steps\r\n");
     UartPrint("  home            - find both limits and move to midpoint\r\n");
-    UartPrint("  sine <amp> <hz> - start sine motion after homing\r\n");
+    UartPrint("  sine <amp_mm> <hz> - start sinusoidal pivot motion after homing\r\n");
     UartPrint("  sine stop       - stop sine motion\r\n");
     UartPrint("  parametric <amp_mm> <phi_deg> - drive pivot at 2x pendulum phase rate\r\n");
     UartPrint("  parametric stop - stop parametric drive\r\n");
@@ -707,7 +707,7 @@ static void PrintStatus(void)
     snprintf(
         msg,
         sizeof(msg),
-        "status: run=%u homed=%u sine=%u parametric=%u span=%lu position=%ld scale=%.3f amplitude=%lu frequency=%.3f amp_mm=%.2f phi_deg=%.1f\r\n",
+        "status: run=%u homed=%u sine=%u parametric=%u span=%lu position=%ld scale=%.3f sine_amp_mm=%.3f frequency=%.3f amp_mm=%.2f phi_deg=%.1f\r\n",
         (unsigned int)g_run,
         (unsigned int)g_homed,
         (unsigned int)g_sineRunning,
@@ -715,7 +715,7 @@ static void PrintStatus(void)
         (unsigned long)g_travelSteps,
         (long)g_positionSteps,
         (double)g_stepsPerMm,
-        (unsigned long)g_sineAmplitude,
+        (double)g_sineAmplitudeMm,
         (double)g_sineFrequencyHz,
         (double)g_parametricAmplitudeMm,
         (double)(g_parametricPhiRad * 180.0f / PI_F));
@@ -1012,7 +1012,7 @@ static void ProcessLine(char *line)
         }
 
         char *end;
-        uint32_t amplitude;
+        float amplitudeMm;
         float frequency;
 
         if (strcmp(arguments, "stop") == 0)
@@ -1030,7 +1030,7 @@ static void ProcessLine(char *line)
             return;
         }
 
-        amplitude = strtoul(arguments, &end, 10);
+        amplitudeMm = strtof(arguments, &end);
         frequency = strtof(end, NULL);
 
         if (g_homed == 0U)
@@ -1038,9 +1038,9 @@ static void ProcessLine(char *line)
             UartPrint("sine rejected: run home first\r\n");
             return;
         }
-        if (amplitude == 0U || (amplitude * 2U) >= g_travelSteps)
+        if (amplitudeMm <= 0.0f || amplitudeMm >= ((float)g_travelSteps / (2.0f * g_stepsPerMm)))
         {
-            UartPrint("sine rejected: amplitude must be less than half the travel\r\n");
+            UartPrint("sine rejected: amplitude must be >0 and < half the travel\r\n");
             return;
         }
         if (frequency <= 0.0f || frequency > MAX_SINE_FREQUENCY_HZ)
@@ -1049,7 +1049,7 @@ static void ProcessLine(char *line)
             return;
         }
 
-        g_sineAmplitude = amplitude;
+        g_sineAmplitudeMm = amplitudeMm;
         g_sineFrequencyHz = frequency;
         g_positionSteps = 0;
         g_sineStartMs = HAL_GetTick();
