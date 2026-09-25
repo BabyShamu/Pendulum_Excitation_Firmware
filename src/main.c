@@ -57,6 +57,18 @@
 #define PARAMETRIC_TEST_RATE_DELTA_RAD    0.1f
 #define PARAMETRIC_TEST_PINION_RADIUS_MM 10.0f
 #define PARAMETRIC_TEST_STEPS_PER_MM     40.0f
+#define CLOSED_LOOP_MAX_MM               7.5f
+#define CLOSED_LOOP_COMMAND_SIGN        (-1.0f)
+#define CLOSED_LOOP_TRAVEL_MARGIN_MM     2.0f
+#define CLOSED_LOOP_MAX_STEP_HZ          6000U
+#define CLOSED_LOOP_STEP_PULSE_US        5U
+#define CLOSED_LOOP_DIR_SETUP_US         10U
+#define CLOSED_LOOP_ANGLE_FAILURE_LIMIT  4U
+#define CLOSED_LOOP_PHASE_IDLE           0U
+#define CLOSED_LOOP_PHASE_DIR_SETUP      1U
+#define CLOSED_LOOP_PHASE_STEP_HIGH      2U
+#define CLOSED_LOOP_PHASE_INTERSTEP      3U
+#define LIMIT_DEBOUNCE_MS                8U
 #define PARAMETRIC_ANGLE_TIME_CONST_S 0.05f
 #define PARAMETRIC_DC_BLOCK_TIME_CONST_S 2.0f
 #define PARAMETRIC_AGC_TIME_CONST_S   1.0f
@@ -70,9 +82,17 @@
 static void GPIO_Init(void);
 static void USART2_Init(void);
 static void I2C1_Init(void);
+static void ClosedLoopStepTimerInit(void);
+static void ClosedLoopActuatorKick(void);
+static void ClosedLoopActuatorStop(void);
+static void ClosedLoopActuatorOnTimer(void);
 static GPIO_PinState ActiveState(uint8_t on);
 static uint8_t UpperLimitPressed(void);
 static uint8_t LowerLimitPressed(void);
+static void UpdateLimitDebounce(void);
+static uint8_t UpperLimitPressedDebounced(void);
+static uint8_t LowerLimitPressedDebounced(void);
+static uint8_t WaitForDebouncedLimit(uint8_t upperLimit);
 static HAL_StatusTypeDef AS5600_ReadAngle(uint16_t *angle);
 static void SetDirection(uint8_t dir);
 static uint8_t StepOne(uint32_t hz, uint8_t stopUpper, uint8_t stopLower);
@@ -82,6 +102,8 @@ static void ReturnToCenter(void);
 static void UpdateSine(void);
 static void UpdateParametric(void);
 static void UpdateParametricTest(void);
+static void UpdateParametricClosedLoop(void);
+static void ReportClosedLoopFault(void);
 static float ParametricTestDcBlockApprox(float input, float dt, uint8_t reset);
 static float ParametricTestAgc(float input, float *logGain);
 static void DelayUs(uint32_t us);
@@ -121,11 +143,11 @@ static uint32_t g_targetHz = DEFAULT_TARGET_HZ;
 static uint32_t g_currentHz = 50U;
 static uint32_t g_accelHzPerSec = DEFAULT_ACCEL_HZPS;
 static uint8_t g_run = 0U;
-static uint8_t g_dir = 0U;
+static volatile uint8_t g_dir = 0U;
 static uint8_t g_homed = 0U;
 static uint8_t g_sineRunning = 0U;
 static uint32_t g_travelSteps = 0U;
-static int32_t g_positionSteps = 0;
+static volatile int32_t g_positionSteps = 0;
 static float g_sineAmplitudeMm = 0.0f;
 static float g_sineFrequencyHz = 0.0f;
 static uint32_t g_sineStartMs = 0U;
@@ -151,6 +173,28 @@ static float g_parametricTestDirectAgcLogGain = 0.0f;
 static float g_parametricTestQuadAgcLogGain = 0.0f;
 static float g_parametricTestRateLimitedRad = 0.0f;
 static uint32_t g_parametricTestSampleCount = 0U;
+static volatile uint8_t g_parametricClosedLoopRunning = 0U;
+static volatile int32_t g_parametricClosedLoopTargetSteps = 0;
+static volatile uint8_t g_closedLoopActuatorPhase = 0U;
+static volatile uint8_t g_closedLoopFault = 0U;
+static volatile uint8_t g_closedLoopFaultPending = 0U;
+static volatile uint32_t g_closedLoopKickCount = 0U;
+static volatile uint32_t g_closedLoopTimerArmCount = 0U;
+static volatile uint32_t g_tim6IrqCount = 0U;
+static volatile uint32_t g_closedLoopActuatorCallbackCount = 0U;
+static volatile uint32_t g_closedLoopStepHighCount = 0U;
+static volatile uint32_t g_closedLoopStepCompleteCount = 0U;
+static uint8_t g_parametricClosedLoopFilterValid = 0U;
+static uint32_t g_parametricClosedLoopStartMs = 0U;
+static uint32_t g_parametricClosedLoopNextSampleMs = 0U;
+static uint32_t g_parametricClosedLoopSampleCount = 0U;
+static uint8_t g_parametricClosedLoopAngleFailureCount = 0U;
+static float g_parametricClosedLoopDcEstimate = 0.0f;
+static float g_parametricClosedLoopPrevDcBlocked = 0.0f;
+static float g_parametricClosedLoopQuadFiltered = 0.0f;
+static float g_parametricClosedLoopDirectAgcLogGain = 0.0f;
+static float g_parametricClosedLoopQuadAgcLogGain = 0.0f;
+static float g_parametricClosedLoopRateLimitedRad = 0.0f;
 static uint8_t g_liveTelemetry = 0U;
 static uint8_t g_recording = 0U;
 static uint8_t g_suppressPromptOnce = 0U;
@@ -163,6 +207,13 @@ static uint8_t g_angleZeroValid = 0U;
 static uint8_t g_switchStatusValid = 0U;
 static uint8_t g_lastUpperLimit = 0U;
 static uint8_t g_lastLowerLimit = 0U;
+static uint8_t g_limitDebounceInitialized = 0U;
+static uint8_t g_upperLimitCandidate = 0U;
+static uint8_t g_lowerLimitCandidate = 0U;
+static uint8_t g_upperLimitDebounced = 0U;
+static uint8_t g_lowerLimitDebounced = 0U;
+static uint32_t g_upperLimitCandidateSinceMs = 0U;
+static uint32_t g_lowerLimitCandidateSinceMs = 0U;
 
 void SysTick_Handler(void)
 {
@@ -177,6 +228,16 @@ void USART2_IRQHandler(void)
 void DMA1_Channel6_IRQHandler(void)
 {
     HAL_DMA_IRQHandler(&hdma_usart2_rx);
+}
+
+void TIM6_DAC_IRQHandler(void)
+{
+    g_tim6IrqCount++;
+    if ((TIM6->SR & TIM_SR_UIF) != 0U)
+    {
+        TIM6->SR = 0U;
+        ClosedLoopActuatorOnTimer();
+    }
 }
 
 void HAL_UARTEx_RxEventCallback(UART_HandleTypeDef *huart, uint16_t Size)
@@ -236,6 +297,7 @@ int main(void)
 {
     HAL_Init();
     GPIO_Init();
+    ClosedLoopStepTimerInit();
     USART2_Init();
     UartPrint("\r\nStepper control starting\r\n");
     I2C1_Init();
@@ -256,7 +318,8 @@ int main(void)
 
     while (1)
     {
-        if (g_parametricTestRunning == 0U)
+        ReportClosedLoopFault();
+        if (g_parametricTestRunning == 0U && g_parametricClosedLoopRunning == 0U)
         {
             ReportSwitchChanges();
         }
@@ -280,7 +343,11 @@ int main(void)
         PollUart();
         PrintLiveTelemetry();
 
-        if (g_parametricTestRunning != 0U)
+        if (g_parametricClosedLoopRunning != 0U)
+        {
+            UpdateParametricClosedLoop();
+        }
+        else if (g_parametricTestRunning != 0U)
         {
             UpdateParametricTest();
         }
@@ -340,6 +407,73 @@ static uint8_t UpperLimitPressed(void)
 static uint8_t LowerLimitPressed(void)
 {
     return (HAL_GPIO_ReadPin(LOWER_LIMIT_PORT, LOWER_LIMIT_PIN) == GPIO_PIN_RESET) ? 1U : 0U;
+}
+
+static void UpdateLimitDebounce(void)
+{
+    uint32_t now = HAL_GetTick();
+    uint8_t upperRaw = UpperLimitPressed();
+    uint8_t lowerRaw = LowerLimitPressed();
+
+    if (g_limitDebounceInitialized == 0U)
+    {
+        g_upperLimitCandidate = upperRaw;
+        g_lowerLimitCandidate = lowerRaw;
+        g_upperLimitDebounced = upperRaw;
+        g_lowerLimitDebounced = lowerRaw;
+        g_upperLimitCandidateSinceMs = now;
+        g_lowerLimitCandidateSinceMs = now;
+        g_limitDebounceInitialized = 1U;
+        return;
+    }
+
+    if (upperRaw != g_upperLimitCandidate)
+    {
+        g_upperLimitCandidate = upperRaw;
+        g_upperLimitCandidateSinceMs = now;
+    }
+    else if (upperRaw != g_upperLimitDebounced &&
+             (now - g_upperLimitCandidateSinceMs) >= LIMIT_DEBOUNCE_MS)
+    {
+        g_upperLimitDebounced = upperRaw;
+    }
+
+    if (lowerRaw != g_lowerLimitCandidate)
+    {
+        g_lowerLimitCandidate = lowerRaw;
+        g_lowerLimitCandidateSinceMs = now;
+    }
+    else if (lowerRaw != g_lowerLimitDebounced &&
+             (now - g_lowerLimitCandidateSinceMs) >= LIMIT_DEBOUNCE_MS)
+    {
+        g_lowerLimitDebounced = lowerRaw;
+    }
+}
+
+static uint8_t UpperLimitPressedDebounced(void)
+{
+    UpdateLimitDebounce();
+    return g_upperLimitDebounced;
+}
+
+static uint8_t LowerLimitPressedDebounced(void)
+{
+    UpdateLimitDebounce();
+    return g_lowerLimitDebounced;
+}
+
+static uint8_t WaitForDebouncedLimit(uint8_t upperLimit)
+{
+    while ((upperLimit != 0U) ? (UpperLimitPressed() != 0U) : (LowerLimitPressed() != 0U))
+    {
+        ReportSwitchChanges();
+        if ((upperLimit != 0U) ? (UpperLimitPressedDebounced() != 0U) :
+                                 (LowerLimitPressedDebounced() != 0U))
+        {
+            return 1U;
+        }
+    }
+    return 0U;
 }
 
 static HAL_StatusTypeDef AS5600_ReadAngle(uint16_t *angle)
@@ -406,8 +540,164 @@ static uint8_t StepOne(uint32_t hz, uint8_t stopUpper, uint8_t stopLower)
     return 1U;
 }
 
+static void ClosedLoopTimerScheduleUs(uint32_t delayUs)
+{
+    if (delayUs < 2U)
+    {
+        delayUs = 2U;
+    }
+
+    TIM6->CR1 &= ~TIM_CR1_CEN;
+    TIM6->ARR = delayUs - 1U;
+    TIM6->CNT = 0U;
+    TIM6->EGR = TIM_EGR_UG;
+    TIM6->SR = 0U;
+    TIM6->CR1 |= TIM_CR1_CEN;
+    g_closedLoopTimerArmCount++;
+}
+
+static void ClosedLoopActuatorStop(void)
+{
+    uint32_t primask = __get_PRIMASK();
+    __disable_irq();
+    TIM6->CR1 &= ~TIM_CR1_CEN;
+    TIM6->SR = 0U;
+    HAL_NVIC_ClearPendingIRQ(TIM6_DAC_IRQn);
+    g_closedLoopActuatorPhase = CLOSED_LOOP_PHASE_IDLE;
+    HAL_GPIO_WritePin(STEP_PORT, STEP_PIN, ActiveState(0U));
+    if (primask == 0U)
+    {
+        __enable_irq();
+    }
+}
+
+static void ClosedLoopActuatorFault(uint8_t fault)
+{
+    g_parametricClosedLoopRunning = 0U;
+    g_closedLoopFault = fault;
+    g_closedLoopFaultPending = 1U;
+    TIM6->CR1 &= ~TIM_CR1_CEN;
+    TIM6->SR = 0U;
+    g_closedLoopActuatorPhase = CLOSED_LOOP_PHASE_IDLE;
+    HAL_GPIO_WritePin(STEP_PORT, STEP_PIN, ActiveState(0U));
+}
+
+static void ClosedLoopActuatorOnTimer(void)
+{
+    int32_t errorSteps;
+    uint8_t desiredDirection;
+
+    g_closedLoopActuatorCallbackCount++;
+
+    if (g_parametricClosedLoopRunning == 0U)
+    {
+        ClosedLoopActuatorStop();
+        return;
+    }
+
+    if (g_closedLoopActuatorPhase == CLOSED_LOOP_PHASE_STEP_HIGH)
+    {
+        HAL_GPIO_WritePin(STEP_PORT, STEP_PIN, ActiveState(0U));
+        g_positionSteps += (g_dir == DIR_UP) ? 1 : -1;
+        g_closedLoopStepCompleteCount++;
+        g_closedLoopActuatorPhase = CLOSED_LOOP_PHASE_INTERSTEP;
+        ClosedLoopTimerScheduleUs((1000000U / CLOSED_LOOP_MAX_STEP_HZ) - CLOSED_LOOP_STEP_PULSE_US);
+        return;
+    }
+
+    if (g_closedLoopActuatorPhase == CLOSED_LOOP_PHASE_DIR_SETUP)
+    {
+        // The direction pin has now been stable for CLOSED_LOOP_DIR_SETUP_US;
+        // only after this timer expiry may the STEP output rise.
+        g_closedLoopActuatorPhase = CLOSED_LOOP_PHASE_IDLE;
+    }
+    else if (g_closedLoopActuatorPhase == CLOSED_LOOP_PHASE_INTERSTEP)
+    {
+        g_closedLoopActuatorPhase = CLOSED_LOOP_PHASE_IDLE;
+    }
+
+    errorSteps = g_parametricClosedLoopTargetSteps - g_positionSteps;
+    if (errorSteps == 0)
+    {
+        g_closedLoopActuatorPhase = CLOSED_LOOP_PHASE_IDLE;
+        return;
+    }
+
+    desiredDirection = (errorSteps > 0) ? DIR_UP : DIR_DOWN;
+    if (desiredDirection == DIR_UP && UpperLimitPressed() != 0U)
+    {
+        ClosedLoopActuatorFault(1U);
+        return;
+    }
+    if (desiredDirection == DIR_DOWN && LowerLimitPressed() != 0U)
+    {
+        ClosedLoopActuatorFault(2U);
+        return;
+    }
+
+    if (g_dir != desiredDirection)
+    {
+        g_dir = desiredDirection;
+        HAL_GPIO_WritePin(DIR_PORT, DIR_PIN, ActiveState(g_dir));
+        g_closedLoopActuatorPhase = CLOSED_LOOP_PHASE_DIR_SETUP;
+        ClosedLoopTimerScheduleUs(CLOSED_LOOP_DIR_SETUP_US);
+        return;
+    }
+
+    HAL_GPIO_WritePin(STEP_PORT, STEP_PIN, ActiveState(1U));
+    g_closedLoopStepHighCount++;
+    g_closedLoopActuatorPhase = CLOSED_LOOP_PHASE_STEP_HIGH;
+    ClosedLoopTimerScheduleUs(CLOSED_LOOP_STEP_PULSE_US);
+}
+
+static void ClosedLoopActuatorKick(void)
+{
+    uint32_t primask = __get_PRIMASK();
+
+    g_closedLoopKickCount++;
+    __disable_irq();
+    if (g_parametricClosedLoopRunning != 0U &&
+        g_closedLoopActuatorPhase == CLOSED_LOOP_PHASE_IDLE)
+    {
+        g_closedLoopActuatorPhase = CLOSED_LOOP_PHASE_INTERSTEP;
+        ClosedLoopTimerScheduleUs(1U);
+    }
+    if (primask == 0U)
+    {
+        __enable_irq();
+    }
+}
+
+static void ClosedLoopStepTimerInit(void)
+{
+    RCC_ClkInitTypeDef clockConfig;
+    uint32_t flashLatency;
+    uint32_t timerClockHz;
+
+    __HAL_RCC_TIM6_CLK_ENABLE();
+    HAL_RCC_GetClockConfig(&clockConfig, &flashLatency);
+    timerClockHz = HAL_RCC_GetPCLK1Freq();
+    if (clockConfig.APB1CLKDivider != RCC_HCLK_DIV1)
+    {
+        timerClockHz *= 2U;
+    }
+
+    TIM6->CR1 = TIM_CR1_OPM | TIM_CR1_URS;
+    TIM6->PSC = (timerClockHz / 1000000U) - 1U;
+    TIM6->ARR = 1U;
+    TIM6->EGR = TIM_EGR_UG;
+    TIM6->SR = 0U;
+    TIM6->DIER = TIM_DIER_UIE;
+
+    HAL_NVIC_SetPriority(TIM6_DAC_IRQn, 1U, 0U);
+    HAL_NVIC_EnableIRQ(TIM6_DAC_IRQn);
+}
+
 static void Jog(uint8_t dir, uint32_t steps)
 {
+    g_parametricClosedLoopRunning = 0U;
+    ClosedLoopActuatorStop();
+    g_parametricTestRunning = 0U;
     g_sineRunning = 0U;
     g_parametricRunning = 0U;
     SetDirection(dir);
@@ -430,46 +720,64 @@ static void Home(void)
     uint32_t spanSteps = 0U;
 
     g_homed = 0U;
+    g_parametricClosedLoopRunning = 0U;
+    ClosedLoopActuatorStop();
+    g_parametricTestRunning = 0U;
     g_sineRunning = 0U;
     g_parametricRunning = 0U;
     g_run = 0U;
 
     UartPrint("homing: moving to lower limit\r\n");
     SetDirection(DIR_DOWN);
-    while (LowerLimitPressed() == 0U && lowerSteps < MAX_HOMING_STEPS)
+    while (lowerSteps < MAX_HOMING_STEPS)
     {
+        if (LowerLimitPressed() != 0U)
+        {
+            if (WaitForDebouncedLimit(0U) != 0U)
+            {
+                break;
+            }
+            continue;
+        }
         if (StepOne(HOMING_SPEED_HZ, 0U, 1U) == 0U)
         {
-            break;
+            continue;
         }
         lowerSteps++;
         g_positionSteps += (DIR_DOWN == 0U) ? 1 : -1;
         ReportSwitchChanges();
     }
 
-    if (LowerLimitPressed() == 0U)
+    if (LowerLimitPressedDebounced() == 0U)
     {
         UartPrint("homing failed: lower limit not found\r\n");
         return;
     }
 
-    PrintSwitches();
     UartPrint("homing: lower limit found; reversing\r\n");
 
     UartPrint("homing: moving to upper limit\r\n");
     SetDirection(DIR_UP);
-    while (UpperLimitPressed() == 0U && spanSteps < MAX_HOMING_STEPS)
+    while (spanSteps < MAX_HOMING_STEPS)
     {
+        if (UpperLimitPressed() != 0U)
+        {
+            if (WaitForDebouncedLimit(1U) != 0U)
+            {
+                break;
+            }
+            continue;
+        }
         if (StepOne(HOMING_SPEED_HZ, 1U, 0U) == 0U)
         {
-            break;
+            continue;
         }
         spanSteps++;
         g_positionSteps += (DIR_UP == 0U) ? 1 : -1;
         ReportSwitchChanges();
     }
 
-    if (UpperLimitPressed() == 0U)
+    if (UpperLimitPressedDebounced() == 0U)
     {
         UartPrint("homing failed: upper limit not found\r\n");
         return;
@@ -485,8 +793,6 @@ static void Home(void)
                  (double)travelMm);
         UartPrint(calibrationMessage);
     }
-    PrintSwitches();
-
     UartPrint("homing: moving to midpoint\r\n");
     SetDirection(DIR_DOWN);
     for (uint32_t i = 0U; i < spanSteps / 2U; i++)
@@ -503,7 +809,6 @@ static void Home(void)
     g_travelSteps = spanSteps;
     g_positionSteps = 0;
     g_homed = 1U;
-    PrintSwitches();
     UartPrint("homing complete: midpoint reached\r\n");
 }
 
@@ -831,6 +1136,173 @@ static void UpdateParametricTest(void)
     UartPrint(msg);
 }
 
+static void UpdateParametricClosedLoop(void)
+{
+    uint16_t angle;
+    uint32_t now = HAL_GetTick();
+    float thetaDeg;
+    float thetaRad;
+    float thetaSq;
+    float dcBlocked;
+    float directAgc;
+    float quadAgc;
+    float directSat;
+    float quadSat;
+    float combined;
+    float outputSat;
+    float masterOut;
+    float rateDelta;
+    float zSimscapeMm;
+    float zMotorTargetMm;
+    const float dt = (float)PARAMETRIC_TEST_PERIOD_MS / 1000.0f;
+    int32_t targetSteps;
+    int32_t allowedHalfTravelSteps;
+    int32_t travelMarginSteps;
+    int32_t actualSteps;
+    char msg[180];
+
+    if ((int32_t)(now - g_parametricClosedLoopNextSampleMs) < 0)
+    {
+        return;
+    }
+
+    // The validated discrete filter coefficients and +/-0.1 rad rate limit
+    // correspond to Ts=5 ms. Advance the fixed schedule to avoid accumulated
+    // drift, skipping missed ticks rather than changing the discrete equations.
+    do
+    {
+        g_parametricClosedLoopNextSampleMs += PARAMETRIC_TEST_PERIOD_MS;
+    } while ((int32_t)(now - g_parametricClosedLoopNextSampleMs) >= 0);
+
+    if (AS5600_ReadAngle(&angle) != HAL_OK)
+    {
+        g_parametricClosedLoopAngleFailureCount++;
+        if (g_parametricClosedLoopAngleFailureCount >= CLOSED_LOOP_ANGLE_FAILURE_LIMIT)
+        {
+            ClosedLoopActuatorFault(3U);
+        }
+        return;
+    }
+    g_parametricClosedLoopAngleFailureCount = 0U;
+
+    thetaDeg = RelativeAngleDegrees(angle);
+    thetaRad = thetaDeg * (PI_F / 180.0f);
+    thetaSq = thetaRad * thetaRad;
+    if (g_parametricClosedLoopFilterValid == 0U)
+    {
+        g_parametricClosedLoopDcEstimate = thetaSq;
+        dcBlocked = 0.0f;
+        g_parametricClosedLoopPrevDcBlocked = 0.0f;
+        g_parametricClosedLoopQuadFiltered = 0.0f;
+        g_parametricClosedLoopFilterValid = 1U;
+    }
+    else
+    {
+        float dcAlpha = dt / (dt + PARAMETRIC_DC_BLOCK_TIME_CONST_S);
+        g_parametricClosedLoopDcEstimate += dcAlpha * (thetaSq - g_parametricClosedLoopDcEstimate);
+        dcBlocked = thetaSq - g_parametricClosedLoopDcEstimate;
+        g_parametricClosedLoopQuadFiltered = 0.9048f * g_parametricClosedLoopQuadFiltered +
+                                              20.0f * dcBlocked -
+                                              20.0f * g_parametricClosedLoopPrevDcBlocked;
+        g_parametricClosedLoopPrevDcBlocked = dcBlocked;
+    }
+
+    directAgc = ParametricTestAgc(dcBlocked, &g_parametricClosedLoopDirectAgcLogGain);
+    quadAgc = ParametricTestAgc(g_parametricClosedLoopQuadFiltered,
+                               &g_parametricClosedLoopQuadAgcLogGain);
+    directSat = (directAgc > PARAMETRIC_TEST_SATURATION) ? PARAMETRIC_TEST_SATURATION :
+                ((directAgc < -PARAMETRIC_TEST_SATURATION) ? -PARAMETRIC_TEST_SATURATION : directAgc);
+    quadSat = (quadAgc > PARAMETRIC_TEST_SATURATION) ? PARAMETRIC_TEST_SATURATION :
+              ((quadAgc < -PARAMETRIC_TEST_SATURATION) ? -PARAMETRIC_TEST_SATURATION : quadAgc);
+    combined = quadSat * PARAMETRIC_TEST_PHASE_COS + directSat * PARAMETRIC_TEST_PHASE_SIN;
+    outputSat = (combined > PARAMETRIC_TEST_OUTPUT_SATURATION) ? PARAMETRIC_TEST_OUTPUT_SATURATION :
+                ((combined < -PARAMETRIC_TEST_OUTPUT_SATURATION) ? -PARAMETRIC_TEST_OUTPUT_SATURATION : combined);
+    masterOut = PARAMETRIC_TEST_MASTER_GAIN * outputSat;
+
+    rateDelta = masterOut - g_parametricClosedLoopRateLimitedRad;
+    if (rateDelta > PARAMETRIC_TEST_RATE_DELTA_RAD)
+    {
+        rateDelta = PARAMETRIC_TEST_RATE_DELTA_RAD;
+    }
+    else if (rateDelta < -PARAMETRIC_TEST_RATE_DELTA_RAD)
+    {
+        rateDelta = -PARAMETRIC_TEST_RATE_DELTA_RAD;
+    }
+    g_parametricClosedLoopRateLimitedRad += rateDelta;
+
+    // Original Simscape-equivalent rack command from the 10 mm pinion radius.
+    zSimscapeMm = PARAMETRIC_TEST_PINION_RADIUS_MM * g_parametricClosedLoopRateLimitedRad;
+    // Experimental physical-command polarity: +1 original, -1 180-degree inversion.
+    zMotorTargetMm = CLOSED_LOOP_COMMAND_SIGN * zSimscapeMm;
+    // Stage-4 physical command is intentionally restricted to +/-7.5 mm.
+    zMotorTargetMm = (zMotorTargetMm > CLOSED_LOOP_MAX_MM) ? CLOSED_LOOP_MAX_MM :
+                     ((zMotorTargetMm < -CLOSED_LOOP_MAX_MM) ? -CLOSED_LOOP_MAX_MM : zMotorTargetMm);
+    targetSteps = (int32_t)lroundf(zMotorTargetMm * g_stepsPerMm);
+
+    travelMarginSteps = (int32_t)lroundf(CLOSED_LOOP_TRAVEL_MARGIN_MM * g_stepsPerMm);
+    allowedHalfTravelSteps = (int32_t)(g_travelSteps / 2U) - travelMarginSteps;
+    if (allowedHalfTravelSteps < 0)
+    {
+        allowedHalfTravelSteps = 0;
+    }
+    if (targetSteps > allowedHalfTravelSteps)
+    {
+        targetSteps = allowedHalfTravelSteps;
+    }
+    else if (targetSteps < -allowedHalfTravelSteps)
+    {
+        targetSteps = -allowedHalfTravelSteps;
+    }
+
+    g_parametricClosedLoopTargetSteps = targetSteps;
+    ClosedLoopActuatorKick();
+
+    if ((g_parametricClosedLoopSampleCount++ % PARAMETRIC_TEST_TELEMETRY_DECIMATION) != 0U)
+    {
+        return;
+    }
+
+    actualSteps = g_positionSteps;
+    snprintf(msg, sizeof(msg), "%.3f,%.2f,%.3f,%.3f,%.3f,%ld,%ld,%ld\r\n",
+             (double)(now - g_parametricClosedLoopStartMs) / 1000.0,
+             (double)thetaDeg,
+             (double)zSimscapeMm,
+             (double)((float)targetSteps / g_stepsPerMm),
+             (double)((float)actualSteps / g_stepsPerMm),
+             (long)targetSteps,
+             (long)actualSteps,
+             (long)(targetSteps - actualSteps));
+    UartPrint(msg);
+}
+
+static void ReportClosedLoopFault(void)
+{
+    uint8_t fault;
+
+    if (g_closedLoopFaultPending == 0U)
+    {
+        return;
+    }
+
+    __disable_irq();
+    fault = g_closedLoopFault;
+    g_closedLoopFaultPending = 0U;
+    __enable_irq();
+
+    if (fault == 1U)
+    {
+        UartPrint("closed loop stopped: upper limit reached\r\n");
+    }
+    else if (fault == 2U)
+    {
+        UartPrint("closed loop stopped: lower limit reached\r\n");
+    }
+    else if (fault == 3U)
+    {
+        UartPrint("closed loop stopped: angle sensor unavailable\r\n");
+    }
+}
+
 static void UartPrint(const char *text)
 {
     size_t length = strlen(text);
@@ -872,6 +1344,7 @@ static void PrintHelp(void)
     UartPrint("  parametric <amp_mm> <phi_deg> - drive pivot at 2x pendulum phase rate\r\n");
     UartPrint("  parametric stop - stop parametric drive\r\n");
     UartPrint("  parametric_test 0|1 - test parametric signal processing without motor motion\r\n");
+    UartPrint("  parametric_closed_loop 0|1 - run bounded parametric motor control\r\n");
     UartPrint("  run 0|1         - disable/enable stepping\r\n");
     UartPrint("  dir 0|1         - set direction\r\n");
     UartPrint("  hz <value>      - target speed in steps/sec\r\n");
@@ -880,8 +1353,11 @@ static void PrintHelp(void)
 
 static void PrintStatus(void)
 {
-    char msg[240];
+    char msg[300];
+    char timerMsg[300];
     uint16_t angle;
+
+    UpdateLimitDebounce();
 
     if (AS5600_ReadAngle(&angle) == HAL_OK)
     {
@@ -896,20 +1372,41 @@ static void PrintStatus(void)
     snprintf(
         msg,
         sizeof(msg),
-        "status: run=%u homed=%u sine=%u parametric=%u parametric_test=%u span=%lu position=%ld scale=%.3f sine_amp_mm=%.3f frequency=%.3f amp_mm=%.2f phi_deg=%.1f\r\n",
+        "status: run=%u homed=%u sine=%u parametric=%u parametric_test=%u closed_loop=%u fault=%u upper=%u lower=%u span=%lu position=%ld target=%ld scale=%.3f\r\n",
         (unsigned int)g_run,
         (unsigned int)g_homed,
         (unsigned int)g_sineRunning,
         (unsigned int)g_parametricRunning,
         (unsigned int)g_parametricTestRunning,
+        (unsigned int)g_parametricClosedLoopRunning,
+        (unsigned int)g_closedLoopFault,
+        (unsigned int)g_upperLimitDebounced,
+        (unsigned int)g_lowerLimitDebounced,
         (unsigned long)g_travelSteps,
         (long)g_positionSteps,
-        (double)g_stepsPerMm,
-        (double)g_sineAmplitudeMm,
-        (double)g_sineFrequencyHz,
-        (double)g_parametricAmplitudeMm,
-        (double)(g_parametricPhiRad * 180.0f / PI_F));
+        (long)g_parametricClosedLoopTargetSteps,
+        (double)g_stepsPerMm);
     UartPrint(msg);
+
+    snprintf(
+        timerMsg,
+        sizeof(timerMsg),
+        "closed_loop_diag: command_sign=%.0f phase=%u kick=%lu arm=%lu irq=%lu callback=%lu step_high=%lu step_complete=%lu TIM6_CR1=0x%08lX DIER=0x%08lX SR=0x%08lX CNT=%lu PSC=%lu ARR=%lu\r\n",
+        (double)CLOSED_LOOP_COMMAND_SIGN,
+        (unsigned int)g_closedLoopActuatorPhase,
+        (unsigned long)g_closedLoopKickCount,
+        (unsigned long)g_closedLoopTimerArmCount,
+        (unsigned long)g_tim6IrqCount,
+        (unsigned long)g_closedLoopActuatorCallbackCount,
+        (unsigned long)g_closedLoopStepHighCount,
+        (unsigned long)g_closedLoopStepCompleteCount,
+        (unsigned long)TIM6->CR1,
+        (unsigned long)TIM6->DIER,
+        (unsigned long)TIM6->SR,
+        (unsigned long)TIM6->CNT,
+        (unsigned long)TIM6->PSC,
+        (unsigned long)TIM6->ARR);
+    UartPrint(timerMsg);
 }
 
 static void PrintAngle(void)
@@ -1020,19 +1517,24 @@ static void PrintLiveTelemetry(void)
 static void PrintSwitches(void)
 {
     char msg[80];
+    UpdateLimitDebounce();
     snprintf(
         msg,
         sizeof(msg),
         "switches: upper=%u lower=%u\r\n",
-        (unsigned int)UpperLimitPressed(),
-        (unsigned int)LowerLimitPressed());
+        (unsigned int)g_upperLimitDebounced,
+        (unsigned int)g_lowerLimitDebounced);
     UartPrint(msg);
 }
 
 static void ReportSwitchChanges(void)
 {
-    uint8_t upperLimit = UpperLimitPressed();
-    uint8_t lowerLimit = LowerLimitPressed();
+    uint8_t upperLimit;
+    uint8_t lowerLimit;
+
+    UpdateLimitDebounce();
+    upperLimit = g_upperLimitDebounced;
+    lowerLimit = g_lowerLimitDebounced;
 
     if (g_switchStatusValid == 0U || upperLimit != g_lastUpperLimit ||
         lowerLimit != g_lastLowerLimit)
@@ -1072,7 +1574,7 @@ static void ProcessLine(char *line)
     }
 
     // TEMPORARY UART/PARSER DEBUG
-    if (g_parametricTestRunning == 0U)
+    if (g_parametricTestRunning == 0U && g_parametricClosedLoopRunning == 0U)
     {
         char debugMsg[200];
         size_t offset = 0U;
@@ -1162,6 +1664,8 @@ static void ProcessLine(char *line)
 
     if (strcmp(line, "stop") == 0)
     {
+        g_parametricClosedLoopRunning = 0U;
+        ClosedLoopActuatorStop();
         g_sineRunning = 0U;
         g_parametricRunning = 0U;
         g_parametricTestRunning = 0U;
@@ -1184,6 +1688,8 @@ static void ProcessLine(char *line)
         if (strcmp(argument, "1") == 0)
         {
             uint32_t now = HAL_GetTick();
+            g_parametricClosedLoopRunning = 0U;
+            ClosedLoopActuatorStop();
             g_sineRunning = 0U;
             g_parametricRunning = 0U;
             g_run = 0U;
@@ -1213,6 +1719,69 @@ static void ProcessLine(char *line)
         }
 
         UartPrint("usage: parametric_test 0|1\r\n");
+        return;
+    }
+
+    if (strncmp(line, "parametric_closed_loop", 22) == 0 &&
+        (line[22] == '\0' || line[22] == ' ' || line[22] == '\t'))
+    {
+        char *argument = line + 22;
+        while (*argument == ' ' || *argument == '\t')
+        {
+            argument++;
+        }
+
+        if (strcmp(argument, "1") == 0)
+        {
+            uint32_t now = HAL_GetTick();
+            if (g_homed == 0U)
+            {
+                UartPrint("closed loop rejected: run home first\r\n");
+                return;
+            }
+
+            g_sineRunning = 0U;
+            g_parametricRunning = 0U;
+            g_parametricTestRunning = 0U;
+            g_run = 0U;
+            g_liveTelemetry = 0U;
+            g_recording = 0U;
+            ClosedLoopActuatorStop();
+            g_parametricClosedLoopFilterValid = 0U;
+            g_parametricClosedLoopDcEstimate = 0.0f;
+            g_parametricClosedLoopPrevDcBlocked = 0.0f;
+            g_parametricClosedLoopQuadFiltered = 0.0f;
+            g_parametricClosedLoopDirectAgcLogGain = 0.0f;
+            g_parametricClosedLoopQuadAgcLogGain = 0.0f;
+            g_parametricClosedLoopRateLimitedRad = 0.0f;
+            g_parametricClosedLoopSampleCount = 0U;
+            g_parametricClosedLoopAngleFailureCount = 0U;
+            g_parametricClosedLoopStartMs = now;
+            g_parametricClosedLoopNextSampleMs = now + PARAMETRIC_TEST_PERIOD_MS;
+            g_parametricClosedLoopTargetSteps = g_positionSteps;
+            g_closedLoopFault = 0U;
+            g_closedLoopFaultPending = 0U;
+            g_closedLoopKickCount = 0U;
+            g_closedLoopTimerArmCount = 0U;
+            g_tim6IrqCount = 0U;
+            g_closedLoopActuatorCallbackCount = 0U;
+            g_closedLoopStepHighCount = 0U;
+            g_closedLoopStepCompleteCount = 0U;
+            g_parametricClosedLoopRunning = 1U;
+            g_suppressPromptOnce = 1U;
+            UartPrint("time_s,theta_deg,controller_mm,motor_target_mm,actual_mm,target_steps,actual_steps,step_error\r\n");
+            return;
+        }
+
+        if (strcmp(argument, "0") == 0)
+        {
+            g_parametricClosedLoopRunning = 0U;
+            ClosedLoopActuatorStop();
+            g_suppressPromptOnce = 1U;
+            return;
+        }
+
+        UartPrint("usage: parametric_closed_loop 0|1\r\n");
         return;
     }
 
@@ -1272,6 +1841,8 @@ static void ProcessLine(char *line)
 
         if (strcmp(arguments, "stop") == 0)
         {
+            g_parametricClosedLoopRunning = 0U;
+            ClosedLoopActuatorStop();
             g_sineRunning = 0U;
             g_run = 0U;
             if (g_homed != 0U)
@@ -1317,6 +1888,9 @@ static void ProcessLine(char *line)
 
         g_sineAmplitudeMm = amplitudeMm;
         g_sineFrequencyHz = frequency;
+        g_parametricClosedLoopRunning = 0U;
+        ClosedLoopActuatorStop();
+        g_parametricTestRunning = 0U;
         g_positionSteps = 0;
         g_sineStartMs = HAL_GetTick();
         g_sineRunning = 1U;
@@ -1341,6 +1915,8 @@ static void ProcessLine(char *line)
 
         if (strcmp(arguments, "stop") == 0)
         {
+            g_parametricClosedLoopRunning = 0U;
+            ClosedLoopActuatorStop();
             g_parametricRunning = 0U;
             g_run = 0U;
             if (g_homed != 0U)
@@ -1370,6 +1946,9 @@ static void ProcessLine(char *line)
 
         g_parametricAmplitudeMm = amplitudeMm;
         g_parametricPhiRad = phiDeg * PI_F / 180.0f;
+        g_parametricClosedLoopRunning = 0U;
+        ClosedLoopActuatorStop();
+        g_parametricTestRunning = 0U;
         g_parametricFilterValid = 0U;
         g_parametricLastUpdateMs = 0U;
         g_parametricThetaSqDc = 0.0f;
@@ -1392,6 +1971,9 @@ static void ProcessLine(char *line)
             UartPrint("run rejected: run home first\r\n");
             return;
         }
+        g_parametricClosedLoopRunning = 0U;
+        ClosedLoopActuatorStop();
+        g_parametricTestRunning = 0U;
         g_parametricRunning = 0U;
         g_sineRunning = 0U;
         g_run = (value != 0U) ? 1U : 0U;
@@ -1402,6 +1984,8 @@ static void ProcessLine(char *line)
     if (strncmp(line, "dir ", 4) == 0)
     {
         value = strtoul(line + 4, NULL, 10);
+        g_parametricClosedLoopRunning = 0U;
+        ClosedLoopActuatorStop();
         SetDirection((value != 0U) ? 1U : 0U);
         UartPrint("direction updated\r\n");
         return;
@@ -1482,7 +2066,7 @@ static void PollUart(void)
                 continue;
             }
 
-            if (g_parametricTestRunning == 0U)
+            if (g_parametricTestRunning == 0U && g_parametricClosedLoopRunning == 0U)
             {
                 UartPrint("\r\n");
             }
@@ -1498,7 +2082,8 @@ static void PollUart(void)
             {
                 g_suppressPromptOnce = 0U;
             }
-            else if (g_recording == 0U && g_parametricTestRunning == 0U)
+            else if (g_recording == 0U && g_parametricTestRunning == 0U &&
+                     g_parametricClosedLoopRunning == 0U)
             {
                 UartPrint("> ");
             }
@@ -1519,7 +2104,8 @@ static void PollUart(void)
 
         g_lastRxWasCr = 0U;
         g_rxBuf[g_rxIdx++] = (char)ch;
-        if (g_recording == 0U && g_parametricTestRunning == 0U)
+        if (g_recording == 0U && g_parametricTestRunning == 0U &&
+            g_parametricClosedLoopRunning == 0U)
         {
             char echo[2] = {(char)ch, '\0'};
             UartPrint(echo);
