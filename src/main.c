@@ -52,6 +52,11 @@
 #define PARAMETRIC_TEST_SATURATION     3.0f
 #define PARAMETRIC_TEST_PHASE_COS      0.9238795f
 #define PARAMETRIC_TEST_PHASE_SIN      0.3826834f
+#define PARAMETRIC_TEST_OUTPUT_SATURATION 2.0f
+#define PARAMETRIC_TEST_MASTER_GAIN       2.0f
+#define PARAMETRIC_TEST_RATE_DELTA_RAD    0.1f
+#define PARAMETRIC_TEST_PINION_RADIUS_MM 10.0f
+#define PARAMETRIC_TEST_STEPS_PER_MM     40.0f
 #define PARAMETRIC_ANGLE_TIME_CONST_S 0.05f
 #define PARAMETRIC_DC_BLOCK_TIME_CONST_S 2.0f
 #define PARAMETRIC_AGC_TIME_CONST_S   1.0f
@@ -144,6 +149,7 @@ static float g_parametricTestPrevDcBlocked = 0.0f;
 static float g_parametricTestQuadFiltered = 0.0f;
 static float g_parametricTestDirectAgcLogGain = 0.0f;
 static float g_parametricTestQuadAgcLogGain = 0.0f;
+static float g_parametricTestRateLimitedRad = 0.0f;
 static uint32_t g_parametricTestSampleCount = 0U;
 static uint8_t g_liveTelemetry = 0U;
 static uint8_t g_recording = 0U;
@@ -733,6 +739,11 @@ static void UpdateParametricTest(void)
     float directSat;
     float quadSat;
     float combined;
+    float outputSat;
+    float masterOut;
+    float rateDelta;
+    float zCmdMm;
+    int32_t targetSteps;
     float dt;
     char msg[180];
 
@@ -776,21 +787,47 @@ static void UpdateParametricTest(void)
               ((quadAgc < -PARAMETRIC_TEST_SATURATION) ? -PARAMETRIC_TEST_SATURATION : quadAgc);
     combined = quadSat * PARAMETRIC_TEST_PHASE_COS + directSat * PARAMETRIC_TEST_PHASE_SIN;
 
+    // The Simulink 10 us Transport Delay is intentionally omitted because it is
+    // only 0.2% of the 5 ms controller sample and a discrete delay would add 5 ms.
+
+    // Simulink Saturation2: [-2, +2]. This is separate from the branch saturations.
+    outputSat = (combined > PARAMETRIC_TEST_OUTPUT_SATURATION) ? PARAMETRIC_TEST_OUTPUT_SATURATION :
+                ((combined < -PARAMETRIC_TEST_OUTPUT_SATURATION) ? -PARAMETRIC_TEST_OUTPUT_SATURATION : combined);
+
+    // Simulink Master Gain: 2. The resulting pinion angle command is in radians.
+    masterOut = PARAMETRIC_TEST_MASTER_GAIN * outputSat;
+
+    // Simulink Rate Limiter: +/-20 rad/s at Ts=5 ms gives +/-0.1 rad/sample.
+    rateDelta = masterOut - g_parametricTestRateLimitedRad;
+    if (rateDelta > PARAMETRIC_TEST_RATE_DELTA_RAD)
+    {
+        rateDelta = PARAMETRIC_TEST_RATE_DELTA_RAD;
+    }
+    else if (rateDelta < -PARAMETRIC_TEST_RATE_DELTA_RAD)
+    {
+        rateDelta = -PARAMETRIC_TEST_RATE_DELTA_RAD;
+    }
+    g_parametricTestRateLimitedRad += rateDelta;
+
+    // Simscape pinion radius: 10 mm. Physical setup calibration: 40 steps/mm.
+    // Both values below are diagnostic only and are never sent to a motor path.
+    zCmdMm = PARAMETRIC_TEST_PINION_RADIUS_MM * g_parametricTestRateLimitedRad;
+    targetSteps = (int32_t)lroundf(zCmdMm * PARAMETRIC_TEST_STEPS_PER_MM);
+
     if ((g_parametricTestSampleCount++ % PARAMETRIC_TEST_TELEMETRY_DECIMATION) != 0U)
     {
         return;
     }
 
-    snprintf(msg, sizeof(msg), "%.3f,%.2f,%.5f,%.5f,%.5f,%.5f,%.5f,%.5f,%.5f\r\n",
+    snprintf(msg, sizeof(msg), "%.3f,%.2f,%.5f,%.5f,%.5f,%.5f,%.3f,%ld\r\n",
              (double)(now - g_parametricTestStartMs) / 1000.0,
              (double)thetaDeg,
-             (double)dcBlocked,
-             (double)g_parametricTestQuadFiltered,
-             (double)directAgc,
-             (double)quadAgc,
-             (double)directSat,
-             (double)quadSat,
-             (double)combined);
+             (double)combined,
+             (double)outputSat,
+             (double)masterOut,
+             (double)g_parametricTestRateLimitedRad,
+             (double)zCmdMm,
+             (long)targetSteps);
     UartPrint(msg);
 }
 
@@ -1158,12 +1195,13 @@ static void ProcessLine(char *line)
             g_parametricTestQuadFiltered = 0.0f;
             g_parametricTestDirectAgcLogGain = 0.0f;
             g_parametricTestQuadAgcLogGain = 0.0f;
+            g_parametricTestRateLimitedRad = 0.0f;
             g_parametricTestSampleCount = 0U;
             g_parametricTestStartMs = now;
             g_parametricTestLastSampleMs = now - PARAMETRIC_TEST_PERIOD_MS;
             g_parametricTestRunning = 1U;
             g_suppressPromptOnce = 1U;
-            UartPrint("time_s,theta_deg,dc_blocked,quad_filtered,direct_agc,quad_agc,direct_sat,quad_sat,combined\r\n");
+            UartPrint("time_s,theta_deg,combined,sat2,master_gain,rate_limited,z_cmd_mm,target_steps\r\n");
             return;
         }
 
