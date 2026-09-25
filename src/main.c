@@ -45,6 +45,13 @@
 #define PARAMETRIC_SPEED_HZ 4000U
 #define PARAMETRIC_UPDATE_PERIOD_MS   10U
 #define PARAMETRIC_TEST_PERIOD_MS      5U
+#define PARAMETRIC_TEST_TELEMETRY_DECIMATION 4U
+#define PARAMETRIC_TEST_AGC_STEP       0.0005f
+#define PARAMETRIC_TEST_AGC_Z_EPSILON  1e-20f
+#define PARAMETRIC_TEST_AGC_MAX_LOG_GAIN 6.9077553f
+#define PARAMETRIC_TEST_SATURATION     3.0f
+#define PARAMETRIC_TEST_PHASE_COS      0.9238795f
+#define PARAMETRIC_TEST_PHASE_SIN      0.3826834f
 #define PARAMETRIC_ANGLE_TIME_CONST_S 0.05f
 #define PARAMETRIC_DC_BLOCK_TIME_CONST_S 2.0f
 #define PARAMETRIC_AGC_TIME_CONST_S   1.0f
@@ -71,6 +78,7 @@ static void UpdateSine(void);
 static void UpdateParametric(void);
 static void UpdateParametricTest(void);
 static float ParametricTestDcBlockApprox(float input, float dt, uint8_t reset);
+static float ParametricTestAgc(float input, float *logGain);
 static void DelayUs(uint32_t us);
 static void PollUart(void);
 static void ProcessLine(char *line);
@@ -134,6 +142,9 @@ static uint32_t g_parametricTestLastSampleMs = 0U;
 static float g_parametricTestDcEstimate = 0.0f;
 static float g_parametricTestPrevDcBlocked = 0.0f;
 static float g_parametricTestQuadFiltered = 0.0f;
+static float g_parametricTestDirectAgcLogGain = 0.0f;
+static float g_parametricTestQuadAgcLogGain = 0.0f;
+static uint32_t g_parametricTestSampleCount = 0U;
 static uint8_t g_liveTelemetry = 0U;
 static uint8_t g_recording = 0U;
 static uint8_t g_suppressPromptOnce = 0U;
@@ -689,6 +700,25 @@ static float ParametricTestDcBlockApprox(float input, float dt, uint8_t reset)
     return input - g_parametricTestDcEstimate;
 }
 
+static float ParametricTestAgc(float input, float *logGain)
+{
+    float previousLogGain = *logGain;
+    float output = input * expf(previousLogGain);
+    float detector = input * input;
+    float z = detector * expf(2.0f * previousLogGain);
+    float zSafe = (z > PARAMETRIC_TEST_AGC_Z_EPSILON) ? z : PARAMETRIC_TEST_AGC_Z_EPSILON;
+    float updatedLogGain = previousLogGain - PARAMETRIC_TEST_AGC_STEP * logf(zSafe);
+
+    // A 60 dB power-gain limit is an amplitude gain of 10^(60/20) = 1000,
+    // so the logarithmic gain state is limited to ln(1000).
+    if (updatedLogGain > PARAMETRIC_TEST_AGC_MAX_LOG_GAIN)
+    {
+        updatedLogGain = PARAMETRIC_TEST_AGC_MAX_LOG_GAIN;
+    }
+    *logGain = updatedLogGain;
+    return output;
+}
+
 static void UpdateParametricTest(void)
 {
     uint16_t angle;
@@ -698,8 +728,13 @@ static void UpdateParametricTest(void)
     float thetaRad;
     float thetaSq;
     float dcBlocked;
+    float directAgc;
+    float quadAgc;
+    float directSat;
+    float quadSat;
+    float combined;
     float dt;
-    char msg[160];
+    char msg[180];
 
     if (elapsedMs < PARAMETRIC_TEST_PERIOD_MS)
     {
@@ -733,13 +768,29 @@ static void UpdateParametricTest(void)
         g_parametricTestPrevDcBlocked = dcBlocked;
     }
 
-    snprintf(msg, sizeof(msg), "%.3f,%.2f,%.5f,%.5f,%.5f,%.5f\r\n",
+    directAgc = ParametricTestAgc(dcBlocked, &g_parametricTestDirectAgcLogGain);
+    quadAgc = ParametricTestAgc(g_parametricTestQuadFiltered, &g_parametricTestQuadAgcLogGain);
+    directSat = (directAgc > PARAMETRIC_TEST_SATURATION) ? PARAMETRIC_TEST_SATURATION :
+                ((directAgc < -PARAMETRIC_TEST_SATURATION) ? -PARAMETRIC_TEST_SATURATION : directAgc);
+    quadSat = (quadAgc > PARAMETRIC_TEST_SATURATION) ? PARAMETRIC_TEST_SATURATION :
+              ((quadAgc < -PARAMETRIC_TEST_SATURATION) ? -PARAMETRIC_TEST_SATURATION : quadAgc);
+    combined = quadSat * PARAMETRIC_TEST_PHASE_COS + directSat * PARAMETRIC_TEST_PHASE_SIN;
+
+    if ((g_parametricTestSampleCount++ % PARAMETRIC_TEST_TELEMETRY_DECIMATION) != 0U)
+    {
+        return;
+    }
+
+    snprintf(msg, sizeof(msg), "%.3f,%.2f,%.5f,%.5f,%.5f,%.5f,%.5f,%.5f,%.5f\r\n",
              (double)(now - g_parametricTestStartMs) / 1000.0,
              (double)thetaDeg,
-             (double)thetaRad,
-             (double)thetaSq,
              (double)dcBlocked,
-             (double)g_parametricTestQuadFiltered);
+             (double)g_parametricTestQuadFiltered,
+             (double)directAgc,
+             (double)quadAgc,
+             (double)directSat,
+             (double)quadSat,
+             (double)combined);
     UartPrint(msg);
 }
 
@@ -1105,11 +1156,14 @@ static void ProcessLine(char *line)
             g_parametricTestDcEstimate = 0.0f;
             g_parametricTestPrevDcBlocked = 0.0f;
             g_parametricTestQuadFiltered = 0.0f;
+            g_parametricTestDirectAgcLogGain = 0.0f;
+            g_parametricTestQuadAgcLogGain = 0.0f;
+            g_parametricTestSampleCount = 0U;
             g_parametricTestStartMs = now;
             g_parametricTestLastSampleMs = now - PARAMETRIC_TEST_PERIOD_MS;
             g_parametricTestRunning = 1U;
             g_suppressPromptOnce = 1U;
-            UartPrint("time_s,theta_deg,theta_rad,theta_sq,dc_blocked,quad_filtered\r\n");
+            UartPrint("time_s,theta_deg,dc_blocked,quad_filtered,direct_agc,quad_agc,direct_sat,quad_sat,combined\r\n");
             return;
         }
 
