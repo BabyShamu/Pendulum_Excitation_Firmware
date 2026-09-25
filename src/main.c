@@ -44,6 +44,7 @@
 #define HOMING_SPEED_HZ     1100U
 #define PARAMETRIC_SPEED_HZ 4000U
 #define PARAMETRIC_UPDATE_PERIOD_MS   10U
+#define PARAMETRIC_TEST_PERIOD_MS      5U
 #define PARAMETRIC_ANGLE_TIME_CONST_S 0.05f
 #define PARAMETRIC_DC_BLOCK_TIME_CONST_S 2.0f
 #define PARAMETRIC_AGC_TIME_CONST_S   1.0f
@@ -68,6 +69,8 @@ static void Home(void);
 static void ReturnToCenter(void);
 static void UpdateSine(void);
 static void UpdateParametric(void);
+static void UpdateParametricTest(void);
+static float ParametricTestDcBlockApprox(float input, float dt, uint8_t reset);
 static void DelayUs(uint32_t us);
 static void PollUart(void);
 static void ProcessLine(char *line);
@@ -124,6 +127,13 @@ static float g_parametricThetaSqDc = 0.0f;
 static float g_parametricPrevAcSignal = 0.0f;
 static float g_parametricCosPeak = 0.0f;
 static float g_parametricSinPeak = 0.0f;
+static uint8_t g_parametricTestRunning = 0U;
+static uint8_t g_parametricTestFilterValid = 0U;
+static uint32_t g_parametricTestStartMs = 0U;
+static uint32_t g_parametricTestLastSampleMs = 0U;
+static float g_parametricTestDcEstimate = 0.0f;
+static float g_parametricTestPrevDcBlocked = 0.0f;
+static float g_parametricTestQuadFiltered = 0.0f;
 static uint8_t g_liveTelemetry = 0U;
 static uint8_t g_recording = 0U;
 static uint8_t g_suppressPromptOnce = 0U;
@@ -229,7 +239,10 @@ int main(void)
 
     while (1)
     {
-        ReportSwitchChanges();
+        if (g_parametricTestRunning == 0U)
+        {
+            ReportSwitchChanges();
+        }
         uint32_t stepHzPerTick = (g_accelHzPerSec * CONTROL_PERIOD_MS) / 1000U;
         if (stepHzPerTick == 0U)
         {
@@ -250,7 +263,11 @@ int main(void)
         PollUart();
         PrintLiveTelemetry();
 
-        if (g_sineRunning != 0U)
+        if (g_parametricTestRunning != 0U)
+        {
+            UpdateParametricTest();
+        }
+        else if (g_sineRunning != 0U)
         {
             UpdateSine();
         }
@@ -655,6 +672,77 @@ static void UpdateParametric(void)
     }
 }
 
+static float ParametricTestDcBlockApprox(float input, float dt, uint8_t reset)
+{
+    if (reset != 0U)
+    {
+        g_parametricTestDcEstimate = input;
+        return 0.0f;
+    }
+
+    // Temporary approximation only. Replace this first-order DC estimate with
+    // the exact sixth-order Simulink IIR DC blocker when its coefficients are available.
+    {
+        float alpha = dt / (dt + PARAMETRIC_DC_BLOCK_TIME_CONST_S);
+        g_parametricTestDcEstimate += alpha * (input - g_parametricTestDcEstimate);
+    }
+    return input - g_parametricTestDcEstimate;
+}
+
+static void UpdateParametricTest(void)
+{
+    uint16_t angle;
+    uint32_t now = HAL_GetTick();
+    uint32_t elapsedMs = now - g_parametricTestLastSampleMs;
+    float thetaDeg;
+    float thetaRad;
+    float thetaSq;
+    float dcBlocked;
+    float dt;
+    char msg[160];
+
+    if (elapsedMs < PARAMETRIC_TEST_PERIOD_MS)
+    {
+        return;
+    }
+    g_parametricTestLastSampleMs = now;
+
+    if (AS5600_ReadAngle(&angle) != HAL_OK)
+    {
+        return;
+    }
+
+    thetaDeg = RelativeAngleDegrees(angle);
+    thetaRad = thetaDeg * (PI_F / 180.0f);
+    thetaSq = thetaRad * thetaRad;
+    dt = (float)elapsedMs / 1000.0f;
+
+    dcBlocked = ParametricTestDcBlockApprox(thetaSq, dt, (g_parametricTestFilterValid == 0U) ? 1U : 0U);
+    if (g_parametricTestFilterValid == 0U)
+    {
+        g_parametricTestPrevDcBlocked = dcBlocked;
+        g_parametricTestQuadFiltered = 0.0f;
+        g_parametricTestFilterValid = 1U;
+    }
+    else
+    {
+        // Simulink Discrete Transfer Function: [20 -20] / [1 -0.9048].
+        g_parametricTestQuadFiltered = 0.9048f * g_parametricTestQuadFiltered +
+                                        20.0f * dcBlocked -
+                                        20.0f * g_parametricTestPrevDcBlocked;
+        g_parametricTestPrevDcBlocked = dcBlocked;
+    }
+
+    snprintf(msg, sizeof(msg), "%.3f,%.2f,%.5f,%.5f,%.5f,%.5f\r\n",
+             (double)(now - g_parametricTestStartMs) / 1000.0,
+             (double)thetaDeg,
+             (double)thetaRad,
+             (double)thetaSq,
+             (double)dcBlocked,
+             (double)g_parametricTestQuadFiltered);
+    UartPrint(msg);
+}
+
 static void UartPrint(const char *text)
 {
     size_t length = strlen(text);
@@ -695,6 +783,7 @@ static void PrintHelp(void)
     UartPrint("  sine stop       - stop sine motion\r\n");
     UartPrint("  parametric <amp_mm> <phi_deg> - drive pivot at 2x pendulum phase rate\r\n");
     UartPrint("  parametric stop - stop parametric drive\r\n");
+    UartPrint("  parametric_test 0|1 - test parametric signal processing without motor motion\r\n");
     UartPrint("  run 0|1         - disable/enable stepping\r\n");
     UartPrint("  dir 0|1         - set direction\r\n");
     UartPrint("  hz <value>      - target speed in steps/sec\r\n");
@@ -719,11 +808,12 @@ static void PrintStatus(void)
     snprintf(
         msg,
         sizeof(msg),
-        "status: run=%u homed=%u sine=%u parametric=%u span=%lu position=%ld scale=%.3f sine_amp_mm=%.3f frequency=%.3f amp_mm=%.2f phi_deg=%.1f\r\n",
+        "status: run=%u homed=%u sine=%u parametric=%u parametric_test=%u span=%lu position=%ld scale=%.3f sine_amp_mm=%.3f frequency=%.3f amp_mm=%.2f phi_deg=%.1f\r\n",
         (unsigned int)g_run,
         (unsigned int)g_homed,
         (unsigned int)g_sineRunning,
         (unsigned int)g_parametricRunning,
+        (unsigned int)g_parametricTestRunning,
         (unsigned long)g_travelSteps,
         (long)g_positionSteps,
         (double)g_stepsPerMm,
@@ -894,6 +984,7 @@ static void ProcessLine(char *line)
     }
 
     // TEMPORARY UART/PARSER DEBUG
+    if (g_parametricTestRunning == 0U)
     {
         char debugMsg[200];
         size_t offset = 0U;
@@ -985,10 +1076,51 @@ static void ProcessLine(char *line)
     {
         g_sineRunning = 0U;
         g_parametricRunning = 0U;
+        g_parametricTestRunning = 0U;
         g_run = 0U;
         g_liveTelemetry = 0U;
         g_recording = 0U;
         UartPrint("stopped: motion and telemetry halted\r\n");
+        return;
+    }
+
+    if (strncmp(line, "parametric_test", 15) == 0 &&
+        (line[15] == '\0' || line[15] == ' ' || line[15] == '\t'))
+    {
+        char *argument = line + 15;
+        while (*argument == ' ' || *argument == '\t')
+        {
+            argument++;
+        }
+
+        if (strcmp(argument, "1") == 0)
+        {
+            uint32_t now = HAL_GetTick();
+            g_sineRunning = 0U;
+            g_parametricRunning = 0U;
+            g_run = 0U;
+            g_liveTelemetry = 0U;
+            g_recording = 0U;
+            g_parametricTestFilterValid = 0U;
+            g_parametricTestDcEstimate = 0.0f;
+            g_parametricTestPrevDcBlocked = 0.0f;
+            g_parametricTestQuadFiltered = 0.0f;
+            g_parametricTestStartMs = now;
+            g_parametricTestLastSampleMs = now - PARAMETRIC_TEST_PERIOD_MS;
+            g_parametricTestRunning = 1U;
+            g_suppressPromptOnce = 1U;
+            UartPrint("time_s,theta_deg,theta_rad,theta_sq,dc_blocked,quad_filtered\r\n");
+            return;
+        }
+
+        if (strcmp(argument, "0") == 0)
+        {
+            g_parametricTestRunning = 0U;
+            g_suppressPromptOnce = 1U;
+            return;
+        }
+
+        UartPrint("usage: parametric_test 0|1\r\n");
         return;
     }
 
@@ -1258,7 +1390,10 @@ static void PollUart(void)
                 continue;
             }
 
-            UartPrint("\r\n");
+            if (g_parametricTestRunning == 0U)
+            {
+                UartPrint("\r\n");
+            }
             g_rxBuf[g_rxIdx] = '\0';
 
             if (g_rxIdx > 0U)
@@ -1271,7 +1406,7 @@ static void PollUart(void)
             {
                 g_suppressPromptOnce = 0U;
             }
-            else if (g_recording == 0U)
+            else if (g_recording == 0U && g_parametricTestRunning == 0U)
             {
                 UartPrint("> ");
             }
@@ -1292,7 +1427,7 @@ static void PollUart(void)
 
         g_lastRxWasCr = 0U;
         g_rxBuf[g_rxIdx++] = (char)ch;
-        if (g_recording == 0U)
+        if (g_recording == 0U && g_parametricTestRunning == 0U)
         {
             char echo[2] = {(char)ch, '\0'};
             UartPrint(echo);
