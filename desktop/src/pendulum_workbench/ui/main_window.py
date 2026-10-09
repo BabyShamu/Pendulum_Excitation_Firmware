@@ -307,8 +307,10 @@ class MainWindow(QMainWindow):
         self.controller.state.telemetry_received.connect(self._append_sample)
         self.controller.state.event_added.connect(self._append_event)
         self.controller.experiment_loaded.connect(self._show_saved_experiment)
+        self.controller.experiment_recorder.recording_requested.connect(self._on_recording_requested)
         self.controller.experiment_recorder.recording_started.connect(self._on_recording_started)
         self.controller.experiment_recorder.recording_finished.connect(self._on_recording_finished)
+        self.controller.experiment_recorder.recording_failed.connect(self._on_recording_failed)
         self._update_snapshot(self.controller.state.snapshot)
         self._refresh_ports()
         self._create_menu_bar()
@@ -458,7 +460,7 @@ class MainWindow(QMainWindow):
 
     def _start_recording(self) -> None:
         try:
-            self.controller.experiment_recorder.start_recording(
+            experiment_id = self.controller.experiment_recorder.start_recording(
                 self.experiment_name_input.text(),
                 self.experiment_notes_input.text(),
             )
@@ -466,9 +468,15 @@ class MainWindow(QMainWindow):
             self.controller.state.report_event(EventSeverity.ERROR, str(error))
             return
 
+    def _on_recording_requested(self, experiment_id: str, directory: str) -> None:
+        self.experiment_recording_status.setText(f"Preparing experiment {experiment_id}...")
+        self.capture_path_label.setText(f"Experiment folder: {directory}")
+
     def _stop_recording(self) -> None:
         try:
-            self.controller.experiment_recorder.stop_recording()
+            session = self.controller.experiment_recorder.stop_recording()
+            if session is not None or self.controller.experiment_recorder.is_recording:
+                self.experiment_recording_status.setText("Finalizing recording...")
         except (OSError, RuntimeError, TimeoutError) as error:
             self.controller.state.report_event(EventSeverity.ERROR, str(error))
 
@@ -481,6 +489,14 @@ class MainWindow(QMainWindow):
         self.capture_path_label.setText(
             f"Experiment folder: {self.controller.experiment_recorder.repository.root / experiment_id}"
         )
+
+    def _on_recording_failed(self, experiment_id: str, message: str) -> None:
+        self.experiment_recording_status.setText(f"Recording failed: {experiment_id}")
+        self.capture_path_label.setText(message)
+
+    def _on_recording_failed(self, experiment_id: str, message: str) -> None:
+        self.experiment_recording_status.setText(f"Recording failed: {experiment_id}")
+        self.capture_path_label.setText(message)
 
     def _show_saved_experiment(self, experiment: LoadedExperiment) -> None:
         self._loaded_experiment = experiment

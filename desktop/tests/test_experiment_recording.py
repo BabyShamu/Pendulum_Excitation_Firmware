@@ -2,6 +2,7 @@ import base64
 import csv
 import json
 import tempfile
+import time
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
@@ -28,6 +29,16 @@ class ExperimentRecordingTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.qt_app = QApplication.instance() or QApplication([])
 
+    def wait_for(self, predicate, timeout_s: float = 2.0) -> bool:
+        deadline = time.monotonic() + timeout_s
+        while time.monotonic() < deadline:
+            self.qt_app.processEvents()
+            if predicate():
+                return True
+            time.sleep(0.005)
+        self.qt_app.processEvents()
+        return predicate()
+
     def test_mock_recording_writes_manifest_normalized_rows_and_reopens(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             state = ApplicationStateModel()
@@ -36,10 +47,17 @@ class ExperimentRecordingTests(unittest.TestCase):
             service = ExperimentRecordingService(state, SerialTelemetryClient(), repository)
             self.addCleanup(service.shutdown)
 
-            session = service.start_recording("Free decay", "release from rest")
+            experiment_id = service.start_recording("Free decay", "release from rest")
+            self.assertEqual(state.snapshot.recording, RecordingState.STARTING)
+            self.assertTrue(self.wait_for(lambda: state.snapshot.recording == RecordingState.RECORDING))
+            session = service.active_session
+            self.assertIsNotNone(session)
+            self.assertEqual(session.experiment_id, experiment_id)
             state.publish_sample(TelemetrySample(1, 0.1, -1.5, 2.0, source="mock"))
             state.publish_sample(TelemetrySample(2, 0.2, -1.2, 2.2, source="mock"))
             service.stop_recording()
+            self.assertEqual(state.snapshot.recording, RecordingState.STOPPING)
+            self.assertTrue(self.wait_for(lambda: state.snapshot.recording == RecordingState.SAVED))
 
             self.assertEqual(state.snapshot.recording, RecordingState.SAVED)
             manifest = json.loads((session.directory / "manifest.json").read_text(encoding="utf-8"))
@@ -84,7 +102,11 @@ class ExperimentRecordingTests(unittest.TestCase):
             timestamp = datetime(2026, 10, 9, 12, tzinfo=timezone.utc)
             payload = b"live time=0.100 angle_deg=-1.500 position_mm=2.000"
 
-            session = service.start_recording("Real run", "board reset before start")
+            experiment_id = service.start_recording("Real run", "board reset before start")
+            self.assertTrue(self.wait_for(lambda: state.snapshot.recording == RecordingState.RECORDING))
+            session = service.active_session
+            self.assertIsNotNone(session)
+            self.assertEqual(session.experiment_id, experiment_id)
             serial_client.raw_line_received.emit(
                 ReceivedSerialLine(
                     payload=payload,
@@ -107,6 +129,7 @@ class ExperimentRecordingTests(unittest.TestCase):
                 )
             )
             service.stop_recording()
+            self.assertTrue(self.wait_for(lambda: state.snapshot.recording == RecordingState.SAVED))
 
             record = json.loads(
                 (session.directory / "serial_capture.log").read_text(encoding="utf-8")
@@ -129,8 +152,15 @@ class ExperimentRecordingTests(unittest.TestCase):
             )
             self.addCleanup(service.shutdown)
 
-            session = service.start_recording("Interrupted run", "")
+            experiment_id = service.start_recording("Interrupted run", "")
+            self.assertTrue(self.wait_for(lambda: state.snapshot.recording == RecordingState.RECORDING))
+            session = service.active_session
+            self.assertIsNotNone(session)
+            self.assertEqual(session.experiment_id, experiment_id)
             serial_client.connection_closed.emit("simulated cable removal")
+            self.assertTrue(
+                self.wait_for(lambda: state.snapshot.recording == RecordingState.INTERRUPTED)
+            )
 
             manifest = json.loads((session.directory / "manifest.json").read_text(encoding="utf-8"))
             self.assertEqual(manifest["completion_status"], "INTERRUPTED")

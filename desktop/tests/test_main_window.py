@@ -1,8 +1,11 @@
 import unittest
 import tempfile
+import threading
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
+from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import QApplication, QPushButton, QWidget
 
 from pendulum_workbench.application.controller import WorkbenchController
@@ -25,6 +28,16 @@ class MainWindowTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.qt_app = QApplication.instance() or QApplication([])
+
+    def wait_for(self, predicate, timeout_s: float = 2.0) -> bool:
+        deadline = time.monotonic() + timeout_s
+        while time.monotonic() < deadline:
+            self.qt_app.processEvents()
+            if predicate():
+                return True
+            time.sleep(0.005)
+        self.qt_app.processEvents()
+        return predicate()
 
     def test_dashboard_displays_mock_state_samples_and_events(self) -> None:
         controller = WorkbenchController(mock_source=MockTelemetrySource(interval_ms=1000))
@@ -211,8 +224,16 @@ class MainWindowTests(unittest.TestCase):
         window.experiment_notes_input.setText("Small-angle release")
         window.start_recording_button.click()
 
+        self.assertEqual(controller.state.snapshot.recording.value, "Starting")
+        self.assertTrue(window.experiment_recording_status.text().startswith("Preparing experiment "))
+        self.assertIn(str(repository.root), window.capture_path_label.text())
+        self.assertTrue(
+            self.wait_for(lambda: controller.state.snapshot.recording.value == "Recording")
+        )
         self.assertEqual(controller.state.snapshot.recording.value, "Recording")
         self.assertTrue(window.experiment_recording_status.text().startswith("Recording "))
+        self.assertTrue(window.stop_recording_button.isEnabled())
+        self.assertFalse(window.start_recording_button.isEnabled())
         controller.state.publish_sample(
             TelemetrySample(
                 2,
@@ -226,6 +247,10 @@ class MainWindowTests(unittest.TestCase):
         session = controller.experiment_recorder.active_session
         self.assertIsNotNone(session)
         window.stop_recording_button.click()
+        self.assertEqual(controller.state.snapshot.recording.value, "Stopping")
+        self.assertTrue(
+            self.wait_for(lambda: controller.state.snapshot.recording.value == "Saved")
+        )
         self.assertEqual(controller.state.snapshot.recording.value, "Saved")
         self.assertTrue(window.experiment_recording_status.text().startswith("Completed: "))
         window.close()
@@ -246,6 +271,111 @@ class MainWindowTests(unittest.TestCase):
         self.assertEqual(reopened_window.experiment_notes_input.text(), "Small-angle release")
         self.assertEqual(reopened_window._samples[-1].angle_deg, 4.5)
         reopened_window.close()
+
+    def test_start_click_is_responsive_during_folder_creation(self) -> None:
+        temporary_directory = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary_directory.cleanup)
+
+        class SlowRepository(ExperimentRepository):
+            def __init__(self, root: Path) -> None:
+                super().__init__(root)
+                self.create_started = threading.Event()
+                self.release_create = threading.Event()
+                self.finalize_started = threading.Event()
+                self.release_finalize = threading.Event()
+
+            def create(self, **kwargs):
+                self.create_started.set()
+                self.release_create.wait(2.0)
+                return super().create(**kwargs)
+
+            def finalize(self, *args, **kwargs):
+                self.finalize_started.set()
+                self.release_finalize.wait(2.0)
+                return super().finalize(*args, **kwargs)
+
+        repository = SlowRepository(Path(temporary_directory.name))
+        self.addCleanup(repository.release_create.set)
+        self.addCleanup(repository.release_finalize.set)
+        controller = WorkbenchController(
+            mock_source=MockTelemetrySource(interval_ms=1000),
+            experiment_repository=repository,
+        )
+        self.addCleanup(controller.shutdown)
+        window = MainWindow(controller)
+        controller.start_mock()
+        window.show()
+        timer_fired = []
+        QTimer.singleShot(0, lambda: timer_fired.append(True))
+
+        click_started = time.monotonic()
+        window.start_recording_button.click()
+        click_elapsed = time.monotonic() - click_started
+        self.qt_app.processEvents()
+
+        self.assertLess(click_elapsed, 0.5)
+        self.assertTrue(repository.create_started.wait(1.0))
+        self.assertTrue(timer_fired)
+        self.assertEqual(controller.state.snapshot.recording.value, "Starting")
+        self.assertTrue(window.experiment_recording_status.text().startswith("Preparing experiment "))
+        self.assertIn(str(repository.root), window.capture_path_label.text())
+        self.assertFalse(window.start_recording_button.isEnabled())
+        self.assertFalse(window.stop_recording_button.isEnabled())
+
+        repository.release_create.set()
+        self.assertTrue(
+            self.wait_for(lambda: controller.state.snapshot.recording.value == "Recording")
+        )
+        messages = [window.event_list.item(index).text() for index in range(window.event_list.count())]
+        self.assertTrue(any("Start Recording clicked" in message for message in messages))
+        self.assertTrue(any("session/folder created" in message for message in messages))
+        self.assertTrue(any("writer ready" in message for message in messages))
+        self.assertTrue(any("RECORDING state entered" in message for message in messages))
+        self.assertTrue(window.stop_recording_button.isEnabled())
+        self.assertFalse(window.start_recording_button.isEnabled())
+        stop_timer_events = []
+        QTimer.singleShot(0, lambda: stop_timer_events.append(True))
+        stop_started = time.monotonic()
+        window.stop_recording_button.click()
+        stop_elapsed = time.monotonic() - stop_started
+        self.qt_app.processEvents()
+        self.assertLess(stop_elapsed, 0.5)
+        self.assertTrue(repository.finalize_started.wait(1.0))
+        self.assertTrue(stop_timer_events)
+        self.assertEqual(controller.state.snapshot.recording.value, "Stopping")
+        repository.release_finalize.set()
+        self.assertTrue(
+            self.wait_for(lambda: controller.state.snapshot.recording.value == "Saved")
+        )
+        window.close()
+
+    def test_start_initialization_failure_shows_exception_and_target_path(self) -> None:
+        temporary_directory = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary_directory.cleanup)
+
+        class FailingRepository(ExperimentRepository):
+            def create(self, **kwargs):
+                raise OSError("simulated disk full")
+
+        repository = FailingRepository(Path(temporary_directory.name))
+        controller = WorkbenchController(
+            mock_source=MockTelemetrySource(interval_ms=1000),
+            experiment_repository=repository,
+        )
+        self.addCleanup(controller.shutdown)
+        window = MainWindow(controller)
+        controller.start_mock()
+        window.start_recording_button.click()
+
+        self.assertTrue(
+            self.wait_for(lambda: controller.state.snapshot.recording.value == "Error")
+        )
+        self.assertIn("simulated disk full", window.capture_path_label.text())
+        self.assertIn(str(repository.root), window.capture_path_label.text())
+        self.assertIn("OSError", window.capture_path_label.text())
+        self.assertTrue(window.start_recording_button.isEnabled())
+        self.assertFalse(window.stop_recording_button.isEnabled())
+        window.close()
 
 
 if __name__ == "__main__":

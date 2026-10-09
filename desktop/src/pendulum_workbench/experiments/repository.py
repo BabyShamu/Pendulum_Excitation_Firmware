@@ -57,8 +57,9 @@ class ExperimentRepository:
         data_source: DataSourceMode,
         serial_port: str | None,
         created_at: datetime | None = None,
+        experiment_id: str | None = None,
     ) -> ExperimentSession:
-        experiment_id = str(uuid4())
+        experiment_id = experiment_id or str(uuid4())
         directory = self.root / experiment_id
         directory.mkdir(parents=True, exist_ok=False)
         (directory / "derived").mkdir()
