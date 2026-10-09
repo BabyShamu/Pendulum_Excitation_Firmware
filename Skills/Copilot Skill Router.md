@@ -32,6 +32,7 @@ Current known skills include:
 - `Skills/Physics & Experimental Validator.md`
 - `Skills/GitHub Engineering Review.md`
 - `Skills/GUI UX Expert.md`
+- `Skills/Python Application Engineer.md`
 - `Skills/Copilot Skill Router.md`
 
 Additional specialist skills may be added later.
@@ -217,7 +218,8 @@ Typical tasks:
 
 ### 7. Python desktop application work
 
-Until a dedicated Python Application Engineer skill is created, read:
+Read:
+- `Python Application Engineer.md`
 
 - `Project Manager & Systems Architect.md`
 - `GUI UX Expert.md`
