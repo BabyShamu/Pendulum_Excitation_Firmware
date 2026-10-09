@@ -33,6 +33,27 @@ class RawSerialCaptureTests(unittest.TestCase):
             self.assertEqual(records[1]["terminator"], "LF")
             self.assertFalse(records[1]["partial"])
 
+    def test_existing_directory_capture_preserves_source_line_index(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            experiment_directory = Path(temporary_directory) / "experiment"
+            experiment_directory.mkdir()
+            capture = RawSerialCapture(
+                experiment_directory,
+                "experiment",
+                direct_directory=True,
+            )
+            capture.write_line(
+                b"device message",
+                b"\r\n",
+                0.25,
+                source_rx_line_index=42,
+            )
+            capture.close()
+
+            record = json.loads(capture.path.read_text(encoding="utf-8"))
+            self.assertEqual(record["rx_line_index"], 42)
+            self.assertEqual(capture.path.parent, experiment_directory)
+
     def test_partial_record_is_explicit(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             capture = RawSerialCapture(Path(temporary_directory), "partial-session")

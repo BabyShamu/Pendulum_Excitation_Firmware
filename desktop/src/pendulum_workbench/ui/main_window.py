@@ -5,8 +5,10 @@ from PySide6.QtGui import QAction, QColor
 from PySide6.QtWidgets import (
     QComboBox,
     QFrame,
+    QFileDialog,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QListWidget,
     QMainWindow,
     QMessageBox,
@@ -30,6 +32,7 @@ from pendulum_workbench.domain.models import (
     TelemetrySample,
 )
 from pendulum_workbench.domain.models import HomeStatus
+from pendulum_workbench.experiments.repository import LoadedExperiment
 from pendulum_workbench.ui.home_status_control import HomeStatusControl
 from pendulum_workbench.ui.hardware_status_card import HardwareStatusCard
 from pendulum_workbench.ui.status_indicator import IndicatorTone, StatusChip
@@ -43,6 +46,7 @@ class MainWindow(QMainWindow):
         self._samples: deque[TelemetrySample] = deque(maxlen=180)
         self._last_displayed_source: DataSourceMode | None = None
         self._last_connection_state: ConnectionState | None = None
+        self._loaded_experiment: LoadedExperiment | None = None
         self.setWindowTitle("Pendulum Workbench")
         self.resize(1220, 860)
         self.setMinimumSize(1000, 760)
@@ -64,6 +68,8 @@ class MainWindow(QMainWindow):
             QLabel#metricUnit { color: #76837f; font-size: 10px; }
             QLabel#sourceBadge { color: #a8512c; background: #fff0e7; padding: 6px 9px; font-weight: 700; }
             QComboBox { background: #ffffff; border: 1px solid #ccd8d1; border-radius: 7px; padding: 7px 9px; min-width: 130px; }
+            QLineEdit { background: #ffffff; border: 1px solid #d5dfd9; border-radius: 6px; padding: 7px 9px; }
+            QLineEdit:focus { border-color: #8ab29a; }
             QLabel#pathValue { color: #596c67; font-family: Consolas; font-size: 9px; }
             QPushButton { background: #f4f7f5; color: #28463b; border: 1px solid #cbd8d0; border-radius: 7px; padding: 8px 12px; font-weight: 600; }
             QPushButton:hover { background: #eaf2ed; border-color: #aac2b4; }
@@ -119,6 +125,7 @@ class MainWindow(QMainWindow):
         self.source_combo.setObjectName("dataSourceCombo")
         self.source_combo.addItem("Mock telemetry", DataSourceMode.MOCK)
         self.source_combo.addItem("Real STM32", DataSourceMode.REAL)
+        self.source_combo.addItem("Saved experiment", DataSourceMode.SAVED)
         self.source_combo.currentIndexChanged.connect(self._source_selection_changed)
         connection_layout.addWidget(self.source_combo)
         self.port_combo = QComboBox()
@@ -202,28 +209,40 @@ class MainWindow(QMainWindow):
         experiment_heading.setObjectName("sectionTitle")
         experiment_layout.addWidget(experiment_heading)
 
-        experiment_summary = QLabel("No experiment selected")
-        experiment_summary.setObjectName("subtle")
-        experiment_layout.addWidget(experiment_summary)
+        experiment_fields = QHBoxLayout()
+        experiment_fields.setSpacing(12)
+        name_group = QVBoxLayout()
+        name_label = QLabel("EXPERIMENT NAME")
+        name_label.setObjectName("sectionTitle")
+        self.experiment_name_input = QLineEdit()
+        self.experiment_name_input.setPlaceholderText("Optional run name")
+        name_group.addWidget(name_label)
+        name_group.addWidget(self.experiment_name_input)
+        notes_group = QVBoxLayout()
+        notes_label = QLabel("NOTES")
+        notes_label.setObjectName("sectionTitle")
+        self.experiment_notes_input = QLineEdit()
+        self.experiment_notes_input.setPlaceholderText("Operator notes (optional)")
+        notes_group.addWidget(notes_label)
+        notes_group.addWidget(self.experiment_notes_input)
+        experiment_fields.addLayout(name_group, 1)
+        experiment_fields.addLayout(notes_group, 2)
+        experiment_layout.addLayout(experiment_fields)
 
-        placeholders = QHBoxLayout()
-        placeholders.setSpacing(30)
-        for heading, detail in (
-            ("EXPERIMENT", "Selection unavailable"),
-            ("EXCITATION", "Not configured"),
-            ("EXECUTION", "Unavailable in Milestone 3"),
-        ):
-            group = QVBoxLayout()
-            group.setSpacing(7)
-            label = QLabel(heading)
-            label.setObjectName("sectionTitle")
-            value = QLabel(detail)
-            value.setObjectName("subtle")
-            group.addWidget(label)
-            group.addWidget(value)
-            group.addStretch(1)
-            placeholders.addLayout(group, 1)
-        experiment_layout.addLayout(placeholders, 1)
+        recording_controls = QHBoxLayout()
+        recording_controls.setSpacing(8)
+        self.start_recording_button = QPushButton("Start Recording")
+        self.start_recording_button.setObjectName("startRecordingButton")
+        self.start_recording_button.clicked.connect(self._start_recording)
+        recording_controls.addWidget(self.start_recording_button)
+        self.stop_recording_button = QPushButton("Stop Recording")
+        self.stop_recording_button.setObjectName("stopRecordingButton")
+        self.stop_recording_button.clicked.connect(self._stop_recording)
+        recording_controls.addWidget(self.stop_recording_button)
+        self.experiment_recording_status = QLabel("Recording is idle")
+        self.experiment_recording_status.setObjectName("subtle")
+        recording_controls.addWidget(self.experiment_recording_status, 1)
+        experiment_layout.addLayout(recording_controls)
         operational_row.addWidget(experiment_panel, 4)
         layout.addLayout(operational_row)
 
@@ -287,6 +306,9 @@ class MainWindow(QMainWindow):
         self.controller.state.snapshot_changed.connect(self._update_snapshot)
         self.controller.state.telemetry_received.connect(self._append_sample)
         self.controller.state.event_added.connect(self._append_event)
+        self.controller.experiment_loaded.connect(self._show_saved_experiment)
+        self.controller.experiment_recorder.recording_started.connect(self._on_recording_started)
+        self.controller.experiment_recorder.recording_finished.connect(self._on_recording_finished)
         self._update_snapshot(self.controller.state.snapshot)
         self._refresh_ports()
         self._create_menu_bar()
@@ -388,10 +410,21 @@ class MainWindow(QMainWindow):
         help_menu.addAction(self.about_action)
 
     def _open_experiment(self) -> None:
-        self.controller.state.report_event(
-            EventSeverity.INFO,
-            "Opening saved experiments is not available in Milestone 3.",
+        source, _ = QFileDialog.getOpenFileName(
+            self,
+            "Open Experiment Manifest",
+            str(self.controller.experiment_recorder.repository.root),
+            "Experiment manifest (manifest.json)",
         )
+        if not source:
+            return
+        try:
+            self.controller.open_experiment(source)
+        except (OSError, ValueError, RuntimeError, KeyError) as error:
+            self.controller.state.report_event(
+                EventSeverity.ERROR,
+                f"Could not open experiment: {error}",
+            )
 
     def _connect_from_menu(self) -> None:
         if self.controller.state.snapshot.data_source != DataSourceMode.REAL:
@@ -417,6 +450,70 @@ class MainWindow(QMainWindow):
             self.controller.select_data_source(mode)
         except RuntimeError as error:
             self.controller.state.report_event(EventSeverity.WARNING, str(error))
+            current_index = self.source_combo.findData(self.controller.state.snapshot.data_source)
+            if current_index >= 0:
+                self.source_combo.blockSignals(True)
+                self.source_combo.setCurrentIndex(current_index)
+                self.source_combo.blockSignals(False)
+
+    def _start_recording(self) -> None:
+        try:
+            self.controller.experiment_recorder.start_recording(
+                self.experiment_name_input.text(),
+                self.experiment_notes_input.text(),
+            )
+        except (OSError, RuntimeError, TimeoutError, ValueError) as error:
+            self.controller.state.report_event(EventSeverity.ERROR, str(error))
+            return
+
+    def _stop_recording(self) -> None:
+        try:
+            self.controller.experiment_recorder.stop_recording()
+        except (OSError, RuntimeError, TimeoutError) as error:
+            self.controller.state.report_event(EventSeverity.ERROR, str(error))
+
+    def _on_recording_started(self, experiment_id: str, directory: str) -> None:
+        self.experiment_recording_status.setText(f"Recording {experiment_id}")
+        self.capture_path_label.setText(f"Experiment raw capture: {directory}\\serial_capture.log")
+
+    def _on_recording_finished(self, experiment_id: str, status: str) -> None:
+        self.experiment_recording_status.setText(f"{status.title()}: {experiment_id}")
+        self.capture_path_label.setText(
+            f"Experiment folder: {self.controller.experiment_recorder.repository.root / experiment_id}"
+        )
+
+    def _show_saved_experiment(self, experiment: LoadedExperiment) -> None:
+        self._loaded_experiment = experiment
+        experiment_name = experiment.manifest.get("name") or experiment.experiment_id
+        self.source_badge.setText(f"SAVED EXPERIMENT · {experiment_name}")
+        self.source_badge.setStyleSheet(
+            "color: #344f67; background: #eaf1f7; padding: 6px 9px; font-weight: 700;"
+        )
+        self._samples.clear()
+        self._samples.extend(experiment.telemetry[-self._samples.maxlen:])
+        self.angle_plot.set_samples(
+            [(sample.elapsed_s, sample.angle_deg) for sample in self._samples
+             if sample.angle_deg is not None]
+        )
+        self.position_plot.set_samples(
+            [(sample.elapsed_s, sample.position_mm) for sample in self._samples
+             if sample.position_mm is not None]
+        )
+        self.samples_value[1].setText(f"{len(experiment.telemetry):,}")
+        if experiment.telemetry:
+            latest = experiment.telemetry[-1]
+            if latest.angle_deg is not None:
+                self.angle_value[1].setText(f"{latest.angle_deg:+.2f}")
+            if latest.position_mm is not None:
+                self.position_value[1].setText(f"{latest.position_mm:+.2f}")
+        self.experiment_name_input.setText(experiment.manifest.get("name", ""))
+        self.experiment_notes_input.setText(experiment.manifest.get("notes", ""))
+        self.experiment_recording_status.setText(
+            f"Loaded {experiment_name}"
+        )
+        self.capture_path_label.setText(
+            f"Experiment folder: {experiment.directory}"
+        )
 
     def _refresh_ports(self) -> None:
         selected_port = self.port_combo.currentData()
@@ -533,6 +630,16 @@ class MainWindow(QMainWindow):
             self.source_badge.setStyleSheet(
                 f"color: {badge_color}; background: {badge_background}; padding: 6px 9px; font-weight: 700;"
             )
+        if snapshot.data_source == DataSourceMode.SAVED:
+            experiment_name = (
+                self._loaded_experiment.manifest.get("name")
+                if self._loaded_experiment is not None
+                else "Saved data"
+            )
+            self.source_badge.setText(f"SAVED EXPERIMENT · {experiment_name}")
+            self.source_badge.setStyleSheet(
+                "color: #344f67; background: #eaf1f7; padding: 6px 9px; font-weight: 700;"
+            )
         self.samples_value[1].setText(f"{snapshot.samples_received:,}")
         if snapshot.latest_sample is not None:
             if snapshot.latest_sample.angle_deg is not None:
@@ -568,7 +675,25 @@ class MainWindow(QMainWindow):
         self.capture_path_label.setText(
             f"Raw serial capture: {snapshot.raw_capture_path or 'not connected'}"
         )
+        self._update_recording_controls(snapshot)
         self._update_source_controls(snapshot)
+
+    def _update_recording_controls(self, snapshot: ApplicationSnapshot) -> None:
+        live_source_ready = (
+            snapshot.data_source == DataSourceMode.MOCK and snapshot.mock_source_active
+        ) or (
+            snapshot.data_source == DataSourceMode.REAL
+            and snapshot.connection == ConnectionState.CONNECTED
+        )
+        recording_active = snapshot.recording in (
+            RecordingState.STARTING,
+            RecordingState.RECORDING,
+            RecordingState.STOPPING,
+        )
+        self.start_recording_button.setEnabled(live_source_ready and not recording_active)
+        self.stop_recording_button.setEnabled(snapshot.recording == RecordingState.RECORDING)
+        self.experiment_name_input.setEnabled(not recording_active)
+        self.experiment_notes_input.setEnabled(not recording_active)
 
     @staticmethod
     def _set_limit_card(card: HardwareStatusCard, active: bool | None) -> None:

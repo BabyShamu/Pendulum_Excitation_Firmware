@@ -34,6 +34,7 @@ class ReceivedSerialLine:
     received_at: datetime
     received_elapsed_s: float
     rx_line_index: int
+    terminator: bytes = b""
     partial: bool = False
 
 
@@ -187,6 +188,7 @@ class SerialWorker(QThread):
                     received_at=received_at,
                     received_elapsed_s=received_elapsed_s,
                     rx_line_index=rx_line_index,
+                    terminator=line.terminator,
                     partial=line.partial,
                 )
             )
@@ -197,6 +199,7 @@ class SerialTelemetryClient(QObject):
     connection_failed = Signal(str)
     connection_closed = Signal(str)
     telemetry_received = Signal(object)
+    raw_line_received = Signal(object)
     hardware_status_received = Signal(object)
     device_message_received = Signal(str)
     malformed_line_received = Signal(str)
@@ -286,6 +289,7 @@ class SerialTelemetryClient(QObject):
         self._set_stale(False)
 
     def _on_line_received(self, received_line: ReceivedSerialLine) -> None:
+        self.raw_line_received.emit(received_line)
         if received_line.partial:
             self.malformed_line_received.emit(
                 "Unterminated partial serial line preserved in raw capture."

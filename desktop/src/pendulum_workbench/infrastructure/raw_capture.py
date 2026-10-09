@@ -8,12 +8,25 @@ from uuid import uuid4
 
 
 class RawSerialCapture:
-    def __init__(self, root: Path, session_id: str | None = None) -> None:
+    def __init__(
+        self,
+        root: Path,
+        session_id: str | None = None,
+        *,
+        direct_directory: bool = False,
+        append: bool = False,
+    ) -> None:
         self.session_id = session_id or str(uuid4())
-        self.directory = root / self.session_id
-        self.directory.mkdir(parents=True, exist_ok=False)
+        self.directory = root if direct_directory else root / self.session_id
+        self.directory.mkdir(parents=True, exist_ok=direct_directory)
         self.path = self.directory / "serial_capture.log"
-        self._file: TextIO = self.path.open("x", encoding="utf-8", newline="\n")
+        if append and not self.path.exists():
+            raise FileNotFoundError(self.path)
+        self._file: TextIO = self.path.open(
+            "a" if append else "x",
+            encoding="utf-8",
+            newline="\n",
+        )
         self._rx_line_index = 0
 
     def write_line(
@@ -24,13 +37,17 @@ class RawSerialCapture:
         received_at: datetime | None = None,
         *,
         partial: bool = False,
+        source_rx_line_index: int | None = None,
     ) -> int:
         if self._file.closed:
             raise ValueError("serial capture is closed")
         if terminator not in (b"\r\n", b"\n", b"\r", b""):
             raise ValueError("unsupported line terminator")
 
-        self._rx_line_index += 1
+        if source_rx_line_index is None:
+            self._rx_line_index += 1
+        else:
+            self._rx_line_index = source_rx_line_index
         received_at = received_at or datetime.now(timezone.utc)
         record = {
             "rx_line_index": self._rx_line_index,

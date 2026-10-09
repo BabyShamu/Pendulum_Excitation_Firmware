@@ -115,6 +115,15 @@ class ApplicationStateModel(QObject):
     def set_home_status(self, status: HomeStatus) -> None:
         self._update(home_status=status)
 
+    def set_saved_telemetry(self, samples: tuple[TelemetrySample, ...]) -> None:
+        latest = samples[-1] if samples else None
+        self._update(
+            samples_received=len(samples),
+            latest_sample=latest,
+            last_valid_telemetry_at=latest.received_at if latest is not None else None,
+            telemetry_stale=False,
+        )
+
     def set_telemetry_stale(self, stale: bool) -> None:
         self._update(telemetry_stale=stale)
 

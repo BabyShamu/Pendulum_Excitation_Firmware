@@ -1,5 +1,5 @@
 from PySide6.QtGui import QFont
-from PySide6.QtWidgets import QFrame, QLabel, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QFrame, QLabel, QSizePolicy, QVBoxLayout, QWidget
 
 from pendulum_workbench.ui.status_indicator import IndicatorTone, StatusChip
 
@@ -31,6 +31,7 @@ class HardwareStatusCard(QFrame):
         layout.addWidget(self.title_label)
         layout.addWidget(self.state_label, 1)
         self.setMinimumSize(112, 60)
+        self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         self.set_state(state, IndicatorTone.UNKNOWN)
 
     @property

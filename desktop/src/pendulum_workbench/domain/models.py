@@ -48,6 +48,7 @@ class EventSeverity(str, Enum):
 class DataSourceMode(str, Enum):
     MOCK = "Mock"
     REAL = "Real STM32"
+    SAVED = "Saved Experiment"
 
 
 @dataclass(frozen=True, slots=True)

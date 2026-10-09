@@ -1,5 +1,8 @@
-from PySide6.QtCore import QObject
+from pathlib import Path
 
+from PySide6.QtCore import QObject, Signal
+
+from pendulum_workbench.application.experiment_recording import ExperimentRecordingService
 from pendulum_workbench.application.state import ApplicationStateModel
 from pendulum_workbench.domain.models import (
     ConnectionState,
@@ -12,19 +15,29 @@ from pendulum_workbench.infrastructure.serial_client import (
     SerialPortInfo,
     SerialTelemetryClient,
 )
+from pendulum_workbench.experiments.repository import ExperimentRepository, LoadedExperiment
 
 
 class WorkbenchController(QObject):
+    experiment_loaded = Signal(object)
+
     def __init__(
         self,
         state: ApplicationStateModel | None = None,
         mock_source: MockTelemetrySource | None = None,
         serial_client: SerialTelemetryClient | None = None,
+        experiment_repository: ExperimentRepository | None = None,
     ) -> None:
         super().__init__()
         self.state = state or ApplicationStateModel()
         self.mock_source = mock_source or MockTelemetrySource()
         self.serial_client = serial_client or SerialTelemetryClient()
+        self.experiment_recorder = ExperimentRecordingService(
+            self.state,
+            self.serial_client,
+            experiment_repository,
+        )
+        self._loaded_experiment: LoadedExperiment | None = None
         self._disconnect_requested = False
         self.mock_source.sample_ready.connect(self.state.publish_sample)
         self.serial_client.connection_opened.connect(self._on_serial_opened)
@@ -56,9 +69,16 @@ class WorkbenchController(QObject):
                 EventSeverity.WARNING,
                 "REAL STM32 mode selected; no device connected.",
             )
-        else:
+        elif mode == DataSourceMode.MOCK:
             self.state.set_data_source(mode)
             self.start_mock()
+        else:
+            if self._loaded_experiment is None:
+                raise RuntimeError("Open a saved experiment before selecting saved-data mode")
+            self.stop_mock()
+            self.state.set_data_source(DataSourceMode.SAVED)
+            self.state.set_saved_telemetry(self._loaded_experiment.telemetry)
+            self.experiment_loaded.emit(self._loaded_experiment)
 
     def start_mock(self) -> None:
         if self.state.snapshot.data_source != DataSourceMode.MOCK:
@@ -109,7 +129,28 @@ class WorkbenchController(QObject):
 
     def shutdown(self) -> None:
         self.stop_mock()
+        self.experiment_recorder.shutdown()
         self.serial_client.shutdown()
+
+    def open_experiment(self, source: Path | str) -> LoadedExperiment:
+        if self.experiment_recorder.is_recording:
+            raise RuntimeError("Stop the active recording before opening a saved experiment")
+        if self.state.snapshot.connection not in (
+            ConnectionState.DISCONNECTED,
+            ConnectionState.ERROR,
+        ):
+            raise RuntimeError("Disconnect the STM32 before opening a saved experiment")
+        loaded = self.experiment_recorder.load_experiment(source)
+        self.stop_mock()
+        self._loaded_experiment = loaded
+        self.state.set_data_source(DataSourceMode.SAVED)
+        self.state.set_saved_telemetry(loaded.telemetry)
+        self.state.report_event(
+            EventSeverity.INFO,
+            f"Opened experiment {loaded.manifest.get('name') or loaded.experiment_id}.",
+        )
+        self.experiment_loaded.emit(loaded)
+        return loaded
 
     def _on_serial_opened(self, capture_path: str) -> None:
         self.state.set_raw_capture_path(capture_path)

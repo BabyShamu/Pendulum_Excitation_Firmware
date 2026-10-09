@@ -1,5 +1,7 @@
 import unittest
+import tempfile
 from datetime import datetime, timezone
+from pathlib import Path
 
 from PySide6.QtWidgets import QApplication, QPushButton, QWidget
 
@@ -16,6 +18,7 @@ from pendulum_workbench.ui.home_status_control import HomeStatusControl
 from pendulum_workbench.ui.hardware_status_card import HardwareStatusCard
 from pendulum_workbench.ui.main_window import MainWindow
 from pendulum_workbench.ui.status_indicator import IndicatorTone, StatusChip
+from pendulum_workbench.experiments.repository import ExperimentRepository
 
 
 class MainWindowTests(unittest.TestCase):
@@ -142,24 +145,19 @@ class MainWindowTests(unittest.TestCase):
             window.home_status_control.width(),
             window.hardware_panel.width() - 32,
         )
-        self.assertEqual(
-            len({
-                (card.width(), card.height())
-                for card in (
-                    window.upper_limit_value,
-                    window.lower_limit_value,
-                    window.fault_value,
-                )
-            }),
+        hardware_cards = (
+            window.upper_limit_value,
+            window.lower_limit_value,
+            window.fault_value,
+        )
+        self.assertLessEqual(
+            max(card.width() for card in hardware_cards)
+            - min(card.width() for card in hardware_cards),
             1,
         )
+        self.assertEqual(len({card.height() for card in hardware_cards}), 1)
         middle_bottom = max(
-            card.geometry().bottom()
-            for card in (
-                window.upper_limit_value,
-                window.lower_limit_value,
-                window.fault_value,
-            )
+            card.geometry().bottom() for card in hardware_cards
         )
         self.assertGreater(window.active_mode_value[0].geometry().top(), middle_bottom)
         self.assertGreater(window.last_telemetry_value[0].geometry().top(), middle_bottom)
@@ -197,6 +195,57 @@ class MainWindowTests(unittest.TestCase):
         self.assertEqual(window.event_list.count(), 0)
         self.assertFalse(controller.serial_client.is_running)
         window.close()
+
+    def test_recording_can_be_stopped_and_reopened_after_app_restart(self) -> None:
+        temporary_directory = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary_directory.cleanup)
+        repository = ExperimentRepository(Path(temporary_directory.name))
+        controller = WorkbenchController(
+            mock_source=MockTelemetrySource(interval_ms=1000),
+            experiment_repository=repository,
+        )
+        self.addCleanup(controller.shutdown)
+        window = MainWindow(controller)
+        controller.start_mock()
+        window.experiment_name_input.setText("Free decay check")
+        window.experiment_notes_input.setText("Small-angle release")
+        window.start_recording_button.click()
+
+        self.assertEqual(controller.state.snapshot.recording.value, "Recording")
+        self.assertTrue(window.experiment_recording_status.text().startswith("Recording "))
+        controller.state.publish_sample(
+            TelemetrySample(
+                2,
+                0.25,
+                4.5,
+                -1.25,
+                source="mock",
+                received_at=datetime(2026, 10, 9, 12, tzinfo=timezone.utc),
+            )
+        )
+        session = controller.experiment_recorder.active_session
+        self.assertIsNotNone(session)
+        window.stop_recording_button.click()
+        self.assertEqual(controller.state.snapshot.recording.value, "Saved")
+        self.assertTrue(window.experiment_recording_status.text().startswith("Completed: "))
+        window.close()
+
+        reopened_controller = WorkbenchController(
+            mock_source=MockTelemetrySource(interval_ms=1000),
+            experiment_repository=repository,
+        )
+        self.addCleanup(reopened_controller.shutdown)
+        reopened_window = MainWindow(reopened_controller)
+        reopened_controller.open_experiment(session.directory)
+
+        self.assertEqual(reopened_controller.state.snapshot.data_source, DataSourceMode.SAVED)
+        self.assertEqual(reopened_window.source_badge.text(), "SAVED EXPERIMENT · Free decay check")
+        self.assertEqual(reopened_window.samples_value[1].text(), "1")
+        self.assertEqual(reopened_window.angle_value[1].text(), "+4.50")
+        self.assertEqual(reopened_window.position_value[1].text(), "-1.25")
+        self.assertEqual(reopened_window.experiment_notes_input.text(), "Small-angle release")
+        self.assertEqual(reopened_window._samples[-1].angle_deg, 4.5)
+        reopened_window.close()
 
 
 if __name__ == "__main__":
