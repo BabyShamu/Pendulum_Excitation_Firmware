@@ -138,6 +138,10 @@ class MainWindowTests(unittest.TestCase):
         self.qt_app.processEvents()
 
         self.assertGreaterEqual(window.hardware_panel.height(), 232)
+        self.assertGreaterEqual(
+            window.home_status_control.width(),
+            window.hardware_panel.width() - 32,
+        )
         self.assertEqual(
             len({
                 (card.width(), card.height())

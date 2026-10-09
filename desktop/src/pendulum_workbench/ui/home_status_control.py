@@ -1,55 +1,50 @@
-from PySide6.QtWidgets import QHBoxLayout, QLabel, QWidget
 from PySide6.QtGui import QFont
+from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QSizePolicy
 
 from pendulum_workbench.domain.models import HomeStatus
 from pendulum_workbench.ui.status_indicator import IndicatorTone, StatusChip
 
 
-class HomeStatusControl(QWidget):
-    _tones = {
-        HomeStatus.UNKNOWN: IndicatorTone.UNKNOWN,
-        HomeStatus.HOME_REQUIRED: IndicatorTone.WARNING,
-        HomeStatus.HOMING: IndicatorTone.WARNING,
-        HomeStatus.HOMED: IndicatorTone.GOOD,
-        HomeStatus.HOMING_FAILED: IndicatorTone.ERROR,
+class HomeStatusControl(QFrame):
+    _styles = {
+        HomeStatus.UNKNOWN: ("#eef0ef", "#c8cecb", "#46544f"),
+        HomeStatus.HOME_REQUIRED: ("#fff0d6", "#e0ad5c", "#754707"),
+        HomeStatus.HOMING: ("#edf3f8", "#a9bfd3", "#345570"),
+        HomeStatus.HOMED: ("#e5f3eb", "#8fc3a3", "#205b42"),
+        HomeStatus.HOMING_FAILED: ("#fbe8e6", "#d58a83", "#812f28"),
     }
 
     def __init__(self, status: HomeStatus = HomeStatus.UNKNOWN) -> None:
         super().__init__()
         self.setObjectName("homeStatusControl")
-        self.setMinimumHeight(56)
+        self.setMinimumHeight(60)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.setToolTip("Read-only homing status. Home commands are not available in this milestone.")
-        self.setStyleSheet(
-            "QWidget#homeStatusControl {"
-            "background: #f1f6f3; border: 1px solid #c9d9d0; border-radius: 8px;"
-            "}"
-            "QLabel#sectionTitle { background: transparent; border: none; }"
-        )
-        self.title = QLabel("DEVICE HOME")
-        self.title.setObjectName("sectionTitle")
-        self.title.setFont(QFont("Bahnschrift", 9, QFont.Weight.Bold))
-        self.indicator = StatusChip("Home", parent=self, show_name=False)
-        self.indicator.setMinimumSize(150, 36)
+        self.state_label = QLabel()
+        self.state_label.setObjectName("homeStatusText")
+        self.state_label.setFont(QFont("Bahnschrift", 12, QFont.Weight.Bold))
 
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(10, 4, 10, 4)
-        layout.setSpacing(10)
-        layout.addWidget(self.title)
-        layout.addWidget(self.indicator)
+        layout.setContentsMargins(16, 8, 16, 8)
+        layout.addWidget(self.state_label)
         self.set_home_status(status)
 
     @property
     def status(self) -> HomeStatus:
-        for status, tone in self._tones.items():
-            if self.indicator.tone == tone and self.indicator.state_text == status.value:
-                return status
-        return HomeStatus.UNKNOWN
+        return next(
+            status for status in self._styles if status.value == self.state_label.text()
+        )
 
     def set_home_status(self, status: HomeStatus) -> None:
-        self.indicator.set_status(
-            status.value,
-            self._tones[status],
-            f"Device home status is {status.value}.",
+        background, border, foreground = self._styles[status]
+        self.state_label.setText(status.value)
+        self.setStyleSheet(
+            "QFrame#homeStatusControl {"
+            f"background: {background}; border: 1px solid {border}; border-radius: 10px;"
+            "}"
+            "QLabel#homeStatusText {"
+            f"background: transparent; border: none; color: {foreground}; font-weight: 700;"
+            "}"
         )
         self.setAccessibleName(f"Device home status: {status.value}")
         self.setAccessibleDescription(

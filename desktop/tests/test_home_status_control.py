@@ -5,7 +5,6 @@ from PySide6.QtWidgets import QApplication
 from pendulum_workbench.application.controller import WorkbenchController
 from pendulum_workbench.domain.models import HomeStatus
 from pendulum_workbench.ui.home_status_control import HomeStatusControl
-from pendulum_workbench.ui.status_indicator import IndicatorTone
 
 
 class HomeStatusControlTests(unittest.TestCase):
@@ -16,26 +15,26 @@ class HomeStatusControlTests(unittest.TestCase):
     def test_all_device_home_states_are_visual_only_and_accessible(self) -> None:
         control = HomeStatusControl()
         expected = (
-            (HomeStatus.UNKNOWN, IndicatorTone.UNKNOWN),
-            (HomeStatus.HOME_REQUIRED, IndicatorTone.WARNING),
-            (HomeStatus.HOMING, IndicatorTone.WARNING),
-            (HomeStatus.HOMED, IndicatorTone.GOOD),
-            (HomeStatus.HOMING_FAILED, IndicatorTone.ERROR),
+            HomeStatus.UNKNOWN,
+            HomeStatus.HOME_REQUIRED,
+            HomeStatus.HOMING,
+            HomeStatus.HOMED,
+            HomeStatus.HOMING_FAILED,
         )
 
-        for status, tone in expected:
+        for status in expected:
             with self.subTest(status=status):
                 control.set_home_status(status)
                 self.assertEqual(control.status, status)
-                self.assertEqual(control.indicator.tone, tone)
-                self.assertEqual(control.indicator.state_text, status.value)
+                self.assertEqual(control.state_label.text(), status.value)
                 self.assertEqual(
                     control.accessibleName(), f"Device home status: {status.value}"
                 )
-            self.assertIn("border-radius: 8px", control.styleSheet())
+            self.assertIn("border-radius: 10px", control.styleSheet())
             self.assertIn("Read-only homing status", control.toolTip())
-            self.assertGreaterEqual(control.minimumHeight(), 56)
-            self.assertGreaterEqual(control.indicator.minimumWidth(), 150)
+            self.assertGreaterEqual(control.minimumHeight(), 60)
+            self.assertEqual(control.layout().count(), 1)
+            self.assertNotIn("HOME:", control.state_label.text())
         self.assertFalse(hasattr(control, "clicked"))
 
     def test_existing_firmware_messages_update_home_state_without_connecting(self) -> None:
