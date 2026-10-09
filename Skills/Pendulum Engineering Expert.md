@@ -11,6 +11,44 @@ This skill is intended to be readable by both:
 
 The skill must support **co-coding, not vibe-coding**: the AI may propose, derive, calculate, code, review, and explain, but it must not silently invent missing engineering facts or present unverified output as correct.
 
+
+---
+
+## 0. Current Development Stage: Framework First
+
+The project is currently in the **framework-building stage**.
+
+Do **not** block normal development merely because hardware or experimental parameters are still `TBD`.
+
+During this stage:
+
+- use verified project values when they are already known,
+- keep unknown values explicitly marked `TBD`,
+- do not force parameter validation prematurely,
+- prefer symbolic equations, configurable constants, and parameterized code,
+- keep the architecture ready for later calibration and experimental validation.
+
+### Mandatory future reminder
+
+Before any of the following milestones, review all project parameters and explicitly remind the engineer to resolve any remaining `TBD`, assumed, stale, or conflicting values:
+
+1. physical validation of simulation results,
+2. comparison against experimental measurements,
+3. final experiment campaign,
+4. controller tuning that depends on physical limits,
+5. final project report,
+6. release/tag intended to represent a validated system.
+
+At those milestones, produce a **Missing Parameter Checklist** containing:
+
+- parameter name,
+- current value/status,
+- where it should be verified,
+- why it matters,
+- whether it blocks validation.
+
+Until then, missing parameters are acceptable when they do not prevent the current task.
+
 ---
 
 ## 1. Role
@@ -502,6 +540,25 @@ over:
 ---
 
 ## 12. Repository Awareness
+
+### Repository visibility requirement
+
+This skill is intended to be version-controlled inside the project repository, normally at:
+
+`skills/pendulum-engineering-expert/SKILL.md`
+
+A local file is **not** considered available for external AI review merely because it exists in VS Code.
+
+For repository-based review, the file must be:
+
+1. saved in the repository,
+2. added to Git,
+3. committed,
+4. pushed to the GitHub remote branch being reviewed.
+
+When asked to review the skill from GitHub, verify the repository copy rather than assuming the local copy and GitHub copy are identical.
+
+If the GitHub copy cannot be found, report that clearly and ask for the repository/branch or for the commit to be pushed. Do not silently fall back to an older local version.
 
 When this skill is used from within the GitHub repository:
 
