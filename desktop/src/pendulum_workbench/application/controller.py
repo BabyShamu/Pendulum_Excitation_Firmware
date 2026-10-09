@@ -5,6 +5,7 @@ from pendulum_workbench.domain.models import (
     ConnectionState,
     DataSourceMode,
     EventSeverity,
+    HomeStatus,
 )
 from pendulum_workbench.infrastructure.mock_telemetry import MockTelemetrySource
 from pendulum_workbench.infrastructure.serial_client import (
@@ -135,6 +136,13 @@ class WorkbenchController(QObject):
             self.state.report_event(EventSeverity.WARNING, reason)
 
     def _on_device_message(self, message: str) -> None:
+        normalized = message.strip().lower()
+        if normalized.startswith("homing failed:"):
+            self.state.set_home_status(HomeStatus.HOMING_FAILED)
+        elif normalized.startswith("homing complete:"):
+            self.state.set_home_status(HomeStatus.HOMED)
+        elif normalized.startswith("homing:"):
+            self.state.set_home_status(HomeStatus.HOMING)
         if message and message != "Telemetry CSV header":
             self.state.report_event(EventSeverity.INFO, f"Device: {message[:180]}")
 

@@ -21,6 +21,14 @@ class MotionState(str, Enum):
     FAULT = "Fault"
 
 
+class HomeStatus(str, Enum):
+    UNKNOWN = "UNKNOWN"
+    HOME_REQUIRED = "HOME REQUIRED"
+    HOMING = "HOMING..."
+    HOMED = "HOMED"
+    HOMING_FAILED = "HOMING FAILED"
+
+
 class RecordingState(str, Enum):
     OFF = "Off"
     STARTING = "Starting"
@@ -81,6 +89,7 @@ class ApplicationSnapshot:
     connection: ConnectionState = ConnectionState.DISCONNECTED
     data_source: DataSourceMode = DataSourceMode.MOCK
     motion: MotionState = MotionState.UNKNOWN
+    home_status: HomeStatus = HomeStatus.UNKNOWN
     recording: RecordingState = RecordingState.OFF
     mock_source_active: bool = False
     real_port: str | None = None

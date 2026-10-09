@@ -10,6 +10,7 @@ from pendulum_workbench.domain.models import (
     DataSourceMode,
     EventSeverity,
     HardwareStatus,
+    HomeStatus,
     MotionState,
     RecordingState,
     TelemetrySample,
@@ -41,6 +42,7 @@ class ApplicationStateModel(QObject):
             samples_received=0,
             latest_sample=None,
             hardware_status=HardwareStatus(),
+            home_status=HomeStatus.UNKNOWN,
             telemetry_stale=False,
             last_valid_telemetry_at=None,
             raw_capture_path=None,
@@ -62,6 +64,7 @@ class ApplicationStateModel(QObject):
             samples_received=0,
             latest_sample=None,
             hardware_status=HardwareStatus(),
+            home_status=HomeStatus.UNKNOWN,
             telemetry_stale=False,
             last_valid_telemetry_at=None,
             raw_capture_path=None,
@@ -91,6 +94,14 @@ class ApplicationStateModel(QObject):
             updated_at=status.updated_at or current.updated_at,
         )
         motion = self._snapshot.motion
+        home_status = self._snapshot.home_status
+        if status.homed is True:
+            home_status = HomeStatus.HOMED
+        elif status.homed is False and home_status not in (
+            HomeStatus.HOMING,
+            HomeStatus.HOMING_FAILED,
+        ):
+            home_status = HomeStatus.HOME_REQUIRED
         if merged.fault:
             motion = MotionState.FAULT
         elif merged.active_motion_mode in (
@@ -99,7 +110,10 @@ class ApplicationStateModel(QObject):
             motion = MotionState.RUNNING
         elif merged.active_motion_mode in ("Idle", "Parametric test (no motion)"):
             motion = MotionState.READY if merged.homed else MotionState.IDLE
-        self._update(hardware_status=merged, motion=motion)
+        self._update(hardware_status=merged, motion=motion, home_status=home_status)
+
+    def set_home_status(self, status: HomeStatus) -> None:
+        self._update(home_status=status)
 
     def set_telemetry_stale(self, stale: bool) -> None:
         self._update(telemetry_stale=stale)

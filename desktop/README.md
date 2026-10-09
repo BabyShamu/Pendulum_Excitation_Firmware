@@ -13,6 +13,10 @@ Run those commands from this directory. The dashboard starts in clearly labelled
 
 Each real connection writes received serial lines to `%LOCALAPPDATA%/PendulumWorkbench/serial-captures/<session-id>/serial_capture.log`. The capture path is shown in the dashboard; malformed and partial lines remain in the raw log.
 
+## Hardware Startup Observation
+
+On 2026-10-09, the app connected to `COM6` but received no telemetry until the NUCLEO reset button was pressed. This is an observed, unresolved startup/reconnection behavior, not the expected connection workflow. Investigate why telemetry does not begin after a normal connection and determine whether a reset should ever be required; do not treat manual reset as the normal operating procedure.
+
 ## Test
 
 ```powershell
