@@ -16,5 +16,5 @@ def main() -> int:
     window = MainWindow(controller)
     controller.start_mock()
     window.show()
-    app.aboutToQuit.connect(controller.stop_mock)
+    app.aboutToQuit.connect(controller.shutdown)
     return app.exec()

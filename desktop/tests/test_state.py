@@ -6,6 +6,7 @@ from pendulum_workbench.application.state import ApplicationStateModel
 from pendulum_workbench.domain.models import (
     ConnectionState,
     EventSeverity,
+    HardwareStatus,
     MotionState,
     RecordingState,
     TelemetrySample,
@@ -37,6 +38,19 @@ class ApplicationStateTests(unittest.TestCase):
         self.assertEqual(state.snapshot.samples_received, 1)
         self.assertEqual(state.snapshot.latest_sample, sample)
         self.assertEqual(received, [sample])
+
+    def test_switch_updates_preserve_unknown_fault_and_other_status_fields(self) -> None:
+        state = ApplicationStateModel()
+        state.set_hardware_status(
+            HardwareStatus(upper_limit=True, lower_limit=False)
+        )
+
+        status = state.snapshot.hardware_status
+        self.assertTrue(status.upper_limit)
+        self.assertFalse(status.lower_limit)
+        self.assertIsNone(status.homed)
+        self.assertFalse(status.fault_known)
+        self.assertEqual(status.active_motion_mode, "Unknown")
 
     def test_event_is_timestamped_and_emitted(self) -> None:
         state = ApplicationStateModel()

@@ -19,6 +19,18 @@ class TrendPlot(QWidget):
         self._samples = samples
         self.update()
 
+    @staticmethod
+    def map_elapsed_to_x(
+        elapsed_s: float,
+        start_s: float,
+        end_s: float,
+        left: float,
+        width: float,
+    ) -> float:
+        if end_s <= start_s:
+            return left + width / 2
+        return left + (elapsed_s - start_s) / (end_s - start_s) * width
+
     def paintEvent(self, event: object) -> None:
         del event
         painter = QPainter(self)
@@ -87,9 +99,16 @@ class TrendPlot(QWidget):
             high += padding
 
         path = QPainterPath()
-        sample_count = len(self._samples)
-        for index, (_, value) in enumerate(self._samples):
-            x = plot.left() + plot.width() * index / max(1, sample_count - 1)
+        start_s = self._samples[0][0]
+        end_s = self._samples[-1][0]
+        for index, (elapsed_s, value) in enumerate(self._samples):
+            x = self.map_elapsed_to_x(
+                elapsed_s,
+                start_s,
+                end_s,
+                plot.left(),
+                plot.width(),
+            )
             y = plot.bottom() - (value - low) / (high - low) * plot.height()
             point = QPointF(x, y)
             if index == 0:

@@ -7,6 +7,7 @@ class ConnectionState(str, Enum):
     DISCONNECTED = "Disconnected"
     CONNECTING = "Connecting"
     CONNECTED = "Connected"
+    DISCONNECTING = "Disconnecting"
     ERROR = "Error"
 
 
@@ -36,13 +37,32 @@ class EventSeverity(str, Enum):
     ERROR = "Error"
 
 
+class DataSourceMode(str, Enum):
+    MOCK = "Mock"
+    REAL = "Real STM32"
+
+
 @dataclass(frozen=True, slots=True)
 class TelemetrySample:
     sample_index: int
     elapsed_s: float
-    angle_deg: float
-    position_mm: float
+    angle_deg: float | None
+    position_mm: float | None
     source: str = "mock"
+    device_time_s: float | None = None
+    received_at: datetime | None = None
+    rx_line_index: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class HardwareStatus:
+    homed: bool | None = None
+    upper_limit: bool | None = None
+    lower_limit: bool | None = None
+    active_motion_mode: str = "Unknown"
+    fault: str | None = None
+    fault_known: bool = False
+    updated_at: datetime | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -59,8 +79,14 @@ class AppEvent:
 @dataclass(frozen=True, slots=True)
 class ApplicationSnapshot:
     connection: ConnectionState = ConnectionState.DISCONNECTED
+    data_source: DataSourceMode = DataSourceMode.MOCK
     motion: MotionState = MotionState.UNKNOWN
     recording: RecordingState = RecordingState.OFF
     mock_source_active: bool = False
+    real_port: str | None = None
     samples_received: int = 0
     latest_sample: TelemetrySample | None = None
+    hardware_status: HardwareStatus = HardwareStatus()
+    telemetry_stale: bool = False
+    last_valid_telemetry_at: datetime | None = None
+    raw_capture_path: str | None = None
