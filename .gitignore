@@ -17,12 +17,7 @@
 *.hex
 *.map
 
-# ============================================
-# Experimental recordings
-# Keep the recordings folder locally,
-# but do not upload recorded data to GitHub
-# ============================================
-recordings/*.csv
+
 
 # Python cache / virtual environments
 __pycache__/
