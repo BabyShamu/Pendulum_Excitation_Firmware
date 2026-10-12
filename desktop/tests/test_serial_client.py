@@ -17,6 +17,7 @@ from pendulum_workbench.domain.models import (
     EventSeverity,
     MotionState,
 )
+from pendulum_workbench.domain.maintenance import PendulumLatchState
 from pendulum_workbench.infrastructure.serial_client import (
     SerialLineFramer,
     SerialTelemetryClient,
@@ -124,10 +125,69 @@ class StructuredEventSerial(FakeSerial):
         ]
 
 
+class StartupLatchProtocolSerial(FakeSerial):
+    def __init__(self, port: str, baud_rate: int, **kwargs: object) -> None:
+        super().__init__(port, baud_rate, **kwargs)
+        self._chunks = [
+            b"\r\nStepper control starting\r",
+            b"\nStepper control ready\r\n> ",
+        ]
+
+    def write(self, data: bytes) -> int:
+        self.writes.append(data)
+        command_line = data.decode("ascii", errors="replace").strip()
+        fields = command_line.split()
+        if command_line == "live 1":
+            self._chunks.append(
+                b"\r\nlive telemetry enabled\r\n"
+                b"> live time=79.980 angle_deg=1.20 position_mm=2.490\r\n"
+                b"telemetry sample_index=4000 time_s=80.000 angle_deg=1.25 position_mm=2.500\r\n"
+                b"telemetry sample_index=4001 time_s=80.020 angle_deg=1.30 position_mm=2.510\r\n"
+            )
+        elif len(fields) == 3 and fields[0] == "maint":
+            request_id, command = fields[1], fields[2]
+            if command == "status":
+                self._chunks.append(
+                    b"\r\n> "
+                    + (
+                        f"maintenance: id={request_id} type=status ok=1 homed=1 "
+                        "upper_limit=0 lower_limit=0 fault=0 active_mode=idle "
+                        "travel_span_steps=1200 position_steps=100 steps_per_mm=40.000\r\n> "
+                    ).encode("ascii")
+                )
+            elif command == "latch_hold":
+                self._chunks.append(
+                    (
+                        f"> maintenance: id={request_id} type=latch_hold ok=1 "
+                        "state=hold commanded=1 pulse_us=1400\r\n"
+                        "> telemetry sample_index=4002 time_s=80.040 angle_deg=1.35 position_mm=2.520\r\n"
+                    ).encode("ascii")
+                )
+            elif command == "latch_status":
+                self._chunks.append(
+                    (
+                        f"> maintenance: id={request_id} type=latch_status ok=1 "
+                        "state=hold commanded=1\r\n"
+                        "> telemetry sample_index=4003 time_s=80.060 angle_deg=1.40 position_mm=2.530\r\n"
+                    ).encode("ascii")
+                )
+        return len(data)
+
+
 class SerialWorkerTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.qt_app = QCoreApplication.instance() or QCoreApplication([])
+
+    def wait_for(self, predicate, timeout_s: float = 2.0) -> bool:
+        deadline = time.monotonic() + timeout_s
+        while time.monotonic() < deadline:
+            self.qt_app.processEvents()
+            if predicate():
+                return True
+            time.sleep(0.005)
+        self.qt_app.processEvents()
+        return predicate()
 
     def test_available_ports_exposes_device_and_description(self) -> None:
         ports = [SimpleNamespace(device="COM7", description="USB Serial Device")]
@@ -464,6 +524,76 @@ class SerialWorkerTests(unittest.TestCase):
         self.qt_app.processEvents()
 
         self.assertEqual(controller.state.snapshot.connection, ConnectionState.DISCONNECTED)
+
+    def test_startup_status_telemetry_and_latch_responses_share_serial_stream(self) -> None:
+        temporary_directory = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary_directory.cleanup)
+        devices: list[StartupLatchProtocolSerial] = []
+
+        def serial_factory(port: str, baud_rate: int, **kwargs: object) -> StartupLatchProtocolSerial:
+            device = StartupLatchProtocolSerial(port, baud_rate, **kwargs)
+            devices.append(device)
+            return device
+
+        client = SerialTelemetryClient(
+            capture_root=Path(temporary_directory.name),
+            serial_factory=serial_factory,
+            startup_delay_s=0.05,
+        )
+        controller = WorkbenchController(serial_client=client)
+        self.addCleanup(controller.shutdown)
+        malformed: list[str] = []
+        gaps = []
+        client.malformed_line_received.connect(malformed.append)
+        client.telemetry_sequence_gap.connect(gaps.append)
+        controller.select_data_source(DataSourceMode.REAL)
+        controller.connect_real("COM_STARTUP_LATCH")
+
+        connected_and_synchronized = self.wait_for(
+            lambda: controller.state.snapshot.hardware_status.homed is True
+            and not controller.firmware_commands.is_busy
+        )
+        self.assertTrue(
+            connected_and_synchronized,
+            f"writes={devices[0].writes!r}, snapshot={controller.state.snapshot!r}, "
+            f"malformed={malformed!r}, busy={controller.firmware_commands.is_busy}",
+        )
+        self.assertEqual(controller.state.snapshot.samples_received, 3)
+        self.assertEqual(controller.state.snapshot.latest_sample.device_sample_index, 4001)
+        self.assertEqual(controller.maintenance.snapshot.latch_state, PendulumLatchState.UNKNOWN)
+        self.assertTrue(any(write == b"live 1\r\n" for write in devices[0].writes))
+        self.assertTrue(any(write.endswith(b" status\r\n") for write in devices[0].writes))
+
+        controller.maintenance.command_latch(PendulumLatchState.HOLD)
+        self.assertTrue(
+            self.wait_for(
+                lambda: controller.maintenance.snapshot.latch_state == PendulumLatchState.HOLD
+                and controller.state.snapshot.samples_received >= 4
+            )
+        )
+        controller.maintenance.request_latch_status()
+        self.assertTrue(
+            self.wait_for(
+                lambda: not controller.firmware_commands.is_busy
+                and controller.state.snapshot.samples_received == 5
+            )
+        )
+
+        self.assertEqual(controller.state.snapshot.latest_sample.device_sample_index, 4003)
+        self.assertEqual(malformed, [])
+        self.assertEqual(gaps, [])
+        self.assertEqual(controller.state.snapshot.hardware_status.active_motion_mode, "Idle")
+        self.assertTrue(
+            all(
+                write.startswith(b"maint ")
+                for write in devices[0].writes
+                if b"latch_" in write
+            )
+        )
+        controller.disconnect_real()
+        self.assertTrue(
+            self.wait_for(lambda: controller.state.snapshot.connection == ConnectionState.DISCONNECTED)
+        )
 
     def test_serial_exception_is_exposed_as_connection_error(self) -> None:
         temporary_directory = tempfile.TemporaryDirectory()

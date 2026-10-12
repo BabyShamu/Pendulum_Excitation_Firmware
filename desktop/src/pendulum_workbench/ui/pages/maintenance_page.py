@@ -22,6 +22,7 @@ from pendulum_workbench.domain.maintenance import (
     CheckState,
     MaintenanceSnapshot,
     ManualMotionState,
+    PendulumLatchState,
     ReadinessState,
 )
 from pendulum_workbench.domain.models import (
@@ -261,6 +262,61 @@ class MaintenancePage(QWidget):
         self.manual_safety_note.setWordWrap(True)
         manual_layout.addWidget(self.manual_safety_note)
         layout.addWidget(manual_panel)
+
+        latch_panel = QFrame()
+        latch_panel.setObjectName("surface")
+        self._apply_card_depth(latch_panel)
+        latch_layout = QVBoxLayout(latch_panel)
+        latch_layout.setContentsMargins(16, 12, 16, 12)
+        latch_layout.setSpacing(8)
+        latch_header = QHBoxLayout()
+        latch_heading = QLabel("PENDULUM LATCH")
+        latch_heading.setObjectName("sectionTitle")
+        latch_header.addWidget(latch_heading)
+        latch_header.addStretch(1)
+        self.latch_status_button = QPushButton("Read state")
+        self.latch_status_button.setObjectName("latchStatusButton")
+        self.latch_status_button.setIcon(
+            self.style().standardIcon(QStyle.StandardPixmap.SP_BrowserReload)
+        )
+        self.latch_status_button.setToolTip("Read the firmware's commanded latch state")
+        self.latch_status_button.clicked.connect(self._request_latch_status)
+        latch_header.addWidget(self.latch_status_button)
+        latch_layout.addLayout(latch_header)
+
+        self.latch_state_value = QLabel(PendulumLatchState.UNKNOWN.value)
+        self.latch_state_value.setObjectName("pendulumLatchState")
+        self.latch_state_value.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        latch_layout.addWidget(self.latch_state_value)
+        self.latch_message_value = QLabel("No latch command state has been confirmed.")
+        self.latch_message_value.setObjectName("subtle")
+        self.latch_message_value.setWordWrap(True)
+        latch_layout.addWidget(self.latch_message_value)
+
+        latch_buttons = QHBoxLayout()
+        latch_buttons.setSpacing(12)
+        self.latch_hold_button = QPushButton("HOLD")
+        self.latch_hold_button.setObjectName("latchHoldButton")
+        self.latch_hold_button.clicked.connect(
+            lambda: self._command_latch(PendulumLatchState.HOLD)
+        )
+        self.latch_open_button = QPushButton("OPEN")
+        self.latch_open_button.setObjectName("latchOpenButton")
+        self.latch_open_button.clicked.connect(
+            lambda: self._command_latch(PendulumLatchState.OPEN)
+        )
+        latch_buttons.addWidget(self.latch_hold_button, 1)
+        latch_buttons.addWidget(self.latch_open_button, 1)
+        latch_layout.addLayout(latch_buttons)
+
+        self.latch_commissioning_note = QLabel(
+            "Position is manually calibrated. The servo holds or opens the pendulum latch; "
+            "it does not set the pendulum initial angle. State is command-only, with no position feedback."
+        )
+        self.latch_commissioning_note.setObjectName("subtle")
+        self.latch_commissioning_note.setWordWrap(True)
+        latch_layout.addWidget(self.latch_commissioning_note)
+        layout.addWidget(latch_panel)
         layout.addStretch(1)
 
         controller.state.snapshot_changed.connect(self._update_application_state)
@@ -307,6 +363,19 @@ class MaintenancePage(QWidget):
     def _stop_manual_motion(self, reason: str) -> None:
         if self.maintenance.is_manual_motion_active:
             self.maintenance.stop_manual_motion(reason)
+
+    def _command_latch(self, state: PendulumLatchState) -> None:
+        try:
+            self.maintenance.command_latch(state)
+        except (RuntimeError, ValueError) as error:
+            self.latch_message_value.setText(f"Latch command blocked: {error}")
+            self.controller.state.report_event(EventSeverity.WARNING, str(error))
+
+    def _request_latch_status(self) -> None:
+        try:
+            self.maintenance.request_latch_status()
+        except (RuntimeError, ValueError) as error:
+            self.latch_message_value.setText(f"Latch status unavailable: {error}")
 
     def _on_application_state_changed(self, state) -> None:
         if state != Qt.ApplicationState.ApplicationActive:
@@ -370,6 +439,17 @@ class MaintenancePage(QWidget):
             manual_active and direction in (ManualMotionState.STARTING_DOWN, ManualMotionState.MOVING_DOWN)
             or (manual_ready and snapshot.hardware_status.lower_limit is False)
         )
+        latch_ready = (
+            connected
+            and not busy
+            and not recording_active
+            and snapshot.motion not in (MotionState.RUNNING, MotionState.HOMING, MotionState.STOPPING)
+            and not blocking_fault
+            and snapshot.hardware_status.active_motion_mode.strip().lower() == "idle"
+        )
+        self.latch_hold_button.setEnabled(latch_ready)
+        self.latch_open_button.setEnabled(latch_ready)
+        self.latch_status_button.setEnabled(connected and not busy)
         self.home_state_value.setText(snapshot.home_status.value)
         self.upper_limit_value.setText(self._limit_text(snapshot.hardware_status.upper_limit))
         self.lower_limit_value.setText(self._limit_text(snapshot.hardware_status.lower_limit))
@@ -432,6 +512,9 @@ class MaintenancePage(QWidget):
             button.setProperty("manualActive", is_active)
             button.style().unpolish(button)
             button.style().polish(button)
+        self.latch_state_value.setText(snapshot.latch_state.value)
+        self.latch_state_value.setToolTip(snapshot.latch_message)
+        self.latch_message_value.setText(snapshot.latch_message)
         self._update_application_state(self.controller.state.snapshot)
 
     def _update_manual_position(self, sample) -> None:

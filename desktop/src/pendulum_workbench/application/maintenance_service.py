@@ -17,6 +17,7 @@ from pendulum_workbench.domain.maintenance import (
     CheckState,
     MaintenanceSnapshot,
     ManualMotionState,
+    PendulumLatchState,
     ReadinessState,
 )
 from pendulum_workbench.domain.models import (
@@ -81,6 +82,8 @@ class MaintenanceService(QObject):
         self._manual_communication_failed = False
         self._manual_motion_state = ManualMotionState.IDLE
         self._manual_motion_message = "Manual pivot is idle."
+        self._latch_state = PendulumLatchState.UNKNOWN
+        self._latch_message = "No latch command state has been confirmed."
         self._manual_keepalive = QTimer(self)
         self._manual_keepalive.timeout.connect(self._send_manual_keepalive)
         self._previous_connection = state.snapshot.connection
@@ -237,6 +240,54 @@ class MaintenanceService(QObject):
         self._emit_snapshot()
         self._request(self.commands.set_angle_zero)
 
+    def command_latch(self, state: PendulumLatchState) -> None:
+        if state not in (PendulumLatchState.HOLD, PendulumLatchState.OPEN):
+            raise ValueError("Latch command must be HOLD or OPEN")
+        self._require_connected()
+        if self.is_busy:
+            raise RuntimeError("Another maintenance operation is active")
+
+        snapshot = self.state.snapshot
+        if self.is_homing or snapshot.motion == MotionState.HOMING:
+            raise RuntimeError("Pendulum latch commands are blocked during homing")
+        if self.is_manual_motion_active or snapshot.motion in (
+            MotionState.RUNNING,
+            MotionState.STOPPING,
+        ):
+            raise RuntimeError("Pendulum latch commands are blocked during pivot motion")
+        if snapshot.recording in (
+            RecordingState.STARTING,
+            RecordingState.RECORDING,
+            RecordingState.STOPPING,
+        ):
+            raise RuntimeError("Stop experiment recording before commanding the pendulum latch")
+        if snapshot.hardware_status.fault_known and snapshot.hardware_status.fault:
+            raise RuntimeError("Pendulum latch commands are blocked by the firmware fault state")
+        active_mode = snapshot.hardware_status.active_motion_mode.strip().lower()
+        if active_mode != "idle":
+            raise RuntimeError("Firmware motion state is not confirmed idle; synchronize status before commanding the latch")
+
+        self._latch_state = (
+            PendulumLatchState.COMMANDING_HOLD
+            if state == PendulumLatchState.HOLD
+            else PendulumLatchState.COMMANDING_OPEN
+        )
+        self._latch_message = f"Requesting commanded {state.value} from firmware."
+        self._active_operation = "latch"
+        self._operation_message = self._latch_message
+        self._emit_snapshot()
+        self._request(self.commands.latch_hold if state == PendulumLatchState.HOLD else self.commands.latch_open)
+
+    def request_latch_status(self) -> None:
+        self._require_connected()
+        if self.is_busy:
+            raise RuntimeError("Another maintenance operation is active")
+        self._active_operation = "latch_status"
+        self._latch_message = "Reading firmware's commanded latch state."
+        self._operation_message = self._latch_message
+        self._emit_snapshot()
+        self._request(self.commands.latch_status)
+
     def _request(self, command: Callable[[], int]) -> None:
         try:
             command()
@@ -247,6 +298,8 @@ class MaintenanceService(QObject):
                 self._fail_homing(str(error))
             elif self._active_operation == "zero":
                 self._finish_zero(False, str(error))
+            elif self._active_operation in ("latch", "latch_status"):
+                self._finish_latch(PendulumLatchState.UNCONFIRMED, str(error))
             elif self._active_operation in (
                 "manual_start",
                 "manual",
@@ -280,6 +333,8 @@ class MaintenanceService(QObject):
             self._handle_homing_response(command, response)
         elif self._active_operation == "zero":
             self._handle_zero_response(command, response)
+        elif self._active_operation in ("latch", "latch_status"):
+            self._handle_latch_response(command, response)
         elif self._active_operation == "manual_start":
             expected = FirmwareCommand.MANUAL_UP if self._manual_direction == "up" else FirmwareCommand.MANUAL_DOWN
             if command != expected or response.fields.get("active") != "1":
@@ -456,6 +511,63 @@ class MaintenanceService(QObject):
         elif self._active_operation == "zero":
             self._finish_zero(False, failure.message)
 
+    def _handle_latch_response(
+        self,
+        command: FirmwareCommand,
+        response: MaintenanceResponse,
+    ) -> None:
+        reported_state = response.fields.get("state")
+        if self._active_operation == "latch_status":
+            if reported_state == "hold" and response.fields.get("commanded") == "1":
+                self._finish_latch(
+                    PendulumLatchState.HOLD,
+                    "Firmware reports commanded HOLD; physical latch position is not measured.",
+                )
+            elif reported_state == "open" and response.fields.get("commanded") == "1":
+                self._finish_latch(
+                    PendulumLatchState.OPEN,
+                    "Firmware reports commanded OPEN; physical latch position is not measured.",
+                )
+            elif reported_state == "unknown" and response.fields.get("commanded") == "0":
+                self._finish_latch(
+                    PendulumLatchState.UNKNOWN,
+                    "Firmware reports no latch command since startup.",
+                )
+            else:
+                self._finish_latch(
+                    PendulumLatchState.UNCONFIRMED,
+                    "Firmware returned an invalid latch command state.",
+                )
+            return
+
+        expected_state = (
+            "hold" if command == FirmwareCommand.LATCH_HOLD else "open"
+        )
+        if reported_state != expected_state or response.fields.get("commanded") != "1":
+            self._finish_latch(
+                PendulumLatchState.UNCONFIRMED,
+                f"Firmware did not confirm commanded {expected_state.upper()}.",
+            )
+            return
+        state = PendulumLatchState.HOLD if expected_state == "hold" else PendulumLatchState.OPEN
+        self._finish_latch(
+            state,
+            f"Firmware acknowledged commanded {expected_state.upper()}; physical latch position is not measured.",
+        )
+
+    def _finish_latch(self, state: PendulumLatchState, message: str) -> None:
+        self._active_operation = None
+        self._latch_state = state
+        self._latch_message = message
+        self._operation_message = message
+        severity = (
+            EventSeverity.INFO
+            if state in (PendulumLatchState.UNKNOWN, PendulumLatchState.HOLD, PendulumLatchState.OPEN)
+            else EventSeverity.ERROR
+        )
+        self.state.report_event(severity, message)
+        self._emit_snapshot()
+
     def _on_command_failed(self, failure: FirmwareCommandFailure) -> None:
         if self._status_sync_pending and failure.command == FirmwareCommand.STATUS:
             self._status_sync_pending = False
@@ -477,6 +589,12 @@ class MaintenanceService(QObject):
             self._fail_manual_motion(failure.message)
             if self._status_sync_deferred and self._active_operation is None:
                 self._request_status_sync()
+            return
+        if self._active_operation in ("latch", "latch_status"):
+            self._finish_latch(
+                PendulumLatchState.UNCONFIRMED,
+                f"Latch command unconfirmed: {self._user_facing_error(failure.message)}",
+            )
             return
         self._handle_command_failed(failure)
         if self._status_sync_deferred and self._active_operation is None:
@@ -862,6 +980,8 @@ class MaintenanceService(QObject):
         self._steps_per_mm = None
         self._position_mm = None
         self._current_angle_deg = None
+        self._latch_state = PendulumLatchState.UNKNOWN
+        self._latch_message = "Latch command state is unknown for this STM32 session."
         if self._active_operation == "system_check":
             self._active_operation = None
             self._operation_message = "System check invalidated by connection/source change."
@@ -907,6 +1027,8 @@ class MaintenanceService(QObject):
             position_mm=self._position_mm,
             manual_motion=self._manual_motion_state,
             manual_motion_message=self._manual_motion_message,
+            latch_state=self._latch_state,
+            latch_message=self._latch_message,
         )
 
     def _emit_snapshot(self) -> None:

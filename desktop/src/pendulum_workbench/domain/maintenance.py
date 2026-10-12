@@ -24,6 +24,15 @@ class ManualMotionState(str, Enum):
     FAULT = "FAULT"
 
 
+class PendulumLatchState(str, Enum):
+    UNKNOWN = "UNKNOWN"
+    COMMANDING_HOLD = "COMMANDING HOLD"
+    COMMANDING_OPEN = "COMMANDING OPEN"
+    HOLD = "HOLD"
+    OPEN = "OPEN"
+    UNCONFIRMED = "UNCONFIRMED"
+
+
 class BitResultState(str, Enum):
     NOT_RUN = "NOT RUN"
     CHECKING = "CHECKING"
@@ -71,3 +80,5 @@ class MaintenanceSnapshot:
     position_mm: float | None = None
     manual_motion: ManualMotionState = ManualMotionState.IDLE
     manual_motion_message: str = ""
+    latch_state: PendulumLatchState = PendulumLatchState.UNKNOWN
+    latch_message: str = "No latch command state has been confirmed."

@@ -126,6 +126,55 @@ class FirmwareManualMotionContractTests(unittest.TestCase):
         self.assertEqual(homing.count("StepOne(HOMING_SPEED_HZ"), 3)
         self.assertNotIn("ManualStepTimer", homing)
 
+    def test_latch_pwm_is_lazy_and_pc7_has_no_boot_actuation(self) -> None:
+        startup = function_body("main")
+        gpio_init = function_body("GPIO_Init")
+        pwm_init = function_body("ServoLatchPwmInitialize")
+        pwm_command = function_body("ServoLatchCommand")
+        self.assertIn("GPIO_InitStruct.Pin = GPIO_PIN_7", gpio_init)
+        self.assertIn("GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP", gpio_init)
+        self.assertIn("HAL_GPIO_WritePin(GPIOC, GPIO_PIN_7, GPIO_PIN_RESET)", gpio_init)
+        self.assertNotIn("ServoLatchPwmInitialize", startup)
+        self.assertNotIn("ServoLatchCommand", startup)
+        self.assertNotIn("HAL_TIM_PWM_Start", startup)
+        self.assertIn("channelConfig.Pulse = 0U", pwm_init)
+        self.assertNotIn("HAL_TIM_PWM_Start", pwm_init)
+        self.assertIn("HAL_TIM_PWM_Start(&htim8, TIM_CHANNEL_2)", pwm_command)
+
+    def test_latch_uses_pc7_tim8_channel_two_at_50_hz_with_tbd_defaults(self) -> None:
+        self.assertRegex(FIRMWARE_SOURCE, r"#define SERVO_LATCH_PWM_PERIOD_US\s+20000U")
+        self.assertRegex(FIRMWARE_SOURCE, r"#define SERVO_LATCH_HOLD_PULSE_US\s+1400U")
+        self.assertRegex(FIRMWARE_SOURCE, r"#define SERVO_LATCH_OPEN_PULSE_US\s+1600U")
+        self.assertIn("mechanically calibrated or validated", FIRMWARE_SOURCE)
+        self.assertIn("GPIO_AF3_TIM8", function_body("ServoLatchCommand"))
+        self.assertIn("TIM_CHANNEL_2", function_body("ServoLatchCommand"))
+        self.assertIn("SERVO_LATCH_HOLD_PULSE_US", function_body("ProcessMaintenanceCommand"))
+        self.assertIn("SERVO_LATCH_OPEN_PULSE_US", function_body("ProcessMaintenanceCommand"))
+        self.assertNotIn("TIM6->", function_body("ServoLatchPwmInitialize"))
+        self.assertNotIn("TIM7->", function_body("ServoLatchPwmInitialize"))
+
+    def test_latch_firmware_interlocks_and_commanded_status_are_explicit(self) -> None:
+        interlock = function_body("ServoLatchInterlockReason")
+        for required_check in (
+            "g_homingActive",
+            "g_manualMotionDirection",
+            "g_run",
+            "g_sineRunning",
+            "g_parametricRunning",
+            "g_parametricTestRunning",
+            "g_parametricClosedLoopRunning",
+            "g_recording",
+            "g_closedLoopFault",
+        ):
+            self.assertIn(required_check, interlock)
+        handler = function_body("ProcessMaintenanceCommand")
+        for protocol_term in ("latch_status", "latch_hold", "latch_open", "commanded=1"):
+            self.assertIn(protocol_term, handler)
+        self.assertRegex(
+            FIRMWARE_SOURCE,
+            r"g_servoLatchCommandedState\s*=\s*SERVO_LATCH_STATE_UNKNOWN",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -375,6 +375,8 @@ class SerialTelemetryClient(QObject):
             )
             return
         text = received_line.payload.decode("ascii", errors="replace")
+        if text.startswith("> "):
+            text = text[2:].lstrip()
         maintenance_response = FirmwareProtocolParser.parse_maintenance_response(text)
         if maintenance_response is not None:
             self.maintenance_response_received.emit(maintenance_response)

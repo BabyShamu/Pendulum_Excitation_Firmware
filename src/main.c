@@ -48,6 +48,13 @@
 #define MANUAL_STOP_REASON_INTERLOCK   2U
 #define MANUAL_STOP_REASON_UPPER_LIMIT 3U
 #define MANUAL_STOP_REASON_LOWER_LIMIT 4U
+// Commissioning defaults only; neither position is mechanically calibrated or validated.
+#define SERVO_LATCH_PWM_PERIOD_US 20000U
+#define SERVO_LATCH_HOLD_PULSE_US 1400U
+#define SERVO_LATCH_OPEN_PULSE_US 1600U
+#define SERVO_LATCH_STATE_UNKNOWN 0U
+#define SERVO_LATCH_STATE_HOLD    1U
+#define SERVO_LATCH_STATE_OPEN    2U
 #ifndef MANUAL_MOTION_DEADMAN_TIMEOUT_MS
 // Development default only; validate timeout against the real stage and serial path before release.
 #define MANUAL_MOTION_DEADMAN_TIMEOUT_MS 350U
@@ -130,6 +137,10 @@ static void UpdateManualMotion(void);
 static void StopManualMotion(const char *reason);
 static uint8_t ManualMotionSafetyStopReason(void);
 static const char *ManualMotionStopReasonText(uint8_t reason);
+static uint8_t ServoLatchPwmInitialize(void);
+static uint8_t ServoLatchCommand(uint16_t pulseUs, uint8_t commandedState);
+static const char *ServoLatchStateName(uint8_t state);
+static const char *ServoLatchInterlockReason(void);
 static const char *ActiveModeName(void);
 static void ReturnToCenter(void);
 static void UpdateSine(void);
@@ -160,6 +171,7 @@ static void Error_Handler(void);
 static UART_HandleTypeDef huart2;
 static DMA_HandleTypeDef hdma_usart2_rx;
 static I2C_HandleTypeDef hi2c1;
+static TIM_HandleTypeDef htim8;
 static char g_rxBuf[UART_RX_BUF_SIZE];
 static uint32_t g_rxIdx = 0U;
 static uint8_t g_rxLineTooLong = 0U;
@@ -187,6 +199,7 @@ static uint8_t g_homed = 0U;
 static uint8_t g_sineRunning = 0U;
 static uint32_t g_travelSteps = 0U;
 static volatile int32_t g_positionSteps = 0;
+static uint8_t g_homingActive = 0U;
 static volatile uint8_t g_manualMotionDirection = 0U;
 static volatile uint32_t g_manualMotionLastKeepaliveMs = 0U;
 static volatile uint8_t g_manualMotionStopPending = MANUAL_STOP_REASON_NONE;
@@ -245,6 +258,9 @@ static uint32_t g_lastLiveMs = 0U;
 static uint32_t g_liveSampleIndex = 0U;
 static float g_stepsPerMm = DEFAULT_STEPS_PER_MM;
 static uint8_t g_i2cReady = 0U;
+static uint8_t g_servoLatchCommandedState = SERVO_LATCH_STATE_UNKNOWN;
+static uint8_t g_servoLatchPwmInitialized = 0U;
+static uint8_t g_servoLatchPwmActive = 0U;
 static uint8_t g_angleSensorUnavailable = 0U;
 static uint8_t g_angleSensorConsecutiveFailures = 0U;
 static uint32_t g_lastI2cRecoveryMs = 0U;
@@ -1044,6 +1060,135 @@ static const char *ManualMotionStopReasonText(uint8_t reason)
     }
 }
 
+static uint8_t ServoLatchPwmInitialize(void)
+{
+    RCC_ClkInitTypeDef clockConfig;
+    uint32_t flashLatency;
+    uint32_t timerClockHz;
+    TIM_OC_InitTypeDef channelConfig = {0};
+
+    if (g_servoLatchPwmInitialized != 0U)
+    {
+        return 1U;
+    }
+
+    __HAL_RCC_TIM8_CLK_ENABLE();
+    HAL_RCC_GetClockConfig(&clockConfig, &flashLatency);
+    timerClockHz = HAL_RCC_GetPCLK2Freq();
+    if (clockConfig.APB2CLKDivider != RCC_HCLK_DIV1)
+    {
+        timerClockHz *= 2U;
+    }
+    if (timerClockHz < 1000000U || (timerClockHz % 1000000U) != 0U)
+    {
+        return 0U;
+    }
+
+    htim8.Instance = TIM8;
+    htim8.Init.Prescaler = (timerClockHz / 1000000U) - 1U;
+    htim8.Init.CounterMode = TIM_COUNTERMODE_UP;
+    htim8.Init.Period = SERVO_LATCH_PWM_PERIOD_US - 1U;
+    htim8.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
+    htim8.Init.RepetitionCounter = 0U;
+    htim8.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
+    if (HAL_TIM_PWM_Init(&htim8) != HAL_OK)
+    {
+        return 0U;
+    }
+
+    channelConfig.OCMode = TIM_OCMODE_PWM1;
+    channelConfig.Pulse = 0U;
+    channelConfig.OCPolarity = TIM_OCPOLARITY_HIGH;
+    channelConfig.OCNPolarity = TIM_OCNPOLARITY_HIGH;
+    channelConfig.OCFastMode = TIM_OCFAST_DISABLE;
+    channelConfig.OCIdleState = TIM_OCIDLESTATE_RESET;
+    channelConfig.OCNIdleState = TIM_OCNIDLESTATE_RESET;
+    if (HAL_TIM_PWM_ConfigChannel(&htim8, &channelConfig, TIM_CHANNEL_2) != HAL_OK)
+    {
+        (void)HAL_TIM_PWM_DeInit(&htim8);
+        return 0U;
+    }
+
+    g_servoLatchPwmInitialized = 1U;
+    return 1U;
+}
+
+static uint8_t ServoLatchCommand(uint16_t pulseUs, uint8_t commandedState)
+{
+    GPIO_InitTypeDef gpio = {0};
+
+    if ((commandedState != SERVO_LATCH_STATE_HOLD &&
+         commandedState != SERVO_LATCH_STATE_OPEN) ||
+        pulseUs < 500U || pulseUs > 2500U || ServoLatchPwmInitialize() == 0U)
+    {
+        return 0U;
+    }
+
+    __HAL_RCC_GPIOC_CLK_ENABLE();
+    gpio.Pin = GPIO_PIN_7;
+    gpio.Mode = GPIO_MODE_AF_PP;
+    gpio.Pull = GPIO_NOPULL;
+    gpio.Speed = GPIO_SPEED_FREQ_LOW;
+    gpio.Alternate = GPIO_AF3_TIM8;
+    HAL_GPIO_Init(GPIOC, &gpio);
+
+    __HAL_TIM_SET_COMPARE(&htim8, TIM_CHANNEL_2, pulseUs);
+    if (g_servoLatchPwmActive == 0U)
+    {
+        if (HAL_TIM_PWM_Start(&htim8, TIM_CHANNEL_2) != HAL_OK)
+        {
+            __HAL_TIM_SET_COMPARE(&htim8, TIM_CHANNEL_2, 0U);
+            gpio.Mode = GPIO_MODE_INPUT;
+            gpio.Alternate = 0U;
+            HAL_GPIO_Init(GPIOC, &gpio);
+            return 0U;
+        }
+        g_servoLatchPwmActive = 1U;
+    }
+
+    g_servoLatchCommandedState = commandedState;
+    return 1U;
+}
+
+static const char *ServoLatchStateName(uint8_t state)
+{
+    switch (state)
+    {
+        case SERVO_LATCH_STATE_HOLD:
+            return "hold";
+        case SERVO_LATCH_STATE_OPEN:
+            return "open";
+        default:
+            return "unknown";
+    }
+}
+
+static const char *ServoLatchInterlockReason(void)
+{
+    if (g_homingActive != 0U)
+    {
+        return "homing_active";
+    }
+    if (g_manualMotionDirection != 0U)
+    {
+        return "manual_motion_active";
+    }
+    if (g_run != 0U || g_sineRunning != 0U || g_parametricRunning != 0U ||
+        g_parametricTestRunning != 0U || g_parametricClosedLoopRunning != 0U)
+    {
+        return "motion_active";
+    }
+    if (g_recording != 0U)
+    {
+        return "recording_active";
+    }
+    if (g_closedLoopFault != 0U)
+    {
+        return "blocking_fault";
+    }
+    return NULL;
+}
+
 static void ManualStepTimerOnTimer(void)
 {
     uint8_t reason;
@@ -1099,6 +1244,7 @@ static void Home(void)
     uint32_t spanSteps = 0U;
 
     g_homed = 0U;
+    g_homingActive = 1U;
     g_parametricClosedLoopRunning = 0U;
     ClosedLoopActuatorStop();
     g_parametricTestRunning = 0U;
@@ -1129,6 +1275,7 @@ static void Home(void)
 
     if (LowerLimitPressedDebounced() == 0U)
     {
+        g_homingActive = 0U;
         UartPrint("homing failed: lower limit not found\r\n");
         return;
     }
@@ -1159,6 +1306,7 @@ static void Home(void)
 
     if (UpperLimitPressedDebounced() == 0U)
     {
+        g_homingActive = 0U;
         UartPrint("homing failed: upper limit not found\r\n");
         return;
     }
@@ -1180,6 +1328,7 @@ static void Home(void)
     {
         if (StepOne(HOMING_SPEED_HZ, 0U, 1U) == 0U)
         {
+            g_homingActive = 0U;
             UartPrint("homing failed: unexpected lower limit during midpoint move\r\n");
             return;
         }
@@ -1190,6 +1339,7 @@ static void Home(void)
     g_travelSteps = spanSteps;
     g_positionSteps = 0;
     g_homed = 1U;
+    g_homingActive = 0U;
     UartPrint("homing complete: midpoint reached\r\n");
     UartPrint("event: type=homing_completed\r\n");
 }
@@ -1870,7 +2020,7 @@ static void PrintHelp(void)
     UartPrint("  help            - show commands\r\n");
     UartPrint("  status          - print current settings\r\n");
     UartPrint("  switches        - show upper/lower switch states\r\n");
-    UartPrint("  maint <id> <status|switches|angle|home|zero|manual_up|manual_down|manual_keepalive_up|manual_keepalive_down|manual_stop>\r\n");
+    UartPrint("  maint <id> <status|switches|angle|home|zero|manual_up|manual_down|manual_keepalive_up|manual_keepalive_down|manual_stop|latch_hold|latch_open|latch_status>\r\n");
     UartPrint("  diag            - print low-level firmware diagnostics\r\n");
     UartPrint("  angle           - read AS5600 raw angle (0..4095)\r\n");
     UartPrint("  zero            - set current pendulum angle to 0 degrees\r\n");
@@ -2153,6 +2303,56 @@ static uint8_t ProcessMaintenanceCommand(char *arguments)
             snprintf(msg, sizeof(msg),
                      "maintenance: id=%lu type=zero ok=0 zeroed=0 error=as5600_unavailable\r\n",
                      requestId);
+        }
+        UartPrint(msg);
+        return 1U;
+    }
+
+    if (strcmp(end, "latch_status") == 0)
+    {
+        snprintf(msg, sizeof(msg),
+                 "maintenance: id=%lu type=latch_status ok=1 state=%s commanded=%u\r\n",
+                 requestId,
+                 ServoLatchStateName(g_servoLatchCommandedState),
+                 (unsigned int)(g_servoLatchCommandedState != SERVO_LATCH_STATE_UNKNOWN));
+        UartPrint(msg);
+        return 1U;
+    }
+
+    if (strcmp(end, "latch_hold") == 0 || strcmp(end, "latch_open") == 0)
+    {
+        uint8_t requestedState = (strcmp(end, "latch_hold") == 0)
+                                     ? SERVO_LATCH_STATE_HOLD
+                                     : SERVO_LATCH_STATE_OPEN;
+        uint16_t pulseUs = (requestedState == SERVO_LATCH_STATE_HOLD)
+                               ? SERVO_LATCH_HOLD_PULSE_US
+                               : SERVO_LATCH_OPEN_PULSE_US;
+        const char *interlock = ServoLatchInterlockReason();
+
+        if (interlock != NULL)
+        {
+            snprintf(msg, sizeof(msg),
+                     "maintenance: id=%lu type=%s ok=0 state=%s error=%s\r\n",
+                     requestId,
+                     end,
+                     ServoLatchStateName(g_servoLatchCommandedState),
+                     interlock);
+        }
+        else if (ServoLatchCommand(pulseUs, requestedState) == 0U)
+        {
+            snprintf(msg, sizeof(msg),
+                     "maintenance: id=%lu type=%s ok=0 state=unknown error=pwm_unavailable\r\n",
+                     requestId,
+                     end);
+        }
+        else
+        {
+            snprintf(msg, sizeof(msg),
+                     "maintenance: id=%lu type=%s ok=1 state=%s commanded=1 pulse_us=%u\r\n",
+                     requestId,
+                     end,
+                     ServoLatchStateName(g_servoLatchCommandedState),
+                     (unsigned int)pulseUs);
         }
         UartPrint(msg);
         return 1U;
@@ -2967,6 +3167,7 @@ static void GPIO_Init(void)
 {
     __HAL_RCC_GPIOA_CLK_ENABLE();
     __HAL_RCC_GPIOB_CLK_ENABLE();
+    __HAL_RCC_GPIOC_CLK_ENABLE();
 
     GPIO_InitTypeDef GPIO_InitStruct = {0};
 
@@ -3003,6 +3204,14 @@ static void GPIO_Init(void)
     GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_HIGH;
     GPIO_InitStruct.Alternate = GPIO_AF4_I2C1;
     HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
+
+    GPIO_InitStruct.Pin = GPIO_PIN_7;
+    GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+    GPIO_InitStruct.Pull = GPIO_NOPULL;
+    GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+    GPIO_InitStruct.Alternate = 0U;
+    HAL_GPIO_Init(GPIOC, &GPIO_InitStruct);
+    HAL_GPIO_WritePin(GPIOC, GPIO_PIN_7, GPIO_PIN_RESET);
 }
 
 static void I2C1_Init(void)

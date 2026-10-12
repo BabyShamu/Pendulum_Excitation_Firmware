@@ -48,6 +48,21 @@ class TelemetryParserTests(unittest.TestCase):
         self.assertEqual(result.telemetry.received_elapsed_s, 1.25)
         self.assertEqual(result.telemetry.rx_line_index, 12)
 
+    def test_parses_indexed_telemetry_prefixed_by_firmware_console_prompt(self) -> None:
+        result = self.parse(
+            "> telemetry sample_index=109 time_s=12.520 angle_deg=2.5 position_mm=1.260"
+        )
+
+        self.assertEqual(result.kind, ParsedLineKind.TELEMETRY)
+        self.assertEqual(result.device_sample_index, 109)
+        self.assertEqual(result.telemetry.position_mm, 1.26)
+
+    def test_live_enable_acknowledgement_is_a_device_message_not_telemetry(self) -> None:
+        result = self.parse("live telemetry enabled")
+
+        self.assertEqual(result.kind, ParsedLineKind.DEVICE_MESSAGE)
+        self.assertEqual(result.message, "live telemetry enabled")
+
     def test_missing_device_sample_index_is_malformed(self) -> None:
         result = self.parse("telemetry time_s=12.500 angle_deg=2.5 position_mm=1.25")
 

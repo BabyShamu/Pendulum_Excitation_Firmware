@@ -9,12 +9,14 @@ from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QMessageBox
 
 from pendulum_workbench.application.controller import WorkbenchController
+from pendulum_workbench.application.firmware_commands import FirmwareCommandService
 from pendulum_workbench.application.maintenance_service import MaintenanceService
 from pendulum_workbench.domain.maintenance import (
     BitResultState,
     CheckName,
     CheckState,
     ManualMotionState,
+    PendulumLatchState,
     ReadinessState,
 )
 from pendulum_workbench.domain.models import (
@@ -23,6 +25,7 @@ from pendulum_workbench.domain.models import (
     HardwareStatus,
     HomeStatus,
     MotionState,
+    RecordingState,
     TelemetrySample,
 )
 from pendulum_workbench.infrastructure.serial_client import SerialTelemetryClient
@@ -44,6 +47,8 @@ class MaintenanceFakeSerial:
         defer_status: bool = False,
         defer_home: bool = False,
         defer_manual_start: bool = False,
+        defer_latch_commands: bool = False,
+        reject_latch_commands: bool = False,
         prepend_stale_response: bool = False,
         manual_deadman_timeout_s: float = 0.35,
         drop_manual_keepalives: bool = False,
@@ -60,6 +65,8 @@ class MaintenanceFakeSerial:
         self.defer_status = defer_status
         self.defer_home = defer_home
         self.defer_manual_start = defer_manual_start
+        self.defer_latch_commands = defer_latch_commands
+        self.reject_latch_commands = reject_latch_commands
         self.prepend_stale_response = prepend_stale_response
         self.manual_deadman_timeout_s = manual_deadman_timeout_s
         self.drop_manual_keepalives = drop_manual_keepalives
@@ -74,6 +81,9 @@ class MaintenanceFakeSerial:
         self.pending_status_id: str | None = None
         self.pending_home_id: str | None = None
         self.pending_manual_start: tuple[str, str] | None = None
+        self.pending_latch_command: tuple[str, str] | None = None
+        self.latch_state = "unknown"
+        self.latch_commands: list[tuple[str, str]] = []
         self._chunks: list[bytes] = []
         self.writes: list[bytes] = []
         self.closed = False
@@ -94,6 +104,11 @@ class MaintenanceFakeSerial:
             if command in ("manual_up", "manual_down") and self.defer_manual_start:
                 self.pending_manual_start = (request_id, command)
                 return len(data)
+            if command in ("latch_hold", "latch_open", "latch_status"):
+                self.latch_commands.append((request_id, command))
+                if command != "latch_status" and self.defer_latch_commands:
+                    self.pending_latch_command = (request_id, command)
+                    return len(data)
             if request_id == "0" and command in (
                 "manual_keepalive_up",
                 "manual_keepalive_down",
@@ -121,6 +136,13 @@ class MaintenanceFakeSerial:
         pending = self.pending_manual_start
         self.pending_manual_start = None
         self.defer_manual_start = False
+        if pending is not None:
+            self._respond(*pending)
+
+    def release_latch_command(self) -> None:
+        pending = self.pending_latch_command
+        self.pending_latch_command = None
+        self.defer_latch_commands = False
         if pending is not None:
             self._respond(*pending)
 
@@ -174,6 +196,23 @@ class MaintenanceFakeSerial:
                 f"zeroed={int(self.zeroed)} raw=2048 degrees=0.00"
                 f"{' error=as5600_unavailable' if not self.zeroed else ''}\r\n"
             )
+        elif command == "latch_status":
+            response = (
+                f"maintenance: id={request_id} type=latch_status ok=1 state={self.latch_state} "
+                f"commanded={int(self.latch_state != 'unknown')}\r\n"
+            )
+        elif command in ("latch_hold", "latch_open"):
+            if self.reject_latch_commands:
+                response = (
+                    f"maintenance: id={request_id} type={command} ok=0 state={self.latch_state} "
+                    "error=servo_test_rejected\r\n"
+                )
+            else:
+                self.latch_state = "hold" if command == "latch_hold" else "open"
+                response = (
+                    f"maintenance: id={request_id} type={command} ok=1 state={self.latch_state} "
+                    "commanded=1 pulse_us=1500\r\n"
+                )
         elif command in ("manual_up", "manual_down"):
             direction = "up" if command == "manual_up" else "down"
             limit_active = self.upper_active if direction == "up" else self.lower_active
@@ -338,6 +377,162 @@ class MaintenanceServiceTests(unittest.TestCase):
 
         self.assertEqual(len(event_calls), 1)
         self.assertEqual(len(telemetry_calls), 1)
+
+    def test_latch_starts_unknown_and_does_not_affect_system_check(self) -> None:
+        controller, device = self.create_connected_controller()
+        self.assertEqual(controller.maintenance.snapshot.latch_state, PendulumLatchState.UNKNOWN)
+        self.assertEqual(device.latch_commands, [])
+
+        self.run_system_check(controller)
+
+        self.assertEqual(controller.maintenance.snapshot.bit_state, BitResultState.PASSED)
+        self.assertEqual(controller.maintenance.snapshot.latch_state, PendulumLatchState.UNKNOWN)
+        self.assertEqual(device.latch_commands, [])
+
+    def test_latch_hold_and_open_require_matching_correlated_confirmation(self) -> None:
+        controller, device = self.create_connected_controller(defer_latch_commands=True)
+
+        controller.maintenance.command_latch(PendulumLatchState.HOLD)
+
+        self.assertTrue(self.wait_for(lambda: device.pending_latch_command is not None))
+        hold_request_id, hold_command = device.pending_latch_command
+        self.assertGreater(int(hold_request_id), 0)
+        self.assertEqual(hold_command, "latch_hold")
+        self.assertEqual(controller.maintenance.snapshot.latch_state, PendulumLatchState.COMMANDING_HOLD)
+        self.assertEqual(device.latch_state, "unknown")
+        self.assertTrue(controller.firmware_commands.is_busy)
+
+        device.release_latch_command()
+
+        self.assertTrue(
+            self.wait_for(
+                lambda: controller.maintenance.snapshot.latch_state == PendulumLatchState.HOLD
+                and not controller.firmware_commands.is_busy
+            )
+        )
+        self.assertEqual(device.latch_state, "hold")
+
+        device.defer_latch_commands = True
+        controller.maintenance.command_latch(PendulumLatchState.OPEN)
+        self.assertTrue(self.wait_for(lambda: device.pending_latch_command is not None))
+        open_request_id, open_command = device.pending_latch_command
+        self.assertGreater(int(open_request_id), 0)
+        self.assertEqual(open_command, "latch_open")
+        self.assertEqual(controller.maintenance.snapshot.latch_state, PendulumLatchState.COMMANDING_OPEN)
+        self.assertEqual(device.latch_state, "hold")
+
+        device.release_latch_command()
+        self.assertTrue(
+            self.wait_for(
+                lambda: controller.maintenance.snapshot.latch_state == PendulumLatchState.OPEN
+                and not controller.firmware_commands.is_busy
+            )
+        )
+        self.assertEqual(device.latch_state, "open")
+
+    def test_latch_status_reads_commanded_state_without_moving_servo(self) -> None:
+        controller, device = self.create_connected_controller()
+        device.latch_state = "open"
+
+        controller.maintenance.request_latch_status()
+
+        self.assertTrue(
+            self.wait_for(
+                lambda: controller.maintenance.snapshot.latch_state == PendulumLatchState.OPEN
+                and not controller.firmware_commands.is_busy
+            )
+        )
+        self.assertEqual(len(device.latch_commands), 1)
+        self.assertTrue(all(command == "latch_status" for _, command in device.latch_commands))
+
+    def test_latch_ui_routes_hold_and_open_without_requiring_bit(self) -> None:
+        controller, device = self.create_connected_controller(defer_latch_commands=True)
+        window = MainWindow(controller)
+        page = window.maintenance_page
+
+        self.assertEqual(controller.maintenance.snapshot.latch_state, PendulumLatchState.UNKNOWN)
+        self.assertEqual(controller.maintenance.snapshot.bit_state, BitResultState.NOT_RUN)
+        self.assertTrue(page.latch_hold_button.isEnabled())
+        self.assertTrue(page.latch_open_button.isEnabled())
+        self.assertIn("does not set the pendulum initial angle", page.latch_commissioning_note.text())
+
+        page.latch_hold_button.click()
+        self.assertTrue(self.wait_for(lambda: device.pending_latch_command is not None))
+        self.assertEqual(controller.maintenance.snapshot.latch_state, PendulumLatchState.COMMANDING_HOLD)
+        self.assertEqual(device.latch_state, "unknown")
+        device.release_latch_command()
+        self.assertTrue(
+            self.wait_for(lambda: controller.maintenance.snapshot.latch_state == PendulumLatchState.HOLD)
+        )
+        self.assertEqual(page.latch_state_value.text(), PendulumLatchState.HOLD.value)
+
+        self.assertTrue(self.wait_for(lambda: not controller.firmware_commands.is_busy))
+        device.defer_latch_commands = True
+        page.latch_open_button.click()
+        self.assertTrue(self.wait_for(lambda: device.pending_latch_command is not None))
+        self.assertEqual(controller.maintenance.snapshot.latch_state, PendulumLatchState.COMMANDING_OPEN)
+        self.assertEqual(device.latch_state, "hold")
+        device.release_latch_command()
+        self.assertTrue(
+            self.wait_for(lambda: controller.maintenance.snapshot.latch_state == PendulumLatchState.OPEN)
+        )
+        window.close()
+
+    def test_latch_rejection_and_timeout_are_unconfirmed(self) -> None:
+        controller, device = self.create_connected_controller(reject_latch_commands=True)
+
+        controller.maintenance.command_latch(PendulumLatchState.OPEN)
+
+        self.assertTrue(
+            self.wait_for(
+                lambda: controller.maintenance.snapshot.latch_state == PendulumLatchState.UNCONFIRMED
+            )
+        )
+        self.assertIn("servo test rejected", controller.maintenance.snapshot.latch_message)
+
+        controller, device = self.create_connected_controller(defer_latch_commands=True)
+        with patch.object(FirmwareCommandService, "_RESPONSE_TIMEOUT_MS", 25):
+            controller.maintenance.command_latch(PendulumLatchState.HOLD)
+            self.assertTrue(
+                self.wait_for(
+                    lambda: controller.maintenance.snapshot.latch_state == PendulumLatchState.UNCONFIRMED,
+                    timeout_s=1.0,
+                )
+            )
+        self.assertEqual(device.latch_state, "unknown")
+
+    def test_latch_interlocks_cover_homing_manual_motion_and_recording(self) -> None:
+        controller, device = self.create_connected_controller(defer_home=True)
+        controller.maintenance.start_homing()
+        self.assertTrue(self.wait_for(lambda: device.pending_home_id is not None))
+        with self.assertRaisesRegex(RuntimeError, "maintenance operation"):
+            controller.maintenance.command_latch(PendulumLatchState.HOLD)
+        device.release_home()
+        self.assertTrue(self.wait_for(lambda: not controller.firmware_commands.is_busy))
+
+        controller, device = self.create_connected_controller(initially_homed=True)
+        self.run_system_check(controller)
+        controller.maintenance.start_manual_motion("up")
+        self.assertTrue(self.wait_for(lambda: device.manual_active))
+        with self.assertRaisesRegex(RuntimeError, "maintenance operation"):
+            controller.maintenance.command_latch(PendulumLatchState.OPEN)
+        heartbeat_count = len(device.manual_keepalive_received)
+        self.assertTrue(
+            self.wait_for(lambda: len(device.manual_keepalive_received) >= heartbeat_count + 3)
+        )
+        self.assertEqual(device.latch_commands, [])
+        controller.maintenance.stop_manual_motion()
+        self.assertTrue(
+            self.wait_for(
+                lambda: controller.maintenance.snapshot.manual_motion == ManualMotionState.IDLE
+            )
+        )
+        self.assertTrue(self.wait_for(lambda: not controller.firmware_commands.is_busy))
+
+        controller.state.set_recording(RecordingState.RECORDING)
+        with self.assertRaisesRegex(RuntimeError, "recording"):
+            controller.maintenance.command_latch(PendulumLatchState.HOLD)
+        self.assertEqual(device.latch_commands, [])
 
     def run_system_check(self, controller: WorkbenchController) -> None:
         controller.maintenance.run_system_check()

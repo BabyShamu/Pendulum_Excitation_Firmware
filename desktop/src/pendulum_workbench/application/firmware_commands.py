@@ -18,6 +18,9 @@ class FirmwareCommand(str, Enum):
     MANUAL_UP = "manual_up"
     MANUAL_DOWN = "manual_down"
     MANUAL_STOP = "manual_stop"
+    LATCH_HOLD = "latch_hold"
+    LATCH_OPEN = "latch_open"
+    LATCH_STATUS = "latch_status"
 
 
 @dataclass(frozen=True, slots=True)
@@ -90,6 +93,15 @@ class FirmwareCommandService(QObject):
 
     def manual_stop(self) -> int:
         return self._request(FirmwareCommand.MANUAL_STOP, timeout_ms=self._MANUAL_COMMAND_TIMEOUT_MS)
+
+    def latch_hold(self) -> int:
+        return self._request(FirmwareCommand.LATCH_HOLD)
+
+    def latch_open(self) -> int:
+        return self._request(FirmwareCommand.LATCH_OPEN)
+
+    def latch_status(self) -> int:
+        return self._request(FirmwareCommand.LATCH_STATUS)
 
     def _request(self, command: FirmwareCommand, *, timeout_ms: int | None = None) -> int:
         if self.state.snapshot.connection != ConnectionState.CONNECTED:

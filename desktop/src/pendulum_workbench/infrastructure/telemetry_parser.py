@@ -41,6 +41,12 @@ class TelemetryParser:
         if not text:
             return ParsedLine(ParsedLineKind.DEVICE_MESSAGE, message="Empty serial line")
 
+        if text.startswith("> "):
+            text = text[2:].lstrip()
+
+        if text in ("live telemetry enabled", "live telemetry disabled"):
+            return ParsedLine(ParsedLineKind.DEVICE_MESSAGE, message=text)
+
         if self._recording_header in text or text.startswith(self._device_recording_header):
             return ParsedLine(ParsedLineKind.DEVICE_MESSAGE, message="Telemetry CSV header")
 

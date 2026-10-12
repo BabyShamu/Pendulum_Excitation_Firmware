@@ -30,6 +30,14 @@ Maintenance provides press-and-hold UP/DOWN using the existing 150 steps/s jog r
 
 Each real connection writes received serial lines to `%LOCALAPPDATA%/PendulumWorkbench/serial-captures/<session-id>/serial_capture.log`. The capture path is shown in the dashboard; malformed and partial lines remain in the raw log.
 
+## Pendulum Latch Commissioning
+
+Maintenance provides correlated `latch_hold`, `latch_open`, and `latch_status` commands. The displayed state is the firmware's commanded state only; there is no physical position feedback, and the latch is not part of the System Check/BIT.
+
+The hobby servo signal uses D9 / PC7 with TIM8 channel 2 PWM at 50 Hz. `SERVO_LATCH_HOLD_PULSE_US` and `SERVO_LATCH_OPEN_PULSE_US` currently use 1400 us and 1600 us development defaults. These values are commissioning placeholders, not mechanically calibrated or validated angles. Firmware starts with PC7 inactive and latch state UNKNOWN; it does not actuate the servo at boot.
+
+Servo power is temporarily connected to 5 V for commissioning only. This is not the validated power design; plan for a suitable external regulated supply with a common ground. Calibrate mechanically in Maintenance by commanding HOLD and OPEN separately; do not sweep positions or treat the servo as setting the pendulum's initial angle.
+
 ## Experiment Records
 
 Use **Start Recording** and **Stop Recording** in Experiment Controls to save the current mock or connected STM32 telemetry. Each run receives a unique ID under `%LOCALAPPDATA%/PendulumWorkbench/experiments/<experiment-id>/` and contains:
