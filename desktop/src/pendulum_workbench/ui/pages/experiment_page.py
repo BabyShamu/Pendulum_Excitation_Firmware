@@ -22,6 +22,7 @@ from pendulum_workbench.domain.models import (
     ConnectionState,
     DataSourceMode,
     EventSeverity,
+    MotionState,
     RecordingState,
 )
 from pendulum_workbench.experiments.repository import LoadedExperiment
@@ -48,6 +49,9 @@ class ExperimentPage(QWidget):
         recording_heading = QLabel("NEW / ACTIVE RECORDING")
         recording_heading.setObjectName("sectionTitle")
         recording_layout.addWidget(recording_heading)
+        self.readiness_indicator = QLabel("CHECK REQUIRED")
+        self.readiness_indicator.setObjectName("experimentReadinessIndicator")
+        recording_layout.addWidget(self.readiness_indicator)
 
         fields = QHBoxLayout()
         fields.setSpacing(12)
@@ -165,7 +169,9 @@ class ExperimentPage(QWidget):
         recorder.recording_finished.connect(self._on_recording_finished)
         recorder.recording_failed.connect(self._on_recording_failed)
         self.controller.experiment_loaded.connect(self._show_saved_experiment)
+        self.controller.maintenance.snapshot_changed.connect(self._update_readiness)
         self._update_snapshot(self.controller.state.snapshot)
+        self._update_readiness(self.controller.maintenance.snapshot)
 
     @staticmethod
     def _apply_card_depth(card: QFrame) -> None:
@@ -277,7 +283,9 @@ class ExperimentPage(QWidget):
             snapshot.data_source == DataSourceMode.REAL
             and snapshot.connection == ConnectionState.CONNECTED
         )
-        self.start_recording_button.setEnabled(live_source_ready and not recording_active)
+        self.start_recording_button.setEnabled(
+            live_source_ready and not recording_active and snapshot.motion != MotionState.HOMING
+        )
         self.stop_recording_button.setEnabled(snapshot.recording == RecordingState.RECORDING)
         self.experiment_name_input.setEnabled(not recording_active)
         self.experiment_notes_input.setEnabled(not recording_active)
@@ -286,6 +294,20 @@ class ExperimentPage(QWidget):
             return
         if snapshot.recording == RecordingState.SAVED and self._experiment_directory is not None:
             self.open_recording_folder_button.setEnabled(self._experiment_directory.is_dir())
+
+    def _update_readiness(self, snapshot) -> None:
+        self.readiness_indicator.setText(snapshot.readiness.value)
+        colors = {
+            "NOT CONNECTED": ("#66736f", "#eef1ef"),
+            "CHECK REQUIRED": ("#8b5b14", "#fff3d8"),
+            "BIT PASSED - HOME REQUIRED": ("#8b5b14", "#fff3d8"),
+            "SYSTEM READY": ("#205f49", "#e5f4ed"),
+            "FAULT": ("#a3322b", "#fbe8e6"),
+        }
+        foreground, background = colors[snapshot.readiness.value]
+        self.readiness_indicator.setStyleSheet(
+            f"color: {foreground}; background: {background}; padding: 5px 8px; font-weight: 700;"
+        )
 
     def _show_saved_experiment(self, experiment: LoadedExperiment) -> None:
         self._experiment_directory = experiment.directory

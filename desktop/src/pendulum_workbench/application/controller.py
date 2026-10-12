@@ -2,6 +2,8 @@ from pathlib import Path
 
 from PySide6.QtCore import QObject, Signal
 
+from pendulum_workbench.application.firmware_commands import FirmwareCommandService
+from pendulum_workbench.application.maintenance_service import MaintenanceService
 from pendulum_workbench.application.experiment_recording import ExperimentRecordingService
 from pendulum_workbench.application.state import ApplicationStateModel
 from pendulum_workbench.domain.models import (
@@ -36,6 +38,12 @@ class WorkbenchController(QObject):
             self.state,
             self.serial_client,
             experiment_repository,
+        )
+        self.firmware_commands = FirmwareCommandService(self.state, self.serial_client)
+        self.maintenance = MaintenanceService(
+            self.state,
+            self.serial_client,
+            self.firmware_commands,
         )
         self._loaded_experiment: LoadedExperiment | None = None
         self._disconnect_requested = False
@@ -130,6 +138,12 @@ class WorkbenchController(QObject):
             self.state.report_event(EventSeverity.ERROR, str(error))
 
     def disconnect_real(self) -> None:
+        if self.maintenance.is_homing:
+            self.state.report_event(
+                EventSeverity.WARNING,
+                "Wait for homing to finish before disconnecting the STM32.",
+            )
+            return
         if self.state.snapshot.connection not in (
             ConnectionState.CONNECTING,
             ConnectionState.CONNECTED,
@@ -193,8 +207,6 @@ class WorkbenchController(QObject):
         normalized = message.strip().lower()
         if normalized.startswith("homing failed:"):
             self.state.set_home_status(HomeStatus.HOMING_FAILED)
-        elif normalized.startswith("homing complete:"):
-            self.state.set_home_status(HomeStatus.HOMED)
         elif normalized.startswith("homing:"):
             self.state.set_home_status(HomeStatus.HOMING)
         if message and message != "Telemetry CSV header":

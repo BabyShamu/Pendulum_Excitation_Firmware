@@ -26,6 +26,7 @@ from pendulum_workbench.domain.models import (
 from pendulum_workbench.experiments.repository import LoadedExperiment
 from pendulum_workbench.ui.pages.experiment_page import ExperimentPage
 from pendulum_workbench.ui.pages.live_page import LivePage
+from pendulum_workbench.ui.pages.maintenance_page import MaintenancePage
 from pendulum_workbench.ui.status_indicator import IndicatorTone, StatusChip
 
 
@@ -111,7 +112,9 @@ class MainWindow(QMainWindow):
         navigation = QFrame()
         navigation.setObjectName("navRail")
         navigation.setFixedWidth(148)
+        self.navigation_rail = navigation
         nav_layout = QVBoxLayout(navigation)
+        self.navigation_layout = nav_layout
         nav_layout.setContentsMargins(8, 12, 8, 10)
         nav_layout.setSpacing(5)
         nav_heading = QLabel("WORKSPACE")
@@ -131,14 +134,28 @@ class MainWindow(QMainWindow):
             button.clicked.connect(lambda _checked=False, page=index: self._show_page(page))
             nav_layout.addWidget(button)
         nav_layout.addStretch(1)
+        separator = QFrame()
+        separator.setFrameShape(QFrame.Shape.HLine)
+        separator.setStyleSheet("color: #d8e1dc;")
+        nav_layout.addWidget(separator)
+        self.maintenance_navigation_button = self._navigation_button(
+            "Maintenance", "maintenanceNavigationButton", 2
+        )
+        self.navigation_group.addButton(self.maintenance_navigation_button, 2)
+        self.maintenance_navigation_button.clicked.connect(
+            lambda _checked=False: self._show_page(2)
+        )
+        nav_layout.addWidget(self.maintenance_navigation_button)
         workspace.addWidget(navigation)
 
         self.page_stack = QStackedWidget()
         self.page_stack.setObjectName("pageStack")
         self.live_page = LivePage(controller)
         self.experiment_page = ExperimentPage(controller)
+        self.maintenance_page = MaintenancePage(controller)
         self.page_stack.addWidget(self.live_page)
         self.page_stack.addWidget(self.experiment_page)
+        self.page_stack.addWidget(self.maintenance_page)
         workspace.addWidget(self.page_stack, 1)
         layout.addLayout(workspace, 1)
 
@@ -240,6 +257,7 @@ class MainWindow(QMainWindow):
         )
         self.about_action.triggered.connect(self._show_about)
         help_menu.addAction(self.about_action)
+        self._update_global_status(self.controller.state.snapshot)
 
     def _update_global_status(self, snapshot: ApplicationSnapshot) -> None:
         connection_indicators = {
@@ -273,6 +291,11 @@ class MainWindow(QMainWindow):
             RecordingState.ERROR: ("Error", IndicatorTone.ERROR),
         }
         self.recording_value.set_status(*recording_indicators[snapshot.recording])
+        if hasattr(self, "disconnect_action"):
+            self.disconnect_action.setEnabled(
+                snapshot.connection in (ConnectionState.CONNECTING, ConnectionState.CONNECTED)
+                and not self.controller.maintenance.is_homing
+            )
         self._update_source_badge(snapshot)
 
     def _update_source_badge(self, snapshot: ApplicationSnapshot) -> None:
@@ -304,3 +327,14 @@ class MainWindow(QMainWindow):
             "Pendulum Workbench\n\n"
             "Live instrumentation and reproducible experiment recording.",
         )
+
+    def closeEvent(self, event) -> None:
+        if self.controller.maintenance.is_homing:
+            QMessageBox.warning(
+                self,
+                "Homing in Progress",
+                "Wait for the firmware homing cycle to finish before closing the workbench.",
+            )
+            event.ignore()
+            return
+        super().closeEvent(event)

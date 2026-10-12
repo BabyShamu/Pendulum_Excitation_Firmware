@@ -295,6 +295,7 @@ class LivePage(QWidget):
         )
         self.disconnect_button.setEnabled(
             snapshot.connection in (ConnectionState.CONNECTING, ConnectionState.CONNECTED)
+            and not self.controller.maintenance.is_homing
         )
 
     def _update_snapshot(self, snapshot: ApplicationSnapshot) -> None:

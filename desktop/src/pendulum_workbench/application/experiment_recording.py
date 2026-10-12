@@ -14,6 +14,7 @@ from pendulum_workbench.domain.models import (
     ConnectionState,
     DataSourceMode,
     EventSeverity,
+    MotionState,
     RecordingState,
     TelemetrySample,
 )
@@ -115,6 +116,8 @@ class ExperimentRecordingService(QObject):
             raise RuntimeError("An experiment recording is already active")
 
         snapshot = self.state.snapshot
+        if snapshot.motion == MotionState.HOMING:
+            raise RuntimeError("Recording is unavailable while homing is active")
         if snapshot.data_source == DataSourceMode.REAL:
             if snapshot.connection != ConnectionState.CONNECTED:
                 raise RuntimeError("Connect to the STM32 before recording")

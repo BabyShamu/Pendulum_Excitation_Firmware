@@ -1,3 +1,4 @@
+import queue
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -13,6 +14,10 @@ from pendulum_workbench.infrastructure.raw_capture import RawSerialCapture, defa
 from pendulum_workbench.infrastructure.telemetry_parser import (
     ParsedLineKind,
     TelemetryParser,
+)
+from pendulum_workbench.infrastructure.firmware_protocol import (
+    FirmwareProtocolParser,
+    MaintenanceResponse,
 )
 
 SERIAL_BAUD_RATE = 115200
@@ -89,6 +94,7 @@ class SerialWorker(QThread):
     connection_failed = Signal(str)
     connection_closed = Signal(str)
     line_received = Signal(object)
+    command_written = Signal(str)
 
     def __init__(
         self,
@@ -107,6 +113,12 @@ class SerialWorker(QThread):
         self._capture_root = capture_root or default_capture_root()
         self._serial_factory = serial_factory or serial.Serial
         self._startup_delay_s = startup_delay_s
+        self._command_queue: queue.Queue[tuple[str, str]] = queue.Queue()
+
+    def enqueue_command(self, request_id: str, command: str) -> None:
+        if not command or "\r" in command or "\n" in command:
+            raise ValueError("serial command must be a single non-empty line")
+        self._command_queue.put((request_id, command))
 
     def run(self) -> None:
         connection = None
@@ -129,21 +141,50 @@ class SerialWorker(QThread):
 
             queries_started = False
             next_status_poll = 0.0
+            blocking_home_request_id: str | None = None
 
             while not self.isInterruptionRequested():
                 chunk = connection.read(256)
                 if chunk:
-                    self._record_lines(framer.feed(chunk), capture, session_start)
+                    lines = framer.feed(chunk)
+                    self._record_lines(lines, capture, session_start)
+                    if blocking_home_request_id is not None:
+                        response_prefix = (
+                            f"maintenance: id={blocking_home_request_id} type=home ".encode("ascii")
+                        )
+                        if any(line.payload.startswith(response_prefix) for line in lines):
+                            blocking_home_request_id = None
+                            next_status_poll = time.monotonic() + STATUS_POLL_INTERVAL_S
+
+                while True:
+                    try:
+                        request_id, command = self._command_queue.get_nowait()
+                    except queue.Empty:
+                        break
+                    payload = f"{command}\r\n".encode("ascii")
+                    if connection.write(payload) != len(payload):
+                        raise IOError("serial command was only partially written")
+                    if command.startswith("maint ") and command.endswith(" home"):
+                        blocking_home_request_id = request_id
+                    self.command_written.emit(request_id)
 
                 now = time.monotonic()
-                if not queries_started and now - session_start >= self._startup_delay_s:
+                if (
+                    blocking_home_request_id is None
+                    and not queries_started
+                    and now - session_start >= self._startup_delay_s
+                ):
                     if self.isInterruptionRequested():
                         break
                     connection.write(b"live 1\r\n")
                     connection.write(b"status\r\n")
                     queries_started = True
                     next_status_poll = now + STATUS_POLL_INTERVAL_S
-                elif queries_started and now >= next_status_poll:
+                elif (
+                    blocking_home_request_id is None
+                    and queries_started
+                    and now >= next_status_poll
+                ):
                     connection.write(b"status\r\n")
                     next_status_poll = now + STATUS_POLL_INTERVAL_S
 
@@ -204,6 +245,8 @@ class SerialTelemetryClient(QObject):
     device_message_received = Signal(str)
     malformed_line_received = Signal(str)
     telemetry_stale_changed = Signal(bool)
+    command_written = Signal(str)
+    maintenance_response_received = Signal(object)
 
     def __init__(
         self,
@@ -262,8 +305,15 @@ class SerialTelemetryClient(QObject):
         worker.connection_failed.connect(self.connection_failed)
         worker.connection_closed.connect(self._on_connection_closed)
         worker.line_received.connect(self._on_line_received)
+        worker.command_written.connect(self.command_written)
         self._worker = worker
         worker.start()
+
+    def send_maintenance_command(self, request_id: str, command: str) -> None:
+        worker = self._worker
+        if worker is None or not worker.isRunning():
+            raise RuntimeError("STM32 serial connection is not running")
+        worker.enqueue_command(request_id, command)
 
     def disconnect(self) -> None:
         if self._worker is not None and self._worker.isRunning():
@@ -296,6 +346,10 @@ class SerialTelemetryClient(QObject):
             )
             return
         text = received_line.payload.decode("ascii", errors="replace")
+        maintenance_response = FirmwareProtocolParser.parse_maintenance_response(text)
+        if maintenance_response is not None:
+            self.maintenance_response_received.emit(maintenance_response)
+            return
         result = self._parser.parse_line(
             text,
             sample_index=self._sample_index + 1,

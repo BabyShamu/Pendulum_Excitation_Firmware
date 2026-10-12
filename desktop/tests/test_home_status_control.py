@@ -41,7 +41,7 @@ class HomeStatusControlTests(unittest.TestCase):
         controller = WorkbenchController()
         messages = (
             ("homing: moving to lower limit", HomeStatus.HOMING),
-            ("homing complete: midpoint reached", HomeStatus.HOMED),
+            ("homing complete: midpoint reached", HomeStatus.HOMING),
             ("homing failed: upper limit not found", HomeStatus.HOMING_FAILED),
         )
 

@@ -15,6 +15,7 @@ from pendulum_workbench.domain.models import (
     DataSourceMode,
     HardwareStatus,
     HomeStatus,
+    MotionState,
     RecordingState,
     TelemetrySample,
 )
@@ -56,6 +57,7 @@ class MainWindowTests(unittest.TestCase):
         self.assertFalse(
             any(
                 button.text().lower() in {"home", "start sine", "parametric", "stop"}
+                and button is not window.maintenance_page.home_button
                 for button in window.findChildren(QPushButton)
             )
         )
@@ -76,6 +78,7 @@ class MainWindowTests(unittest.TestCase):
         self.assertEqual(window.live_page.lower_limit_value.title_label.text(), "LOWER LIMIT")
         self.assertEqual(window.live_page.lower_limit_value.state_text, "UNKNOWN")
         self.assertFalse(window.experiment_page.open_recording_folder_button.isEnabled())
+        self.assertIsNone(window.maintenance_page.maintenance.snapshot.current_angle_deg)
         window.close()
 
     def test_shell_navigation_preserves_shared_controller_state_and_live_widgets(self) -> None:
@@ -85,20 +88,32 @@ class MainWindowTests(unittest.TestCase):
         controller.state.set_connection(ConnectionState.CONNECTED, "COM6")
         window = MainWindow(controller)
 
-        self.assertEqual(window.page_stack.count(), 2)
+        self.assertEqual(window.page_stack.count(), 3)
         self.assertIs(window.page_stack.currentWidget(), window.live_page)
         self.assertTrue(window.live_navigation_button.isChecked())
         self.assertEqual(window.live_navigation_button.text(), "Live")
         self.assertEqual(window.experiment_navigation_button.text(), "Experiment")
+        self.assertEqual(window.maintenance_navigation_button.text(), "Maintenance")
+        self.assertEqual(window.navigation_group.id(window.maintenance_navigation_button), 2)
+        self.assertIs(window.page_stack.widget(2), window.maintenance_page)
+        self.assertGreater(
+            window.navigation_layout.indexOf(window.maintenance_navigation_button),
+            window.navigation_layout.indexOf(window.experiment_navigation_button) + 1,
+        )
+        self.assertIsNotNone(window.navigation_layout.itemAt(3).spacerItem())
         self.assertIs(window.live_page.controller, controller)
         self.assertIs(window.experiment_page.controller, controller)
         self.assertIs(window.live_page.controller.state, controller.state)
         self.assertIs(window.experiment_page.controller.state, controller.state)
-        button_texts = [button.text().lower() for button in window.findChildren(QPushButton)]
-        forbidden_controls = ("home", "start sine", "parametric", "start motion", "run experiment")
+        self.assertEqual(window.experiment_page.readiness_indicator.text(), "CHECK REQUIRED")
+        page_buttons = window.findChildren(QPushButton)
+        button_texts = [button.text().lower() for button in page_buttons]
+        forbidden_controls = ("sine", "parametric", "start motion", "run experiment")
         self.assertFalse(
             any(control in button_text for control in forbidden_controls for button_text in button_texts)
         )
+        home_buttons = [button for button in page_buttons if button.text().lower() == "home"]
+        self.assertEqual(home_buttons, [window.maintenance_page.home_button])
 
         snapshot = controller.state.snapshot
         serial_client = controller.serial_client
@@ -147,6 +162,19 @@ class MainWindowTests(unittest.TestCase):
             self.wait_for(lambda: controller.state.snapshot.recording == RecordingState.SAVED)
         )
         self.assertFalse(controller.experiment_recorder.is_recording)
+        window.close()
+
+    def test_experiment_recording_is_disabled_during_homing(self) -> None:
+        controller = WorkbenchController(mock_source=MockTelemetrySource(interval_ms=1000))
+        self.addCleanup(controller.shutdown)
+        window = MainWindow(controller)
+        controller.start_mock()
+
+        controller.state.set_motion(MotionState.HOMING)
+
+        self.assertFalse(window.experiment_page.start_recording_button.isEnabled())
+        with self.assertRaisesRegex(RuntimeError, "while homing is active"):
+            controller.experiment_recorder.start_recording("blocked during home", "")
         window.close()
 
     def test_real_mode_is_visually_distinct_and_does_not_run_mock_data(self) -> None:

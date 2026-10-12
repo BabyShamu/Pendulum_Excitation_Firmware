@@ -104,6 +104,7 @@ static void UpdateParametric(void);
 static void UpdateParametricTest(void);
 static void UpdateParametricClosedLoop(void);
 static void ReportClosedLoopFault(void);
+static uint8_t ProcessMaintenanceCommand(char *arguments);
 static float ParametricTestDcBlockApprox(float input, float dt, uint8_t reset);
 static float ParametricTestAgc(float input, float *logGain);
 static void DelayUs(uint32_t us);
@@ -1331,6 +1332,7 @@ static void PrintHelp(void)
     UartPrint("  help            - show commands\r\n");
     UartPrint("  status          - print current settings\r\n");
     UartPrint("  switches        - show upper/lower switch states\r\n");
+    UartPrint("  maint <id> <status|switches|angle|home|zero> - correlated maintenance request\r\n");
     UartPrint("  angle           - read AS5600 raw angle (0..4095)\r\n");
     UartPrint("  zero            - set current pendulum angle to 0 degrees\r\n");
     UartPrint("  live 0|1        - stop/start angle and position stream\r\n");
@@ -1440,6 +1442,141 @@ static void SetAngleZero(void)
         g_angleZeroValid = 0U;
         UartPrint("angle zero unavailable\r\n");
     }
+}
+
+static uint8_t ProcessMaintenanceCommand(char *arguments)
+{
+    char *end;
+    unsigned long requestId = strtoul(arguments, &end, 10);
+    uint16_t angle = 0U;
+    uint8_t angleOk;
+    uint8_t ok;
+    char msg[320];
+
+    if (end == arguments || requestId == 0UL || requestId > 2147483647UL)
+    {
+        UartPrint("maintenance: id=0 type=error ok=0 error=invalid_request_id\r\n");
+        return 1U;
+    }
+    while (*end == ' ' || *end == '\t')
+    {
+        end++;
+    }
+
+    if (strcmp(end, "status") == 0)
+    {
+        UpdateLimitDebounce();
+        angleOk = (AS5600_ReadAngle(&angle) == HAL_OK) ? 1U : 0U;
+        snprintf(msg, sizeof(msg),
+                 "maintenance: id=%lu type=status ok=1 angle_ok=%u angle_raw=%u angle_deg=%.2f run=%u sine=%u parametric=%u parametric_test=%u closed_loop=%u homed=%u upper=%u lower=%u fault=%u span_steps=%lu position_steps=%ld steps_per_mm=%.3f position_mm=%.3f\r\n",
+                 requestId,
+                 (unsigned int)angleOk,
+                 (unsigned int)angle,
+                 angleOk != 0U ? (double)RelativeAngleDegrees(angle) : 0.0,
+                 (unsigned int)g_run,
+                 (unsigned int)g_sineRunning,
+                 (unsigned int)g_parametricRunning,
+                 (unsigned int)g_parametricTestRunning,
+                 (unsigned int)g_parametricClosedLoopRunning,
+                 (unsigned int)g_homed,
+                 (unsigned int)g_upperLimitDebounced,
+                 (unsigned int)g_lowerLimitDebounced,
+                 (unsigned int)g_closedLoopFault,
+                 (unsigned long)g_travelSteps,
+                 (long)g_positionSteps,
+                 (double)g_stepsPerMm,
+                 g_stepsPerMm > 0.0f ?
+                     (double)((float)g_positionSteps / g_stepsPerMm) : 0.0);
+        UartPrint(msg);
+        return 1U;
+    }
+
+    if (strcmp(end, "switches") == 0)
+    {
+        UpdateLimitDebounce();
+        snprintf(msg, sizeof(msg),
+                 "maintenance: id=%lu type=switches ok=1 upper=%u lower=%u\r\n",
+                 requestId,
+                 (unsigned int)g_upperLimitDebounced,
+                 (unsigned int)g_lowerLimitDebounced);
+        UartPrint(msg);
+        return 1U;
+    }
+
+    if (strcmp(end, "angle") == 0)
+    {
+        angleOk = (AS5600_ReadAngle(&angle) == HAL_OK) ? 1U : 0U;
+        if (angleOk != 0U)
+        {
+            snprintf(msg, sizeof(msg),
+                     "maintenance: id=%lu type=angle ok=1 raw=%u degrees=%.2f\r\n",
+                     requestId,
+                     (unsigned int)angle,
+                     (double)RelativeAngleDegrees(angle));
+        }
+        else
+        {
+            snprintf(msg, sizeof(msg),
+                     "maintenance: id=%lu type=angle ok=0 error=as5600_unavailable\r\n",
+                     requestId);
+        }
+        UartPrint(msg);
+        return 1U;
+    }
+
+    if (strcmp(end, "home") == 0)
+    {
+        if (g_closedLoopFault != 0U)
+        {
+            snprintf(msg, sizeof(msg),
+                     "maintenance: id=%lu type=home ok=0 homed=0 fault=%u error=blocking_fault\r\n",
+                     requestId,
+                     (unsigned int)g_closedLoopFault);
+            UartPrint(msg);
+            return 1U;
+        }
+        Home();
+        ok = g_homed;
+        snprintf(msg, sizeof(msg),
+                 "maintenance: id=%lu type=home ok=%u homed=%u fault=%u span_steps=%lu position_steps=%ld steps_per_mm=%.3f\r\n",
+                 requestId,
+                 (unsigned int)ok,
+                 (unsigned int)g_homed,
+                 (unsigned int)g_closedLoopFault,
+                 (unsigned long)g_travelSteps,
+                 (long)g_positionSteps,
+                 (double)g_stepsPerMm);
+        UartPrint(msg);
+        return 1U;
+    }
+
+    if (strcmp(end, "zero") == 0)
+    {
+        SetAngleZero();
+        angleOk = (g_angleZeroValid != 0U && AS5600_ReadAngle(&angle) == HAL_OK) ? 1U : 0U;
+        if (angleOk != 0U)
+        {
+            snprintf(msg, sizeof(msg),
+                     "maintenance: id=%lu type=zero ok=1 zeroed=1 raw=%u degrees=%.2f\r\n",
+                     requestId,
+                     (unsigned int)angle,
+                     (double)RelativeAngleDegrees(angle));
+        }
+        else
+        {
+            snprintf(msg, sizeof(msg),
+                     "maintenance: id=%lu type=zero ok=0 zeroed=0 error=as5600_unavailable\r\n",
+                     requestId);
+        }
+        UartPrint(msg);
+        return 1U;
+    }
+
+    snprintf(msg, sizeof(msg),
+             "maintenance: id=%lu type=error ok=0 error=unsupported_command\r\n",
+             requestId);
+    UartPrint(msg);
+    return 1U;
 }
 
 static float RelativeAngleDegrees(uint16_t rawAngle)
@@ -1570,6 +1707,12 @@ static void ProcessLine(char *line)
 
     if (length == 0U)
     {
+        return;
+    }
+
+    if (strncmp(line, "maint ", 6U) == 0)
+    {
+        ProcessMaintenanceCommand(line + 6U);
         return;
     }
 
