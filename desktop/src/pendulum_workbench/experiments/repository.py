@@ -66,6 +66,7 @@ class ExperimentRepository:
         serial_port: str | None,
         created_at: datetime | None = None,
         experiment_id: str | None = None,
+        experiment_metadata: dict[str, Any] | None = None,
     ) -> ExperimentSession:
         if not isinstance(data_source, DataSourceMode):
             raise TypeError(
@@ -142,6 +143,8 @@ class ExperimentRepository:
             "sample_count": 0,
             "raw_line_count": 0,
         }
+        if experiment_metadata is not None:
+            manifest["experiment"] = dict(experiment_metadata)
         self.write_manifest(directory, manifest)
         return ExperimentSession(experiment_id, directory, manifest)
 

@@ -38,6 +38,7 @@ class RecordingRequest:
     notes: str
     data_source: DataSourceMode
     serial_port: str | None
+    experiment_metadata: dict[str, Any] | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.data_source, DataSourceMode):
@@ -57,6 +58,8 @@ class ExperimentRecordingService(QObject):
     _writer_ready = Signal(object, str)
     _writer_failure = Signal(str, str)
     _writer_finalized = Signal(object, str, str)
+    _writer_metadata_updated = Signal(str, object, str)
+    metadata_update_finished = Signal(str, str)
 
     def __init__(
         self,
@@ -73,6 +76,7 @@ class ExperimentRecordingService(QObject):
         self._active_session: ExperimentSession | None = None
         self._last_completed_session: ExperimentSession | None = None
         self._active_source: DataSourceMode | None = None
+        self._active_sample_count = 0
         self._writer_failed = False
         self._stopping = False
         self._thread_started = False
@@ -86,6 +90,10 @@ class ExperimentRecordingService(QObject):
         self._writer_ready.connect(self._on_writer_ready, Qt.ConnectionType.QueuedConnection)
         self._writer_failure.connect(self._on_writer_failed, Qt.ConnectionType.QueuedConnection)
         self._writer_finalized.connect(self._on_writer_finalized, Qt.ConnectionType.QueuedConnection)
+        self._writer_metadata_updated.connect(
+            self._on_writer_metadata_updated,
+            Qt.ConnectionType.QueuedConnection,
+        )
 
         self.state.telemetry_received.connect(self._on_telemetry)
         self.serial_client.raw_line_received.connect(self._on_raw_line)
@@ -109,7 +117,17 @@ class ExperimentRecordingService(QObject):
     def last_completed_session(self) -> ExperimentSession | None:
         return self._last_completed_session
 
-    def start_recording(self, name: str = "", notes: str = "") -> str:
+    @property
+    def active_sample_count(self) -> int:
+        return self._active_sample_count
+
+    def start_recording(
+        self,
+        name: str = "",
+        notes: str = "",
+        *,
+        experiment_metadata: dict[str, Any] | None = None,
+    ) -> str:
         if self._shutdown:
             raise RuntimeError("The recording service has shut down")
         if self.is_recording:
@@ -133,10 +151,14 @@ class ExperimentRecordingService(QObject):
             notes=notes,
             data_source=snapshot.data_source,
             serial_port=snapshot.real_port,
+            experiment_metadata=(
+                dict(experiment_metadata) if experiment_metadata is not None else None
+            ),
         )
         self._last_completed_session = None
         self._pending_request = request
         self._active_source = snapshot.data_source
+        self._active_sample_count = 0
         if not self._thread_started:
             self._thread.start()
             self._thread_started = True
@@ -154,6 +176,19 @@ class ExperimentRecordingService(QObject):
             str(self.repository.root / request.experiment_id),
         )
         return request.experiment_id
+
+    def update_run_metadata(
+        self,
+        experiment_id: str,
+        *,
+        name: str,
+        experiment_metadata: dict[str, Any],
+    ) -> None:
+        if self._active_session is None or self._active_session.experiment_id != experiment_id:
+            raise RuntimeError("The requested experiment session is not active")
+        if self._stopping:
+            raise RuntimeError("Experiment recording is already stopping")
+        self._queue.put(("metadata", experiment_id, name, dict(experiment_metadata)))
 
     def _on_writer_created(self, session: ExperimentSession) -> None:
         if self._pending_request is None or self._pending_request.experiment_id != session.experiment_id:
@@ -207,6 +242,7 @@ class ExperimentRecordingService(QObject):
 
     def _on_telemetry(self, sample: TelemetrySample) -> None:
         if self.is_recording and not self._stopping:
+            self._active_sample_count += 1
             self._queue.put(("sample", sample))
 
     def _on_raw_line(self, line: ReceivedSerialLine) -> None:
@@ -286,6 +322,27 @@ class ExperimentRecordingService(QObject):
         )
         self.recording_finished.emit(session.experiment_id, completion_status)
 
+    def _on_writer_metadata_updated(
+        self,
+        experiment_id: str,
+        session: ExperimentSession | None,
+        error: str,
+    ) -> None:
+        if error or session is None:
+            self.metadata_update_finished.emit(
+                experiment_id,
+                error or "Experiment metadata update failed",
+            )
+            return
+        if self._active_session is None or self._active_session.experiment_id != experiment_id:
+            self.metadata_update_finished.emit(
+                experiment_id,
+                "Experiment session changed during metadata update",
+            )
+            return
+        self._active_session = session
+        self.metadata_update_finished.emit(experiment_id, "")
+
     def _writer_loop(self) -> None:
         session: ExperimentSession | None = None
         raw_capture: RawSerialCapture | None = None
@@ -316,6 +373,7 @@ class ExperimentRecordingService(QObject):
                             data_source=request.data_source,
                             serial_port=request.serial_port,
                             experiment_id=request.experiment_id,
+                            experiment_metadata=request.experiment_metadata,
                         )
                         self._writer_created.emit(session)
                         raw_capture = RawSerialCapture(
@@ -399,6 +457,31 @@ class ExperimentRecordingService(QObject):
                         )
                         telemetry_file.flush()
                         sample_count += 1
+                elif command == "metadata":
+                    experiment_id, name, metadata = item[1:]
+                    if session is None or session.experiment_id != experiment_id:
+                        self._writer_metadata_updated.emit(
+                            experiment_id,
+                            None,
+                            "Experiment session changed before metadata could be saved",
+                        )
+                        continue
+                    manifest = dict(session.manifest)
+                    manifest["name"] = name.strip() or experiment_id
+                    experiment_metadata = dict(manifest.get("experiment", {}))
+                    experiment_metadata.update(metadata)
+                    manifest["experiment"] = experiment_metadata
+                    try:
+                        self.repository.write_manifest(session.directory, manifest)
+                    except Exception as error:
+                        self._writer_metadata_updated.emit(
+                            experiment_id,
+                            None,
+                            f"Could not save experiment metadata: {type(error).__name__}: {error}",
+                        )
+                        continue
+                    session = ExperimentSession(session.experiment_id, session.directory, manifest)
+                    self._writer_metadata_updated.emit(experiment_id, session, "")
                 elif command == "stop":
                     experiment_id, completion_status, interruption_reason = item[1:]
                     if session is None or session.experiment_id != experiment_id:

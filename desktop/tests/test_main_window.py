@@ -113,10 +113,11 @@ class MainWindowTests(unittest.TestCase):
         self.assertEqual(window.experiment_page.readiness_indicator.text(), "CHECK REQUIRED")
         page_buttons = window.findChildren(QPushButton)
         button_texts = [button.text().lower() for button in page_buttons]
-        forbidden_controls = ("sine", "parametric", "start motion", "run experiment")
+        forbidden_controls = ("sine", "parametric", "start motion")
         self.assertFalse(
             any(control in button_text for control in forbidden_controls for button_text in button_texts)
         )
+        self.assertEqual(window.experiment_page.primary_run_button.text(), "RUN EXPERIMENT")
         home_buttons = [button for button in page_buttons if button.text().lower() == "home"]
         self.assertEqual(home_buttons, [window.maintenance_page.home_button])
 
@@ -150,8 +151,7 @@ class MainWindowTests(unittest.TestCase):
         window = MainWindow(controller)
         controller.start_mock()
         experiment_page = window.experiment_page
-        experiment_page.experiment_name_input.setText("Navigation continuity")
-        experiment_page.start_recording_button.click()
+        controller.experiment_recorder.start_recording("Navigation continuity", "")
         self.assertTrue(
             self.wait_for(lambda: controller.state.snapshot.recording == RecordingState.RECORDING)
         )
@@ -164,7 +164,7 @@ class MainWindowTests(unittest.TestCase):
         window.experiment_navigation_button.click()
         self.assertEqual(controller.experiment_recorder.active_session.experiment_id, active_session.experiment_id)
 
-        experiment_page.stop_recording_button.click()
+        controller.experiment_recorder.stop_recording()
         self.assertTrue(
             self.wait_for(lambda: controller.state.snapshot.recording == RecordingState.SAVED)
         )
@@ -179,11 +179,11 @@ class MainWindowTests(unittest.TestCase):
 
         controller.state.set_motion(MotionState.HOMING)
 
-        self.assertFalse(window.experiment_page.start_recording_button.isEnabled())
+        self.assertFalse(window.experiment_page.primary_run_button.isEnabled())
         with self.assertRaisesRegex(RuntimeError, "while device motion is active"):
             controller.experiment_recorder.start_recording("blocked during motion", "")
         controller.state.set_motion(MotionState.RUNNING)
-        self.assertFalse(window.experiment_page.start_recording_button.isEnabled())
+        self.assertFalse(window.experiment_page.primary_run_button.isEnabled())
         with self.assertRaisesRegex(RuntimeError, "while device motion is active"):
             controller.experiment_recorder.start_recording("blocked during motion", "")
         window.close()
@@ -222,8 +222,7 @@ class MainWindowTests(unittest.TestCase):
         self.assertIs(controller.state.snapshot.data_source, DataSourceMode.REAL)
 
         controller.state.set_connection(ConnectionState.CONNECTED, "COM6")
-        window.experiment_page.experiment_name_input.setText("Real enum regression")
-        window.experiment_page.start_recording_button.click()
+        controller.experiment_recorder.start_recording("Real enum regression", "")
         self.assertEqual(controller.state.snapshot.recording.value, "Starting")
         self.assertTrue(
             self.wait_for(lambda: controller.state.snapshot.recording.value == "Recording")
@@ -231,7 +230,7 @@ class MainWindowTests(unittest.TestCase):
         session = controller.experiment_recorder.active_session
         self.assertIsNotNone(session)
         self.assertIs(session.manifest["data_source"]["mode"], DataSourceMode.REAL.value)
-        window.experiment_page.stop_recording_button.click()
+        controller.experiment_recorder.stop_recording()
         self.assertTrue(
             self.wait_for(lambda: controller.state.snapshot.recording.value == "Saved")
         )
@@ -366,18 +365,18 @@ class MainWindowTests(unittest.TestCase):
         experiment_page = window.experiment_page
         experiment_page.experiment_name_input.setText("Free decay check")
         experiment_page.experiment_notes_input.setText("Small-angle release")
-        experiment_page.start_recording_button.click()
+        controller.experiment_recorder.start_recording("Free decay check", "Small-angle release")
 
         self.assertEqual(controller.state.snapshot.recording.value, "Starting")
-        self.assertTrue(experiment_page.recording_state_value.text().startswith("Preparing experiment "))
+        self.assertEqual(experiment_page.run_recording_state_value.text(), "Recording: Starting")
         self.assertIn(str(repository.root), experiment_page.current_experiment_path.text())
         self.assertTrue(
             self.wait_for(lambda: controller.state.snapshot.recording.value == "Recording")
         )
         self.assertEqual(controller.state.snapshot.recording.value, "Recording")
-        self.assertTrue(experiment_page.recording_state_value.text().startswith("Recording "))
-        self.assertTrue(experiment_page.stop_recording_button.isEnabled())
-        self.assertFalse(experiment_page.start_recording_button.isEnabled())
+        self.assertEqual(experiment_page.run_recording_state_value.text(), "Recording: Recording")
+        self.assertFalse(hasattr(experiment_page, "stop_recording_button"))
+        self.assertFalse(hasattr(experiment_page, "start_recording_button"))
         controller.state.publish_sample(
             TelemetrySample(
                 2,
@@ -390,13 +389,13 @@ class MainWindowTests(unittest.TestCase):
         )
         session = controller.experiment_recorder.active_session
         self.assertIsNotNone(session)
-        experiment_page.stop_recording_button.click()
+        controller.experiment_recorder.stop_recording()
         self.assertEqual(controller.state.snapshot.recording.value, "Stopping")
         self.assertTrue(
             self.wait_for(lambda: controller.state.snapshot.recording.value == "Saved")
         )
         self.assertEqual(controller.state.snapshot.recording.value, "Saved")
-        self.assertTrue(experiment_page.recording_state_value.text().startswith("Completed: "))
+        self.assertTrue(experiment_page.run_recording_state_value.text().startswith("Recording: Completed"))
         self.assertFalse(experiment_page.saved_experiment_summary.isHidden())
         self.assertTrue(experiment_page.open_recording_folder_button.isEnabled())
         self.assertEqual(experiment_page.saved_name_value.text(), "Free decay check")
@@ -484,7 +483,7 @@ class MainWindowTests(unittest.TestCase):
         QTimer.singleShot(0, lambda: timer_fired.append(True))
 
         click_started = time.monotonic()
-        experiment_page.start_recording_button.click()
+        controller.experiment_recorder.start_recording("Responsive writer", "")
         click_elapsed = time.monotonic() - click_started
         self.qt_app.processEvents()
 
@@ -492,10 +491,10 @@ class MainWindowTests(unittest.TestCase):
         self.assertTrue(repository.create_started.wait(1.0))
         self.assertTrue(timer_fired)
         self.assertEqual(controller.state.snapshot.recording.value, "Starting")
-        self.assertTrue(experiment_page.recording_state_value.text().startswith("Preparing experiment "))
+        self.assertEqual(experiment_page.run_recording_state_value.text(), "Recording: Starting")
         self.assertIn(str(repository.root), experiment_page.current_experiment_path.text())
-        self.assertFalse(experiment_page.start_recording_button.isEnabled())
-        self.assertFalse(experiment_page.stop_recording_button.isEnabled())
+        self.assertFalse(hasattr(experiment_page, "start_recording_button"))
+        self.assertFalse(hasattr(experiment_page, "stop_recording_button"))
 
         repository.release_create.set()
         self.assertTrue(
@@ -509,12 +508,11 @@ class MainWindowTests(unittest.TestCase):
         self.assertTrue(any("session/folder created" in message for message in messages))
         self.assertTrue(any("writer ready" in message for message in messages))
         self.assertTrue(any("RECORDING state entered" in message for message in messages))
-        self.assertTrue(experiment_page.stop_recording_button.isEnabled())
-        self.assertFalse(experiment_page.start_recording_button.isEnabled())
+        self.assertEqual(experiment_page.run_recording_state_value.text(), "Recording: Recording")
         stop_timer_events = []
         QTimer.singleShot(0, lambda: stop_timer_events.append(True))
         stop_started = time.monotonic()
-        experiment_page.stop_recording_button.click()
+        controller.experiment_recorder.stop_recording()
         stop_elapsed = time.monotonic() - stop_started
         self.qt_app.processEvents()
         self.assertLess(stop_elapsed, 0.5)
@@ -544,7 +542,7 @@ class MainWindowTests(unittest.TestCase):
         window = MainWindow(controller)
         controller.start_mock()
         experiment_page = window.experiment_page
-        experiment_page.start_recording_button.click()
+        controller.experiment_recorder.start_recording("Disk failure", "")
 
         self.assertTrue(
             self.wait_for(lambda: controller.state.snapshot.recording.value == "Error")
@@ -558,8 +556,8 @@ class MainWindowTests(unittest.TestCase):
                 for index in range(window.live_page.event_list.count())
             )
         )
-        self.assertTrue(experiment_page.start_recording_button.isEnabled())
-        self.assertFalse(experiment_page.stop_recording_button.isEnabled())
+        self.assertIn("simulated disk full", experiment_page.run_error_value.text())
+        self.assertFalse(hasattr(experiment_page, "start_recording_button"))
         window.close()
 
 

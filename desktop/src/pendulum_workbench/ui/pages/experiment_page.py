@@ -3,6 +3,7 @@ from pathlib import Path
 from PySide6.QtCore import QUrl, Qt
 from PySide6.QtGui import QColor, QDesktopServices
 from PySide6.QtWidgets import (
+    QComboBox,
     QFileDialog,
     QFrame,
     QGraphicsDropShadowEffect,
@@ -10,6 +11,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QProgressBar,
     QPushButton,
     QStyle,
     QVBoxLayout,
@@ -25,6 +27,8 @@ from pendulum_workbench.domain.models import (
     MotionState,
     RecordingState,
 )
+from pendulum_workbench.domain.experiment_run import ExperimentRunState, VerticalSineDefinition
+from pendulum_workbench.domain.maintenance import PendulumLatchState
 from pendulum_workbench.experiments.repository import LoadedExperiment
 
 
@@ -32,6 +36,7 @@ class ExperimentPage(QWidget):
     def __init__(self, controller: WorkbenchController) -> None:
         super().__init__()
         self.controller = controller
+        self.run_service = controller.experiment_run
         self._recording_name = ""
         self._recording_notes = ""
         self._experiment_directory: Path | None = None
@@ -42,25 +47,75 @@ class ExperimentPage(QWidget):
 
         recording_panel = QFrame()
         recording_panel.setObjectName("surface")
+        recording_panel.setMinimumHeight(320)
         self._apply_card_depth(recording_panel)
         recording_layout = QVBoxLayout(recording_panel)
         recording_layout.setContentsMargins(18, 14, 18, 14)
-        recording_layout.setSpacing(10)
-        recording_heading = QLabel("NEW / ACTIVE RECORDING")
+        recording_layout.setSpacing(12)
+        recording_heading = QLabel("EXPERIMENT SETUP")
         recording_heading.setObjectName("sectionTitle")
         recording_layout.addWidget(recording_heading)
         self.readiness_indicator = QLabel("CHECK REQUIRED")
         self.readiness_indicator.setObjectName("experimentReadinessIndicator")
         recording_layout.addWidget(self.readiness_indicator)
 
-        fields = QHBoxLayout()
-        fields.setSpacing(12)
+        latch_row = QHBoxLayout()
+        self.latch_state_value = QLabel("Pendulum Latch: UNKNOWN")
+        self.latch_state_value.setObjectName("experimentLatchState")
+        self.latch_state_value.setMinimumHeight(34)
+        latch_row.addWidget(self.latch_state_value, 1)
+        self.prepare_latch_button = QPushButton("PREPARE LATCH / HOLD")
+        self.prepare_latch_button.setObjectName("prepareExperimentLatchButton")
+        self.prepare_latch_button.setMinimumHeight(38)
+        self.prepare_latch_button.clicked.connect(self._prepare_latch)
+        latch_row.addWidget(self.prepare_latch_button)
+        recording_layout.addLayout(latch_row)
+
+        mode_row = QHBoxLayout()
+        mode_label = QLabel("EXPERIMENT MODE")
+        mode_label.setObjectName("sectionTitle")
+        self.experiment_mode_selector = QComboBox()
+        self.experiment_mode_selector.addItem("Vertical Sinusoidal Excitation")
+        self.experiment_mode_selector.setMinimumHeight(38)
+        mode_row.addWidget(mode_label)
+        mode_row.addWidget(self.experiment_mode_selector, 1)
+        recording_layout.addLayout(mode_row)
+
+        fields = QGridLayout()
+        fields.setHorizontalSpacing(12)
+        fields.setVerticalSpacing(12)
+        amplitude_label = QLabel("PIVOT AMPLITUDE [mm]")
+        amplitude_label.setObjectName("sectionTitle")
+        self.amplitude_input = QLineEdit()
+        self.amplitude_input.setObjectName("experimentAmplitudeInput")
+        self.amplitude_input.setPlaceholderText("Required")
+        self.amplitude_input.setMinimumHeight(38)
+        frequency_label = QLabel("EXCITATION FREQUENCY [Hz]")
+        frequency_label.setObjectName("sectionTitle")
+        self.frequency_input = QLineEdit()
+        self.frequency_input.setObjectName("experimentFrequencyInput")
+        self.frequency_input.setPlaceholderText("Required")
+        self.frequency_input.setMinimumHeight(38)
+        duration_label = QLabel("DURATION [s]")
+        duration_label.setObjectName("sectionTitle")
+        self.duration_input = QLineEdit()
+        self.duration_input.setObjectName("experimentDurationInput")
+        self.duration_input.setPlaceholderText("Required")
+        self.duration_input.setMinimumHeight(38)
+        fields.addWidget(amplitude_label, 0, 0)
+        fields.addWidget(self.amplitude_input, 1, 0)
+        fields.addWidget(frequency_label, 0, 1)
+        fields.addWidget(self.frequency_input, 1, 1)
+        fields.addWidget(duration_label, 0, 2)
+        fields.addWidget(self.duration_input, 1, 2)
+
         name_group = QVBoxLayout()
-        name_label = QLabel("EXPERIMENT NAME")
+        name_label = QLabel("OPTIONAL EXPERIMENT LABEL")
         name_label.setObjectName("sectionTitle")
         self.experiment_name_input = QLineEdit()
         self.experiment_name_input.setObjectName("experimentNameInput")
-        self.experiment_name_input.setPlaceholderText("Optional run name")
+        self.experiment_name_input.setPlaceholderText("Optional")
+        self.experiment_name_input.setMinimumHeight(38)
         name_group.addWidget(name_label)
         name_group.addWidget(self.experiment_name_input)
         notes_group = QVBoxLayout()
@@ -68,37 +123,66 @@ class ExperimentPage(QWidget):
         notes_label.setObjectName("sectionTitle")
         self.experiment_notes_input = QLineEdit()
         self.experiment_notes_input.setObjectName("experimentNotesInput")
-        self.experiment_notes_input.setPlaceholderText("Operator notes (optional)")
+        self.experiment_notes_input.setPlaceholderText("Optional")
+        self.experiment_notes_input.setMinimumHeight(38)
         notes_group.addWidget(notes_label)
         notes_group.addWidget(self.experiment_notes_input)
-        fields.addLayout(name_group, 1)
-        fields.addLayout(notes_group, 2)
+        fields.addLayout(name_group, 2, 0)
+        fields.addLayout(notes_group, 2, 1, 1, 2)
         recording_layout.addLayout(fields)
-
-        controls = QHBoxLayout()
-        controls.setSpacing(8)
-        self.start_recording_button = QPushButton("Start Recording")
-        self.start_recording_button.setObjectName("startRecordingButton")
-        self.start_recording_button.clicked.connect(self._start_recording)
-        controls.addWidget(self.start_recording_button)
-        self.stop_recording_button = QPushButton("Stop Recording")
-        self.stop_recording_button.setObjectName("stopRecordingButton")
-        self.stop_recording_button.clicked.connect(self._stop_recording)
-        controls.addWidget(self.stop_recording_button)
-        self.recording_state_value = QLabel("Recording is idle")
-        self.recording_state_value.setObjectName("subtle")
-        self.recording_state_value.setWordWrap(True)
-        controls.addWidget(self.recording_state_value, 1)
-        recording_layout.addLayout(controls)
-
-        self.current_experiment_path = QLabel("No active experiment")
-        self.current_experiment_path.setObjectName("experimentPathValue")
-        self.current_experiment_path.setWordWrap(True)
-        self.current_experiment_path.setTextInteractionFlags(
-            Qt.TextInteractionFlag.TextSelectableByMouse
-        )
-        recording_layout.addWidget(self.current_experiment_path)
+        self.run_name_preview = QLabel("Final run name includes the measured initial angle.")
+        self.run_name_preview.setObjectName("subtle")
+        self.run_name_preview.setWordWrap(True)
+        recording_layout.addWidget(self.run_name_preview)
         layout.addWidget(recording_panel)
+
+        run_status_panel = QFrame()
+        run_status_panel.setObjectName("surface")
+        self._apply_card_depth(run_status_panel)
+        run_status_layout = QVBoxLayout(run_status_panel)
+        run_status_layout.setContentsMargins(18, 14, 18, 14)
+        run_status_layout.setSpacing(10)
+        run_status_heading = QLabel("RUN STATUS")
+        run_status_heading.setObjectName("sectionTitle")
+        run_status_layout.addWidget(run_status_heading)
+        self.run_state_value = QLabel(ExperimentRunState.READY.value)
+        self.run_state_value.setObjectName("experimentRunState")
+        self.run_state_value.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        run_status_layout.addWidget(self.run_state_value)
+        live_values = QHBoxLayout()
+        self.run_angle_value = QLabel("Angle: unavailable")
+        self.run_angle_value.setObjectName("hardwareInfoValue")
+        self.run_position_value = QLabel("Pivot: unavailable")
+        self.run_position_value.setObjectName("hardwareInfoValue")
+        live_values.addWidget(self.run_angle_value, 1)
+        live_values.addWidget(self.run_position_value, 1)
+        run_status_layout.addLayout(live_values)
+        elapsed_row = QHBoxLayout()
+        self.run_elapsed_value = QLabel("Elapsed: 0.0 s")
+        self.run_elapsed_value.setObjectName("subtle")
+        self.run_progress = QProgressBar()
+        self.run_progress.setObjectName("experimentRunProgress")
+        self.run_progress.setRange(0, 1000)
+        self.run_progress.setValue(0)
+        self.run_progress.setTextVisible(False)
+        elapsed_row.addWidget(self.run_elapsed_value)
+        elapsed_row.addWidget(self.run_progress, 1)
+        run_status_layout.addLayout(elapsed_row)
+        run_controls = QHBoxLayout()
+        self.run_recording_state_value = QLabel("Recording: Off")
+        self.run_recording_state_value.setObjectName("subtle")
+        run_controls.addWidget(self.run_recording_state_value, 1)
+        self.primary_run_button = QPushButton("RUN EXPERIMENT")
+        self.primary_run_button.setObjectName("primaryExperimentRunButton")
+        self.primary_run_button.setMinimumHeight(52)
+        self.primary_run_button.clicked.connect(self._on_primary_run_button)
+        run_controls.addWidget(self.primary_run_button)
+        run_status_layout.addLayout(run_controls)
+        self.run_error_value = QLabel("")
+        self.run_error_value.setObjectName("subtle")
+        self.run_error_value.setWordWrap(True)
+        run_status_layout.addWidget(self.run_error_value)
+        layout.addWidget(run_status_panel)
 
         saved_panel = QFrame()
         saved_panel.setObjectName("surface")
@@ -107,7 +191,7 @@ class ExperimentPage(QWidget):
         saved_layout.setContentsMargins(18, 14, 18, 14)
         saved_layout.setSpacing(10)
         saved_header = QHBoxLayout()
-        saved_heading = QLabel("SAVED EXPERIMENT")
+        saved_heading = QLabel("RUN RECORD")
         saved_heading.setObjectName("sectionTitle")
         saved_header.addWidget(saved_heading)
         saved_header.addStretch(1)
@@ -128,6 +212,14 @@ class ExperimentPage(QWidget):
         saved_header.addWidget(self.open_recording_folder_button)
         saved_layout.addLayout(saved_header)
 
+        self.current_experiment_path = QLabel("No active experiment")
+        self.current_experiment_path.setObjectName("experimentPathValue")
+        self.current_experiment_path.setWordWrap(True)
+        self.current_experiment_path.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse
+        )
+        saved_layout.addWidget(self.current_experiment_path)
+
         self.saved_experiment_summary = QWidget()
         self.saved_experiment_summary.setObjectName("savedExperimentSummary")
         summary = QGridLayout(self.saved_experiment_summary)
@@ -141,6 +233,10 @@ class ExperimentPage(QWidget):
         self.saved_status_value = self._summary_value("savedExperimentStatusValue")
         self.saved_sample_count_value = self._summary_value("savedExperimentSampleCountValue")
         self.saved_data_source_value = self._summary_value("savedExperimentDataSourceValue")
+        self.run_initial_angle_value = self._summary_value("runInitialAngleValue")
+        self.run_started_at_value = self._summary_value("runStartedAtValue")
+        self.run_actual_duration_value = self._summary_value("runActualDurationValue")
+        self.run_completion_reason_value = self._summary_value("runCompletionReasonValue")
         summary.addWidget(self._summary_key("NAME"), 0, 0)
         summary.addWidget(self.saved_name_value, 0, 1)
         summary.addWidget(self._summary_key("NOTES"), 0, 2)
@@ -155,9 +251,17 @@ class ExperimentPage(QWidget):
         summary.addWidget(self.saved_sample_count_value, 3, 3)
         summary.addWidget(self._summary_key("DATA SOURCE"), 4, 0)
         summary.addWidget(self.saved_data_source_value, 4, 1, 1, 3)
+        summary.addWidget(self._summary_key("MEASURED INITIAL ANGLE"), 5, 0)
+        summary.addWidget(self.run_initial_angle_value, 5, 1)
+        summary.addWidget(self._summary_key("STARTED AT"), 5, 2)
+        summary.addWidget(self.run_started_at_value, 5, 3)
+        summary.addWidget(self._summary_key("ACTUAL DURATION"), 6, 0)
+        summary.addWidget(self.run_actual_duration_value, 6, 1)
+        summary.addWidget(self._summary_key("COMPLETION REASON"), 6, 2)
+        summary.addWidget(self.run_completion_reason_value, 6, 3)
         summary.setColumnStretch(1, 1)
         summary.setColumnStretch(3, 2)
-        self.saved_experiment_summary.setVisible(False)
+        self.saved_experiment_summary.setVisible(True)
         saved_layout.addWidget(self.saved_experiment_summary)
         layout.addWidget(saved_panel)
         layout.addStretch(1)
@@ -168,10 +272,17 @@ class ExperimentPage(QWidget):
         recorder.recording_started.connect(self._on_recording_started)
         recorder.recording_finished.connect(self._on_recording_finished)
         recorder.recording_failed.connect(self._on_recording_failed)
+        self.run_service.snapshot_changed.connect(self._update_run_snapshot)
+        self.controller.state.telemetry_received.connect(self._update_run_live_values)
+        self.amplitude_input.textChanged.connect(self._update_setup_validity)
+        self.frequency_input.textChanged.connect(self._update_setup_validity)
+        self.duration_input.textChanged.connect(self._update_setup_validity)
+        self.experiment_name_input.textChanged.connect(self._update_name_preview)
         self.controller.experiment_loaded.connect(self._show_saved_experiment)
         self.controller.maintenance.snapshot_changed.connect(self._update_readiness)
         self._update_snapshot(self.controller.state.snapshot)
         self._update_readiness(self.controller.maintenance.snapshot)
+        self._update_run_snapshot(self.run_service.snapshot)
 
     @staticmethod
     def _apply_card_depth(card: QFrame) -> None:
@@ -212,44 +323,26 @@ class ExperimentPage(QWidget):
             self.controller.open_experiment(source)
         except (OSError, ValueError, RuntimeError, KeyError) as error:
             self.controller.state.report_event(EventSeverity.ERROR, f"Could not open experiment: {error}")
-            self.recording_state_value.setText(f"Could not open experiment: {error}")
-
-    def _start_recording(self) -> None:
-        try:
-            self.controller.experiment_recorder.start_recording(
-                self.experiment_name_input.text(),
-                self.experiment_notes_input.text(),
-            )
-        except (OSError, RuntimeError, TimeoutError, ValueError) as error:
-            self.controller.state.report_event(EventSeverity.ERROR, str(error))
-            self.recording_state_value.setText(str(error))
-
-    def _stop_recording(self) -> None:
-        try:
-            self.controller.experiment_recorder.stop_recording()
-        except (OSError, RuntimeError, TimeoutError) as error:
-            self.controller.state.report_event(EventSeverity.ERROR, str(error))
-            self.recording_state_value.setText(str(error))
+            self.run_error_value.setText(f"Could not open experiment: {error}")
 
     def _on_recording_requested(self, experiment_id: str, directory: str) -> None:
-        self._recording_name = self.experiment_name_input.text().strip() or experiment_id
+        self._recording_name = self.run_service.snapshot.generated_name or experiment_id
         self._recording_notes = self.experiment_notes_input.text().strip()
         self._experiment_directory = Path(directory)
         self.open_recording_folder_button.setEnabled(False)
-        self.saved_experiment_summary.setVisible(False)
-        self.recording_state_value.setText(f"Preparing experiment {experiment_id}...")
         self.current_experiment_path.setText(f"Experiment {experiment_id}: {directory}")
         self.current_experiment_path.setToolTip(directory)
+        self.run_recording_state_value.setText("Recording: Starting")
 
     def _on_recording_started(self, experiment_id: str, directory: str) -> None:
-        self.recording_state_value.setText(f"Recording {experiment_id}")
+        self.run_recording_state_value.setText("Recording: Recording")
         self.current_experiment_path.setText(
             f"Experiment {experiment_id}; raw capture: {Path(directory) / 'serial_capture.log'}"
         )
         self.current_experiment_path.setToolTip(directory)
 
     def _on_recording_finished(self, experiment_id: str, status: str) -> None:
-        self.recording_state_value.setText(f"{status.title()}: {experiment_id}")
+        self.run_recording_state_value.setText(f"Recording: {status.title()}")
         session = self.controller.experiment_recorder.last_completed_session
         if session is None or session.experiment_id != experiment_id:
             self.controller.state.report_event(
@@ -267,32 +360,195 @@ class ExperimentPage(QWidget):
         self.current_experiment_path.setToolTip(str(session.directory))
 
     def _on_recording_failed(self, experiment_id: str, message: str) -> None:
-        self.recording_state_value.setText(f"Recording failed: {experiment_id}")
+        self.run_recording_state_value.setText(f"Recording: Failed ({experiment_id})")
+        self.run_error_value.setText(message)
         self.current_experiment_path.setText(message)
         self.current_experiment_path.setToolTip(message)
 
+    def _definition_from_fields(self) -> VerticalSineDefinition:
+        try:
+            amplitude = float(self.amplitude_input.text().strip())
+            frequency = float(self.frequency_input.text().strip())
+            duration = float(self.duration_input.text().strip())
+        except ValueError as error:
+            raise ValueError("Enter numeric amplitude, frequency, and duration values") from error
+        definition = VerticalSineDefinition(
+            amplitude,
+            frequency,
+            duration,
+            label=self.experiment_name_input.text(),
+            notes=self.experiment_notes_input.text(),
+        )
+        definition.validate()
+        return definition
+
+    def _on_primary_run_button(self) -> None:
+        run_state = self.run_service.snapshot.state
+        if run_state in (ExperimentRunState.PREPARING, ExperimentRunState.RUNNING):
+            self.run_service.stop()
+            return
+        if run_state == ExperimentRunState.STOPPING:
+            return
+        try:
+            self.run_error_value.setText("")
+            self.run_service.start(self._definition_from_fields())
+        except (OSError, RuntimeError, TimeoutError, ValueError) as error:
+            self.run_error_value.setText(str(error))
+            self.controller.state.report_event(EventSeverity.WARNING, str(error))
+        self._update_setup_validity()
+
+    def _prepare_latch(self) -> None:
+        try:
+            self.controller.maintenance.command_latch(PendulumLatchState.HOLD)
+        except (RuntimeError, ValueError, OSError) as error:
+            self.controller.state.report_event(EventSeverity.WARNING, str(error))
+        self._update_latch_controls()
+
+    def _update_latch_controls(self) -> None:
+        maintenance = self.controller.maintenance
+        maintenance_snapshot = maintenance.snapshot
+        latch_state = maintenance_snapshot.latch_state
+        state_colors = {
+            PendulumLatchState.UNKNOWN: ("#64716d", "#eef1ef"),
+            PendulumLatchState.COMMANDING_HOLD: ("#8b5b14", "#fff3d8"),
+            PendulumLatchState.COMMANDING_OPEN: ("#8b5b14", "#fff3d8"),
+            PendulumLatchState.HOLD: ("#205f49", "#e5f4ed"),
+            PendulumLatchState.OPEN: ("#386273", "#eaf2f5"),
+            PendulumLatchState.UNCONFIRMED: ("#a3322b", "#fbe8e6"),
+        }
+        foreground, background = state_colors[latch_state]
+        self.latch_state_value.setText(f"Pendulum Latch: {latch_state.value}")
+        self.latch_state_value.setToolTip(maintenance_snapshot.latch_message)
+        self.latch_state_value.setStyleSheet(
+            f"color: {foreground}; background: {background}; padding: 6px 9px; font-weight: 700;"
+        )
+
+        if latch_state == PendulumLatchState.HOLD:
+            self.prepare_latch_button.setText("HOLD CONFIRMED")
+        elif latch_state == PendulumLatchState.COMMANDING_HOLD:
+            self.prepare_latch_button.setText("COMMANDING HOLD...")
+        else:
+            self.prepare_latch_button.setText("PREPARE LATCH / HOLD")
+
+        app_snapshot = self.controller.state.snapshot
+        run_state = self.run_service.snapshot.state
+        experiment_active = run_state in (
+            ExperimentRunState.PREPARING,
+            ExperimentRunState.RUNNING,
+            ExperimentRunState.STOPPING,
+        )
+        incompatible_motion = (
+            maintenance.is_manual_motion_active
+            or app_snapshot.motion in (
+                MotionState.HOMING,
+                MotionState.RUNNING,
+                MotionState.STOPPING,
+            )
+            or app_snapshot.hardware_status.active_motion_mode.strip().lower() != "idle"
+        )
+        blocking_fault = bool(
+            app_snapshot.hardware_status.fault_known
+            and app_snapshot.hardware_status.fault
+        )
+        self.prepare_latch_button.setEnabled(
+            app_snapshot.connection == ConnectionState.CONNECTED
+            and not experiment_active
+            and not incompatible_motion
+            and not maintenance.is_busy
+            and not blocking_fault
+            and latch_state != PendulumLatchState.HOLD
+        )
+
+    def _update_setup_validity(self, *_args) -> None:
+        self._update_latch_controls()
+        locked = self.run_service.setup_locked
+        for widget in (
+            self.experiment_mode_selector,
+            self.amplitude_input,
+            self.frequency_input,
+            self.duration_input,
+            self.experiment_name_input,
+            self.experiment_notes_input,
+        ):
+            widget.setEnabled(not locked)
+
+        run_state = self.run_service.snapshot.state
+        if run_state in (ExperimentRunState.PREPARING, ExperimentRunState.RUNNING):
+            self.primary_run_button.setText("STOP EXPERIMENT")
+            self.primary_run_button.setEnabled(True)
+            return
+        if run_state == ExperimentRunState.STOPPING:
+            self.primary_run_button.setText("STOPPING...")
+            self.primary_run_button.setEnabled(False)
+            return
+
+        self.primary_run_button.setText("RUN EXPERIMENT")
+        try:
+            definition = self._definition_from_fields()
+            self.run_service.validate_start(definition)
+        except (RuntimeError, ValueError) as error:
+            self.primary_run_button.setEnabled(False)
+            self.run_error_value.setText(str(error))
+        else:
+            self.primary_run_button.setEnabled(True)
+            self.run_error_value.setText("")
+        self._update_name_preview()
+
+    def _update_name_preview(self, *_args) -> None:
+        try:
+            definition = self._definition_from_fields()
+        except ValueError:
+            self.run_name_preview.setText("Enter setup values; final name will include the measured initial angle.")
+            return
+        self.run_name_preview.setText(
+            f"Run name preview: {definition.partial_name()} (initial angle added at start)"
+        )
+
+    def _update_run_snapshot(self, snapshot) -> None:
+        self.run_state_value.setText(snapshot.state.value)
+        self.run_recording_state_value.setText(f"Recording: {snapshot.recording_state}")
+        definition = snapshot.definition
+        if definition is not None:
+            self.run_elapsed_value.setText(
+                f"Elapsed: {snapshot.elapsed_s:.1f} / {definition.duration_s:.1f} s"
+            )
+            fraction = min(1.0, max(0.0, snapshot.elapsed_s / definition.duration_s))
+            self.run_progress.setValue(int(fraction * 1000))
+        else:
+            self.run_elapsed_value.setText("Elapsed: 0.0 s")
+            self.run_progress.setValue(0)
+        self.saved_name_value.setText(snapshot.generated_name or "-")
+        self.saved_id_value.setText(snapshot.experiment_id or "-")
+        self.saved_sample_count_value.setText(str(snapshot.sample_count))
+        self.run_initial_angle_value.setText(
+            "-" if snapshot.measured_initial_angle_deg is None
+            else f"{snapshot.measured_initial_angle_deg:+.2f} deg"
+        )
+        self.run_started_at_value.setText(snapshot.started_at or "-")
+        self.run_actual_duration_value.setText(
+            "-" if snapshot.actual_elapsed_duration_s is None
+            else f"{snapshot.actual_elapsed_duration_s:.3f} s"
+        )
+        self.run_completion_reason_value.setText(snapshot.completion_reason or "-")
+        self.run_error_value.setText(snapshot.error_message)
+        if snapshot.directory:
+            self.current_experiment_path.setText(snapshot.directory)
+            self.current_experiment_path.setToolTip(snapshot.directory)
+        self._update_setup_validity()
+
+    def _update_run_live_values(self, sample) -> None:
+        if sample.source != "real":
+            return
+        self.run_angle_value.setText(
+            "Angle: unavailable" if sample.angle_deg is None else f"Angle: {sample.angle_deg:+.2f} deg"
+        )
+        self.run_position_value.setText(
+            "Pivot: unavailable" if sample.position_mm is None else f"Pivot: {sample.position_mm:+.2f} mm"
+        )
+
     def _update_snapshot(self, snapshot: ApplicationSnapshot) -> None:
-        recording_active = snapshot.recording in (
-            RecordingState.STARTING,
-            RecordingState.RECORDING,
-            RecordingState.STOPPING,
-        )
-        live_source_ready = (
-            snapshot.data_source == DataSourceMode.MOCK and snapshot.mock_source_active
-        ) or (
-            snapshot.data_source == DataSourceMode.REAL
-            and snapshot.connection == ConnectionState.CONNECTED
-        )
-        self.start_recording_button.setEnabled(
-            live_source_ready
-            and not recording_active
-            and snapshot.motion not in (MotionState.HOMING, MotionState.RUNNING, MotionState.STOPPING)
-        )
-        self.stop_recording_button.setEnabled(snapshot.recording == RecordingState.RECORDING)
-        self.experiment_name_input.setEnabled(not recording_active)
-        self.experiment_notes_input.setEnabled(not recording_active)
+        self._update_setup_validity()
         if snapshot.recording == RecordingState.ERROR:
-            # The detailed failure signal supplies the exception and target path.
             return
         if snapshot.recording == RecordingState.SAVED and self._experiment_directory is not None:
             self.open_recording_folder_button.setEnabled(self._experiment_directory.is_dir())
@@ -310,14 +566,18 @@ class ExperimentPage(QWidget):
         self.readiness_indicator.setStyleSheet(
             f"color: {foreground}; background: {background}; padding: 5px 8px; font-weight: 700;"
         )
+        self._update_setup_validity()
 
     def _show_saved_experiment(self, experiment: LoadedExperiment) -> None:
         self._experiment_directory = experiment.directory
-        self.experiment_name_input.setText(experiment.manifest.get("name", ""))
+        experiment_metadata = experiment.manifest.get("experiment", {})
+        self.experiment_name_input.setText(
+            experiment_metadata.get("optional_label", experiment.manifest.get("name", ""))
+        )
         self.experiment_notes_input.setText(experiment.manifest.get("notes", ""))
         name = experiment.manifest.get("name") or experiment.experiment_id
         status = experiment.manifest.get("completion_status", "UNKNOWN")
-        self.recording_state_value.setText(f"Loaded {name} ({status})")
+        self.run_recording_state_value.setText(f"Recording: Loaded ({status})")
         self.current_experiment_path.setText(f"Experiment folder: {experiment.directory}")
         self.current_experiment_path.setToolTip(str(experiment.directory))
         self._show_summary(
@@ -345,6 +605,19 @@ class ExperimentPage(QWidget):
         self.saved_status_value.setText(str(manifest.get("completion_status") or "-"))
         self.saved_sample_count_value.setText("-" if sample_count is None else str(sample_count))
         self.saved_data_source_value.setText(str(source_mode))
+        experiment_metadata = manifest.get("experiment", {})
+        measured_angle = experiment_metadata.get("measured_initial_angle_deg")
+        self.run_initial_angle_value.setText(
+            "-" if measured_angle is None else f"{float(measured_angle):+.2f} deg"
+        )
+        self.run_started_at_value.setText(str(manifest.get("started_at") or "-"))
+        actual_duration = experiment_metadata.get("actual_elapsed_duration_s")
+        self.run_actual_duration_value.setText(
+            "-" if actual_duration is None else f"{float(actual_duration):.3f} s"
+        )
+        self.run_completion_reason_value.setText(
+            str(experiment_metadata.get("completion_reason") or manifest.get("interruption_reason") or "-")
+        )
         self.saved_experiment_summary.setVisible(True)
         self.open_recording_folder_button.setEnabled(directory.is_dir())
 

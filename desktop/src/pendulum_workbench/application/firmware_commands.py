@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 from enum import Enum
+import math
 
 from PySide6.QtCore import QObject, QTimer, Signal
 
@@ -21,6 +22,8 @@ class FirmwareCommand(str, Enum):
     LATCH_HOLD = "latch_hold"
     LATCH_OPEN = "latch_open"
     LATCH_STATUS = "latch_status"
+    SINE_START = "sine_start"
+    SINE_STOP = "sine_stop"
 
 
 @dataclass(frozen=True, slots=True)
@@ -37,6 +40,7 @@ class FirmwareCommandService(QObject):
     _DISPATCH_TIMEOUT_MS = 5000
     _HOME_TIMEOUT_MS = 65000
     _MANUAL_COMMAND_TIMEOUT_MS = 500
+    _SINE_STOP_TIMEOUT_MS = 75000
 
     def __init__(
         self,
@@ -103,7 +107,27 @@ class FirmwareCommandService(QObject):
     def latch_status(self) -> int:
         return self._request(FirmwareCommand.LATCH_STATUS)
 
-    def _request(self, command: FirmwareCommand, *, timeout_ms: int | None = None) -> int:
+    def start_vertical_sine(self, amplitude_mm: float, frequency_hz: float) -> int:
+        if not math.isfinite(amplitude_mm) or amplitude_mm <= 0.0:
+            raise ValueError("pivot amplitude must be finite and greater than zero")
+        if not math.isfinite(frequency_hz) or frequency_hz <= 0.0:
+            raise ValueError("excitation frequency must be finite and greater than zero")
+        arguments = f"{amplitude_mm:.9g} {frequency_hz:.9g}"
+        return self._request(FirmwareCommand.SINE_START, arguments=arguments)
+
+    def stop_vertical_sine(self) -> int:
+        return self._request(
+            FirmwareCommand.SINE_STOP,
+            timeout_ms=self._SINE_STOP_TIMEOUT_MS,
+        )
+
+    def _request(
+        self,
+        command: FirmwareCommand,
+        *,
+        timeout_ms: int | None = None,
+        arguments: str = "",
+    ) -> int:
         if self.state.snapshot.connection != ConnectionState.CONNECTED:
             raise RuntimeError("Connect to the STM32 before sending a maintenance command")
         if self.is_busy:
@@ -119,7 +143,7 @@ class FirmwareCommandService(QObject):
         try:
             self.serial_client.send_maintenance_command(
                 str(request_id),
-                f"maint {request_id} {command.value}",
+                f"maint {request_id} {command.value}{f' {arguments}' if arguments else ''}",
             )
         except (RuntimeError, ValueError, OSError) as error:
             self._fail(str(error))

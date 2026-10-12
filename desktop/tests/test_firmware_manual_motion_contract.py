@@ -202,6 +202,42 @@ class FirmwareManualMotionContractTests(unittest.TestCase):
         self.assertIn("error=latch_not_open", home_command)
         self.assertLess(correlated_guard, home_command.index("Home();"))
 
+    def test_typed_sine_commands_keep_existing_latch_motion_fault_and_recording_guards(self) -> None:
+        maintenance = function_body("ProcessMaintenanceCommand")
+        sine_start = maintenance.split('if (strncmp(end, "sine_start ", 11U) == 0)', 1)[1].split(
+            'if (strcmp(end, "sine_stop") == 0)', 1
+        )[0]
+        for required_check in (
+            "isfinite(amplitudeMm)",
+            "isfinite(frequencyHz)",
+            "g_homed == 0U",
+            "g_servoLatchCommandedState != SERVO_LATCH_STATE_OPEN",
+            "g_closedLoopFault != 0U",
+            "g_manualMotionDirection != 0U",
+            "g_parametricClosedLoopRunning != 0U",
+            "g_recording != 0U",
+            "MAX_SINE_FREQUENCY_HZ",
+            "amplitude_out_of_travel",
+            "type=sine_start ok=1 active=1",
+        ):
+            self.assertIn(required_check, sine_start)
+
+        sine_stop = maintenance.split('if (strcmp(end, "sine_stop") == 0)', 1)[1].split(
+            'if (strcmp(end, "manual_up") == 0', 1
+        )[0]
+        self.assertIn("g_sineRunning = 0U", sine_stop)
+        self.assertIn("ReturnToCenter()", sine_stop)
+        self.assertIn("type=sine_stop ok=1 active=0", sine_stop)
+
+        legacy_sine_start = function_body("ProcessLine").split(
+            'if (strncmp(line, "sine", 4) == 0', 1
+        )[1].split('if (strncmp(line, "parametric", 10) == 0', 1)[0]
+        self.assertIn("g_servoLatchCommandedState != SERVO_LATCH_STATE_OPEN", legacy_sine_start)
+
+        sine_update = function_body("UpdateSine")
+        self.assertIn("StepOne(speedHz, 1U, 1U) == 0U", sine_update)
+        self.assertIn("event: type=sine_motion_stopped reason=limit", sine_update)
+
 
 if __name__ == "__main__":
     unittest.main()

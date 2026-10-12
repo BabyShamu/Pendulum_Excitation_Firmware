@@ -243,6 +243,17 @@ class MaintenanceService(QObject):
         self._request(self.commands.set_angle_zero)
 
     def command_latch(self, state: PendulumLatchState) -> None:
+        self._command_latch(state, allow_active_recording=False)
+
+    def command_latch_open_for_experiment(self) -> None:
+        self._command_latch(PendulumLatchState.OPEN, allow_active_recording=True)
+
+    def _command_latch(
+        self,
+        state: PendulumLatchState,
+        *,
+        allow_active_recording: bool,
+    ) -> None:
         if state not in (PendulumLatchState.HOLD, PendulumLatchState.OPEN):
             raise ValueError("Latch command must be HOLD or OPEN")
         self._require_connected()
@@ -257,7 +268,7 @@ class MaintenanceService(QObject):
             MotionState.STOPPING,
         ):
             raise RuntimeError("Pendulum latch commands are blocked during pivot motion")
-        if snapshot.recording in (
+        if not allow_active_recording and snapshot.recording in (
             RecordingState.STARTING,
             RecordingState.RECORDING,
             RecordingState.STOPPING,

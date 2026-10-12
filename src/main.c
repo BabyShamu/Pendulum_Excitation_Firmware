@@ -1477,6 +1477,7 @@ static void UpdateSine(void)
         {
             g_sineRunning = 0U;
             g_run = 0U;
+            UartPrint("event: type=sine_motion_stopped reason=limit\r\n");
             UartPrint("sine stopped: limit switch reached\r\n");
             return;
         }
@@ -2038,6 +2039,7 @@ static void PrintHelp(void)
     UartPrint("  home            - find both limits and move to midpoint\r\n");
     UartPrint("  sine <amp_mm> <hz> - start sinusoidal pivot motion after homing\r\n");
     UartPrint("  sine stop       - stop sine motion\r\n");
+    UartPrint("  maint <id> sine_start <amp_mm> <hz> | sine_stop - correlated sine motion control\r\n");
     UartPrint("  parametric <amp_mm> <phi_deg> - drive pivot at 2x pendulum phase rate\r\n");
     UartPrint("  parametric stop - stop parametric drive\r\n");
     UartPrint("  parametric_test 0|1 - test parametric signal processing without motor motion\r\n");
@@ -2369,6 +2371,122 @@ static uint8_t ProcessMaintenanceCommand(char *arguments)
                      ServoLatchStateName(g_servoLatchCommandedState),
                      (unsigned int)pulseUs);
         }
+        UartPrint(msg);
+        return 1U;
+    }
+
+    if (strncmp(end, "sine_start ", 11U) == 0)
+    {
+        char *amplitudeEnd;
+        char *frequencyEnd;
+        char *arguments = end + 11U;
+        float amplitudeMm = strtof(arguments, &amplitudeEnd);
+        float frequencyHz;
+        const char *error = NULL;
+
+        if (amplitudeEnd == arguments || (*amplitudeEnd != ' ' && *amplitudeEnd != '\t'))
+        {
+            error = "invalid_parameters";
+        }
+        else
+        {
+            while (*amplitudeEnd == ' ' || *amplitudeEnd == '\t')
+            {
+                amplitudeEnd++;
+            }
+            frequencyHz = strtof(amplitudeEnd, &frequencyEnd);
+            if (frequencyEnd == amplitudeEnd)
+            {
+                error = "invalid_parameters";
+            }
+            else
+            {
+                while (*frequencyEnd == ' ' || *frequencyEnd == '\t')
+                {
+                    frequencyEnd++;
+                }
+                if (*frequencyEnd != '\0')
+                {
+                    error = "invalid_parameters";
+                }
+            }
+        }
+
+        if (error == NULL && (!isfinite(amplitudeMm) || !isfinite(frequencyHz)))
+        {
+            error = "invalid_parameters";
+        }
+        else if (error == NULL && g_homed == 0U)
+        {
+            error = "home_required";
+        }
+        else if (error == NULL && g_servoLatchCommandedState != SERVO_LATCH_STATE_OPEN)
+        {
+            error = "latch_not_open";
+        }
+        else if (error == NULL && g_closedLoopFault != 0U)
+        {
+            error = "blocking_fault";
+        }
+        else if (error == NULL && (g_homingActive != 0U || g_manualMotionDirection != 0U ||
+                                   g_run != 0U || g_sineRunning != 0U ||
+                                   g_parametricRunning != 0U || g_parametricTestRunning != 0U ||
+                                   g_parametricClosedLoopRunning != 0U || g_recording != 0U))
+        {
+            error = "motion_or_recording_active";
+        }
+        else if (error == NULL &&
+                 (amplitudeMm <= 0.0f ||
+                  amplitudeMm >= ((float)g_travelSteps / (2.0f * g_stepsPerMm))))
+        {
+            error = "amplitude_out_of_travel";
+        }
+        else if (error == NULL &&
+                 (frequencyHz <= 0.0f || frequencyHz > MAX_SINE_FREQUENCY_HZ))
+        {
+            error = "frequency_out_of_range";
+        }
+
+        if (error != NULL)
+        {
+            snprintf(msg, sizeof(msg),
+                     "maintenance: id=%lu type=sine_start ok=0 active=0 error=%s\r\n",
+                     requestId,
+                     error);
+        }
+        else
+        {
+            g_sineAmplitudeMm = amplitudeMm;
+            g_sineFrequencyHz = frequencyHz;
+            g_parametricTestRunning = 0U;
+            g_positionSteps = 0;
+            g_sineStartMs = HAL_GetTick();
+            g_sineRunning = 1U;
+            g_parametricRunning = 0U;
+            g_run = 0U;
+            snprintf(msg, sizeof(msg),
+                     "maintenance: id=%lu type=sine_start ok=1 active=1 amplitude_mm=%.6f frequency_hz=%.6f\r\n",
+                     requestId,
+                     (double)amplitudeMm,
+                     (double)frequencyHz);
+        }
+        UartPrint(msg);
+        return 1U;
+    }
+
+    if (strcmp(end, "sine_stop") == 0)
+    {
+        uint8_t wasRunning = g_sineRunning;
+        g_sineRunning = 0U;
+        g_run = 0U;
+        if (wasRunning != 0U && g_homed != 0U)
+        {
+            ReturnToCenter();
+        }
+        snprintf(msg, sizeof(msg),
+                 "maintenance: id=%lu type=sine_stop ok=1 active=0 position_steps=%ld\r\n",
+                 requestId,
+                 (long)g_positionSteps);
         UartPrint(msg);
         return 1U;
     }
@@ -2938,6 +3056,11 @@ static void ProcessLine(char *line)
         if (g_homed == 0U)
         {
             UartPrint("sine rejected: run home first\r\n");
+            return;
+        }
+        if (g_servoLatchCommandedState != SERVO_LATCH_STATE_OPEN)
+        {
+            UartPrint("sine rejected: pendulum latch must be OPEN\r\n");
             return;
         }
         if (amplitudeMm <= 0.0f || amplitudeMm >= ((float)g_travelSteps / (2.0f * g_stepsPerMm)))

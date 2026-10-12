@@ -5,6 +5,9 @@ from PySide6.QtCore import QEventLoop, QObject, QTimer, Signal
 from pendulum_workbench.application.firmware_commands import FirmwareCommandService
 from pendulum_workbench.application.maintenance_service import MaintenanceService
 from pendulum_workbench.application.experiment_recording import ExperimentRecordingService
+from pendulum_workbench.application.experiment_run import ExperimentRunService
+from pendulum_workbench.application.experiment_run import ExperimentRunService
+from pendulum_workbench.application.experiment_run import ExperimentRunService
 from pendulum_workbench.application.state import ApplicationStateModel
 from pendulum_workbench.domain.models import (
     ConnectionState,
@@ -26,6 +29,7 @@ from pendulum_workbench.experiments.repository import ExperimentRepository, Load
 
 class WorkbenchController(QObject):
     experiment_loaded = Signal(object)
+    _EXPERIMENT_SHUTDOWN_STOP_TIMEOUT_MS = 76000
 
     def __init__(
         self,
@@ -48,6 +52,24 @@ class WorkbenchController(QObject):
             self.state,
             self.serial_client,
             self.firmware_commands,
+        )
+        self.experiment_run = ExperimentRunService(
+            self.state,
+            self.experiment_recorder,
+            self.firmware_commands,
+            self.maintenance,
+        )
+        self.experiment_run = ExperimentRunService(
+            self.state,
+            self.experiment_recorder,
+            self.firmware_commands,
+            self.maintenance,
+        )
+        self.experiment_run = ExperimentRunService(
+            self.state,
+            self.experiment_recorder,
+            self.firmware_commands,
+            self.maintenance,
         )
         self._loaded_experiment: LoadedExperiment | None = None
         self._disconnect_requested = False
@@ -144,6 +166,13 @@ class WorkbenchController(QObject):
             self.state.report_event(EventSeverity.ERROR, str(error))
 
     def disconnect_real(self) -> None:
+        if self.experiment_run.is_active:
+            self.experiment_run.stop("disconnect_requested")
+            self.state.report_event(
+                EventSeverity.WARNING,
+                "Experiment stop requested; disconnect again after the run is safely finalized.",
+            )
+            return
         if self.maintenance.is_manual_motion_active:
             self.maintenance.stop_manual_motion("disconnect_requested")
             self.state.report_event(
@@ -168,6 +197,19 @@ class WorkbenchController(QObject):
         self.serial_client.disconnect()
 
     def shutdown(self) -> None:
+        if self.experiment_run.is_active:
+            self.experiment_run.stop("application_shutdown")
+            if self.experiment_run.is_active:
+                loop = QEventLoop()
+
+                def quit_when_experiment_stops(_snapshot) -> None:
+                    if not self.experiment_run.is_active:
+                        loop.quit()
+
+                self.experiment_run.snapshot_changed.connect(quit_when_experiment_stops)
+                QTimer.singleShot(self._EXPERIMENT_SHUTDOWN_STOP_TIMEOUT_MS, loop.quit)
+                loop.exec()
+                self.experiment_run.snapshot_changed.disconnect(quit_when_experiment_stops)
         if self.maintenance.is_manual_motion_active:
             self.maintenance.stop_manual_motion("application_shutdown")
             if self.maintenance.is_manual_motion_active:
