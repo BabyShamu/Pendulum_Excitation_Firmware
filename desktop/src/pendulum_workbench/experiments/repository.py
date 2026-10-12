@@ -10,7 +10,15 @@ from uuid import uuid4
 
 from pendulum_workbench.domain.models import DataSourceMode, TelemetrySample
 
-TELEMETRY_CORE_COLUMNS = (
+TELEMETRY_CORE_COLUMNS = ("sample_index", "time_s", "angle_deg", "position_mm")
+TELEMETRY_PROVENANCE_COLUMNS = (
+    "source_rx_line_index",
+    "received_elapsed_s",
+    "received_at_utc",
+    "quality",
+)
+TELEMETRY_COLUMNS = TELEMETRY_CORE_COLUMNS + TELEMETRY_PROVENANCE_COLUMNS
+LEGACY_TELEMETRY_CORE_COLUMNS = (
     "sample_index",
     "source_rx_line_index",
     "device_time_s",
@@ -19,8 +27,8 @@ TELEMETRY_CORE_COLUMNS = (
     "angle_deg",
     "quality",
 )
-TELEMETRY_COLUMNS = TELEMETRY_CORE_COLUMNS + ("received_at_utc",)
-TELEMETRY_SCHEMA_VERSION = 2
+LEGACY_TELEMETRY_COLUMNS = LEGACY_TELEMETRY_CORE_COLUMNS + ("received_at_utc",)
+TELEMETRY_SCHEMA_VERSION = 3
 
 
 @dataclass(frozen=True, slots=True)
@@ -106,9 +114,9 @@ class ExperimentRepository:
             "firmware_version_status": "not reported by current firmware; flashed build unknown",
             "telemetry_profile": "stm32-live-v1" if data_source == DataSourceMode.REAL else "mock-v1",
             "time_origin": {
-                "receive_elapsed_s": "monotonic elapsed time since serial connection or mock source start",
+                "time_s": "MCU/device time when available; mock source elapsed time for mock telemetry",
+                "received_elapsed_s": "desktop monotonic elapsed time since serial connection",
                 "received_at_utc": "desktop receive timestamp for each normalized sample",
-                "device_time_s": "firmware time when present; null for mock telemetry",
             },
             "configuration": {
                 "physical_parameters": {
@@ -184,22 +192,51 @@ class ExperimentRepository:
         with (directory / manifest["files"]["normalized_telemetry"]).open(
             "r", encoding="utf-8", newline=""
         ) as csv_file:
+            data_source = manifest.get("data_source", {})
+            is_real_recording = (
+                isinstance(data_source, dict)
+                and data_source.get("mode") == DataSourceMode.REAL.value
+            )
             reader = csv.DictReader(csv_file)
             columns = tuple(reader.fieldnames or ())
-            if columns not in (TELEMETRY_CORE_COLUMNS, TELEMETRY_COLUMNS):
+            if columns not in (
+                TELEMETRY_CORE_COLUMNS,
+                TELEMETRY_COLUMNS,
+                LEGACY_TELEMETRY_CORE_COLUMNS,
+                LEGACY_TELEMETRY_COLUMNS,
+            ):
                 raise ValueError("Experiment telemetry columns do not match schema version 1")
             for row in reader:
-                elapsed_s = float(row["received_elapsed_s"])
+                is_legacy = "device_time_s" in row
+                time_s = (
+                    self._optional_float(row.get("device_time_s"))
+                    if is_legacy
+                    else self._optional_float(row.get("time_s"))
+                )
+                received_elapsed_s = self._optional_float(row.get("received_elapsed_s"))
+                time_s = (
+                    time_s
+                    if time_s is not None
+                    else received_elapsed_s
+                    if received_elapsed_s is not None
+                    else 0.0
+                )
                 telemetry.append(
                     TelemetrySample(
                         sample_index=int(row["sample_index"]),
-                        elapsed_s=elapsed_s,
+                        elapsed_s=time_s,
                         angle_deg=self._optional_float(row["angle_deg"]),
                         position_mm=self._optional_float(row["position_mm"]),
                         source="saved",
-                        device_time_s=self._optional_float(row["device_time_s"]),
+                        device_time_s=time_s if is_real_recording else None,
                         received_at=self._optional_datetime(row.get("received_at_utc")),
                         rx_line_index=self._optional_int(row["source_rx_line_index"]),
+                        device_sample_index=(
+                            int(row["sample_index"])
+                            if is_real_recording and not is_legacy
+                            else None
+                        ),
+                        received_elapsed_s=received_elapsed_s,
                     )
                 )
         if manifest.get("completion_status") == "RECORDING":

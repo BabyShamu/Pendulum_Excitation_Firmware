@@ -61,6 +61,12 @@ class TelemetrySample:
     device_time_s: float | None = None
     received_at: datetime | None = None
     rx_line_index: int | None = None
+    device_sample_index: int | None = None
+    received_elapsed_s: float | None = None
+
+    @property
+    def time_s(self) -> float:
+        return self.device_time_s if self.device_time_s is not None else self.elapsed_s
 
 
 @dataclass(frozen=True, slots=True)
@@ -72,6 +78,10 @@ class HardwareStatus:
     fault: str | None = None
     fault_known: bool = False
     updated_at: datetime | None = None
+    travel_span_steps: int | None = None
+    position_steps: int | None = None
+    steps_per_mm: float | None = None
+    position_mm: float | None = None
 
 
 @dataclass(frozen=True, slots=True)

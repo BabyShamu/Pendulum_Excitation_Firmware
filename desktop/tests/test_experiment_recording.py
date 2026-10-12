@@ -90,6 +90,20 @@ class ExperimentRecordingTests(unittest.TestCase):
             with (session.directory / "telemetry.csv").open(
                 "r", encoding="utf-8", newline=""
             ) as telemetry_file:
+                self.assertEqual(
+                    next(csv.reader(telemetry_file)),
+                    [
+                        "sample_index",
+                        "time_s",
+                        "angle_deg",
+                        "position_mm",
+                        "source_rx_line_index",
+                        "received_elapsed_s",
+                        "received_at_utc",
+                        "quality",
+                    ],
+                )
+                telemetry_file.seek(0)
                 rows = list(csv.DictReader(telemetry_file))
             self.assertEqual(len(rows), 2)
             self.assertEqual(rows[0]["angle_deg"], "-1.5")
@@ -100,6 +114,8 @@ class ExperimentRecordingTests(unittest.TestCase):
             self.assertEqual(len(reopened.telemetry), 2)
             self.assertEqual(reopened.telemetry[0].angle_deg, -1.5)
             self.assertEqual(reopened.telemetry[1].position_mm, 2.2)
+            self.assertIsNone(reopened.telemetry[0].device_time_s)
+            self.assertIsNone(reopened.telemetry[0].device_sample_index)
 
     def test_real_recording_mirrors_raw_serial_line_without_mutating_source_payload(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -111,7 +127,7 @@ class ExperimentRecordingTests(unittest.TestCase):
             service = ExperimentRecordingService(state, serial_client, repository)
             self.addCleanup(service.shutdown)
             timestamp = datetime(2026, 10, 9, 12, tzinfo=timezone.utc)
-            payload = b"live time=0.100 angle_deg=-1.500 position_mm=2.000"
+            payload = b"telemetry sample_index=77 time_s=4.125 angle_deg=-1.500 position_mm=2.000"
 
             experiment_id = service.start_recording("Real run", "board reset before start")
             self.assertTrue(self.wait_for(lambda: state.snapshot.recording == RecordingState.RECORDING))
@@ -134,9 +150,11 @@ class ExperimentRecordingTests(unittest.TestCase):
                     -1.5,
                     2.0,
                     source="real",
-                    device_time_s=0.1,
+                    device_time_s=4.125,
                     received_at=timestamp,
                     rx_line_index=42,
+                    device_sample_index=77,
+                    received_elapsed_s=0.1,
                 )
             )
             service.stop_recording()
@@ -149,6 +167,15 @@ class ExperimentRecordingTests(unittest.TestCase):
             self.assertEqual(record["rx_line_index"], 42)
             self.assertEqual(record["terminator"], "CRLF")
             self.assertEqual(record["received_at_utc"], timestamp.isoformat())
+            with (session.directory / "telemetry.csv").open(
+                "r", encoding="utf-8", newline=""
+            ) as telemetry_file:
+                rows = list(csv.DictReader(telemetry_file))
+            self.assertEqual(rows[0]["sample_index"], "77")
+            self.assertEqual(rows[0]["time_s"], "4.125000000")
+            self.assertEqual(rows[0]["angle_deg"], "-1.5")
+            self.assertEqual(rows[0]["position_mm"], "2")
+            self.assertEqual(rows[0]["source_rx_line_index"], "42")
 
     def test_connection_loss_marks_active_recording_interrupted(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:

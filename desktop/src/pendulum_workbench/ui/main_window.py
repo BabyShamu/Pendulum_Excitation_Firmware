@@ -25,7 +25,7 @@ from pendulum_workbench.domain.models import (
 )
 from pendulum_workbench.experiments.repository import LoadedExperiment
 from pendulum_workbench.ui.pages.experiment_page import ExperimentPage
-from pendulum_workbench.ui.pages.live_page import LivePage
+from pendulum_workbench.ui.pages.live_page import MonitorPage
 from pendulum_workbench.ui.pages.maintenance_page import MaintenancePage
 from pendulum_workbench.ui.status_indicator import IndicatorTone, StatusChip
 
@@ -67,9 +67,12 @@ class MainWindow(QMainWindow):
             QPushButton:disabled { background: #f1f3f2; color: #8a9691; border-color: #dce2df; }
             QFrame#surface { background: #ffffff; border: 1px solid #d8e1dc; border-radius: 9px; }
             QFrame#navRail { background: #f3f6f4; border: 1px solid #d8e1dc; border-radius: 8px; }
-            QPushButton#navigationButton { text-align: left; background: transparent; border: 0; border-radius: 6px; padding: 10px 12px; color: #50615d; }
-            QPushButton#navigationButton:hover { background: #e7eeea; }
-            QPushButton#navigationButton:checked { background: #dcebe2; color: #205f49; font-weight: 700; }
+            QPushButton#workspaceNavigationButton { text-align: left; background: transparent; border: 0; border-left: 3px solid transparent; border-radius: 5px; padding: 10px 9px; color: #50615d; }
+            QPushButton#workspaceNavigationButton:hover { background: #e7eeea; }
+            QPushButton#workspaceNavigationButton[selected="true"] { background: #dcebe2; border-left-color: #287b68; color: #205f49; font-weight: 700; }
+            QPushButton#manualMoveButton { min-height: 72px; font-size: 14px; font-weight: 700; background: #edf3ef; }
+            QPushButton#manualMoveButton[manualActive="true"] { background: #277a68; color: #ffffff; border-color: #205f49; }
+            QLabel#manualMotionState { color: #50615d; font-size: 13px; font-weight: 700; }
             QMenuBar { background: transparent; color: #344a41; }
             QMenuBar::item { background: transparent; padding: 5px 9px; border-radius: 5px; }
             QMenuBar::item:selected { background: #dfe9e3; }
@@ -93,7 +96,7 @@ class MainWindow(QMainWindow):
         eyebrow.setObjectName("eyebrow")
         title = QLabel("Pendulum Workbench")
         title.setObjectName("title")
-        subtitle = QLabel("Live instrumentation and experiment records")
+        subtitle = QLabel("Hardware monitor and experiment records")
         subtitle.setObjectName("subtle")
         title_group.addWidget(eyebrow)
         title_group.addWidget(title)
@@ -123,12 +126,13 @@ class MainWindow(QMainWindow):
         nav_layout.addWidget(nav_heading)
         self.navigation_group = QButtonGroup(self)
         self.navigation_group.setExclusive(True)
-        self.live_navigation_button = self._navigation_button("Live", "liveNavigationButton", 0)
+        self.monitor_navigation_button = self._navigation_button("Monitor", "monitorNavigationButton", 0)
+        self.live_navigation_button = self.monitor_navigation_button
         self.experiment_navigation_button = self._navigation_button(
             "Experiment", "experimentNavigationButton", 1
         )
         for index, button in enumerate(
-            (self.live_navigation_button, self.experiment_navigation_button)
+            (self.monitor_navigation_button, self.experiment_navigation_button)
         ):
             self.navigation_group.addButton(button, index)
             button.clicked.connect(lambda _checked=False, page=index: self._show_page(page))
@@ -150,10 +154,11 @@ class MainWindow(QMainWindow):
 
         self.page_stack = QStackedWidget()
         self.page_stack.setObjectName("pageStack")
-        self.live_page = LivePage(controller)
+        self.monitor_page = MonitorPage(controller)
+        self.live_page = self.monitor_page
         self.experiment_page = ExperimentPage(controller)
         self.maintenance_page = MaintenancePage(controller)
-        self.page_stack.addWidget(self.live_page)
+        self.page_stack.addWidget(self.monitor_page)
         self.page_stack.addWidget(self.experiment_page)
         self.page_stack.addWidget(self.maintenance_page)
         workspace.addWidget(self.page_stack, 1)
@@ -183,9 +188,11 @@ class MainWindow(QMainWindow):
     @staticmethod
     def _navigation_button(text: str, object_name: str, index: int) -> QPushButton:
         button = QPushButton(text)
-        button.setObjectName(object_name)
+        button.setObjectName("workspaceNavigationButton")
+        button.setProperty("navigationId", object_name)
         button.setProperty("pageIndex", index)
         button.setCheckable(True)
+        button.setProperty("selected", False)
         button.setAccessibleName(f"Show {text} page")
         button.setAccessibleDescription(f"Navigate to the {text.lower()} workspace page")
         return button
@@ -201,10 +208,21 @@ class MainWindow(QMainWindow):
     def _show_page(self, index: int) -> None:
         if index < 0 or index >= self.page_stack.count():
             return
+        if (
+            self.page_stack.currentWidget() is self.maintenance_page
+            and index != self.page_stack.indexOf(self.maintenance_page)
+        ):
+            self.controller.maintenance.stop_manual_motion("maintenance_page_left")
         self.page_stack.setCurrentIndex(index)
-        button = self.navigation_group.button(index)
-        if button is not None:
-            button.setChecked(True)
+        for page_index in range(self.page_stack.count()):
+            page_button = self.navigation_group.button(page_index)
+            if page_button is None:
+                continue
+            selected = page_index == index
+            page_button.setChecked(selected)
+            page_button.setProperty("selected", selected)
+            page_button.style().unpolish(page_button)
+            page_button.style().polish(page_button)
 
     def _create_menu_bar(self) -> None:
         file_menu = self.menuBar().addMenu("File")
@@ -329,6 +347,15 @@ class MainWindow(QMainWindow):
         )
 
     def closeEvent(self, event) -> None:
+        if self.controller.maintenance.is_manual_motion_active:
+            self.controller.maintenance.stop_manual_motion("application_shutdown")
+            QMessageBox.warning(
+                self,
+                "Manual Motion Stopping",
+                "Wait for manual pivot motion to stop before closing the workbench.",
+            )
+            event.ignore()
+            return
         if self.controller.maintenance.is_homing:
             QMessageBox.warning(
                 self,

@@ -2,7 +2,7 @@ import math
 from datetime import datetime, timezone
 from typing import Callable
 
-from PySide6.QtCore import QObject, Signal
+from PySide6.QtCore import QObject, QTimer, Signal
 
 from pendulum_workbench.application.firmware_commands import (
     FirmwareCommand,
@@ -16,6 +16,7 @@ from pendulum_workbench.domain.maintenance import (
     CheckResult,
     CheckState,
     MaintenanceSnapshot,
+    ManualMotionState,
     ReadinessState,
 )
 from pendulum_workbench.domain.models import (
@@ -29,7 +30,7 @@ from pendulum_workbench.domain.models import (
     RecordingState,
     TelemetrySample,
 )
-from pendulum_workbench.infrastructure.firmware_protocol import MaintenanceResponse
+from pendulum_workbench.infrastructure.firmware_protocol import DeviceEvent, MaintenanceResponse
 from pendulum_workbench.infrastructure.serial_client import SerialTelemetryClient
 
 
@@ -41,6 +42,7 @@ _CHECK_ORDER = (
     CheckName.FIRMWARE_STATUS,
     CheckName.FAULT_STATE,
 )
+MANUAL_KEEPALIVE_INTERVAL_MS = 100
 
 
 class MaintenanceService(QObject):
@@ -64,12 +66,23 @@ class MaintenanceService(QObject):
         self._operation_message = ""
         self._operation_fault = False
         self._homing_failure_latched = False
+        self._sensor_failure_latched = False
         self._current_angle_deg: float | None = None
         self._travel_span_steps: int | None = None
         self._position_steps: int | None = None
         self._steps_per_mm: float | None = None
         self._position_mm: float | None = None
         self._bit_stage: str | None = None
+        self._status_sync_pending = False
+        self._status_sync_deferred = False
+        self._manual_direction: str | None = None
+        self._manual_stop_requested = False
+        self._manual_failure_latched = False
+        self._manual_motion_state = ManualMotionState.IDLE
+        self._manual_motion_message = "Manual pivot is idle."
+        self._manual_keepalive = QTimer(self)
+        self._manual_keepalive.setSingleShot(True)
+        self._manual_keepalive.timeout.connect(self._send_manual_keepalive)
         self._previous_connection = state.snapshot.connection
         self._previous_source = state.snapshot.data_source
         self._last_snapshot = self._build_snapshot()
@@ -77,6 +90,8 @@ class MaintenanceService(QObject):
         state.snapshot_changed.connect(self._on_application_snapshot)
         state.telemetry_received.connect(self._on_telemetry_sample)
         serial_client.device_message_received.connect(self._on_device_message)
+        serial_client.device_event_received.connect(self._on_device_event)
+        serial_client.device_event_received.connect(self._on_device_event)
         commands.command_completed.connect(self._on_command_completed)
         commands.command_failed.connect(self._on_command_failed)
 
@@ -91,6 +106,66 @@ class MaintenanceService(QObject):
     @property
     def is_homing(self) -> bool:
         return self._active_operation == "homing"
+
+    @property
+    def is_manual_motion_active(self) -> bool:
+        return self._manual_direction is not None
+
+    def start_manual_motion(self, direction: str) -> None:
+        if direction not in ("up", "down"):
+            raise ValueError("Manual direction must be 'up' or 'down'")
+        self._require_connected()
+        snapshot = self.state.snapshot
+        if self.is_busy or self._manual_direction is not None:
+            raise RuntimeError("Another maintenance operation or manual direction is active")
+        if not self._bit_passed:
+            raise RuntimeError("Run the current-session System Check before manual positioning")
+        if snapshot.hardware_status.homed is not True:
+            raise RuntimeError("Home the pivot before manual positioning")
+        if snapshot.motion in (MotionState.RUNNING, MotionState.HOMING, MotionState.STOPPING):
+            raise RuntimeError("Another device motion mode is active")
+        if snapshot.hardware_status.fault_known and snapshot.hardware_status.fault:
+            raise RuntimeError("Manual motion is blocked by the firmware fault state")
+        if snapshot.recording in (
+            RecordingState.STARTING,
+            RecordingState.RECORDING,
+            RecordingState.STOPPING,
+        ):
+            raise RuntimeError("Stop experiment recording before manual positioning")
+        limit_active = (
+            snapshot.hardware_status.upper_limit
+            if direction == "up"
+            else snapshot.hardware_status.lower_limit
+        )
+        if limit_active is True:
+            raise RuntimeError(f"The {direction} travel limit is already active")
+
+        self._manual_direction = direction
+        self._manual_stop_requested = False
+        self._manual_failure_latched = False
+        self._manual_motion_state = (
+            ManualMotionState.STARTING_UP if direction == "up" else ManualMotionState.STARTING_DOWN
+        )
+        self._manual_motion_message = f"Requesting manual motion {direction}."
+        self._active_operation = "manual_start"
+        self.state.report_event(EventSeverity.WARNING, f"Manual pivot motion requested {direction}.")
+        self._emit_snapshot()
+        self._request(
+            self.commands.manual_start_up if direction == "up" else self.commands.manual_start_down
+        )
+
+    def stop_manual_motion(self, reason: str = "button_release") -> None:
+        if self._manual_direction is None:
+            return
+        self._manual_keepalive.stop()
+        self._manual_stop_requested = True
+        self._manual_motion_state = ManualMotionState.STOPPING
+        self._manual_motion_message = f"Stopping manual motion: {reason.replace('_', ' ')}."
+        if self._active_operation in ("manual_start", "manual", "manual_keepalive"):
+            self._active_operation = "manual_stop_pending"
+        self._emit_snapshot()
+        if not self.commands.is_busy:
+            self._send_manual_stop()
 
     def run_system_check(self) -> None:
         self._require_connected()
@@ -171,17 +246,82 @@ class MaintenanceService(QObject):
                 self._fail_homing(str(error))
             elif self._active_operation == "zero":
                 self._finish_zero(False, str(error))
+            elif self._active_operation in (
+                "manual_start",
+                "manual",
+                "manual_keepalive",
+                "manual_stop",
+                "manual_stop_pending",
+            ):
+                self._fail_manual_motion(str(error))
             else:
                 raise
 
     def _on_command_completed(self, result: tuple[FirmwareCommand, MaintenanceResponse]) -> None:
         command, response = result
+        if (
+            self._active_operation is None
+            and self._status_sync_pending
+            and command == FirmwareCommand.STATUS
+        ):
+            self._status_sync_pending = False
+            self._apply_status_fields(response.fields)
+            self._emit_snapshot()
+            return
+        if command == FirmwareCommand.MANUAL_STOP:
+            self._finish_manual_stop(
+                response.fields.get("active") == "0",
+                self._manual_motion_message,
+            )
+            return
         if self._active_operation == "system_check":
             self._handle_system_check_response(command, response)
         elif self._active_operation == "homing":
             self._handle_homing_response(command, response)
         elif self._active_operation == "zero":
             self._handle_zero_response(command, response)
+        elif self._active_operation == "manual_start":
+            expected = FirmwareCommand.MANUAL_UP if self._manual_direction == "up" else FirmwareCommand.MANUAL_DOWN
+            if command != expected or response.fields.get("active") != "1":
+                self._fail_manual_motion("Firmware did not confirm the requested direction")
+            elif self._manual_stop_requested:
+                self._send_manual_stop()
+            else:
+                self._active_operation = "manual"
+                self._manual_motion_state = (
+                    ManualMotionState.MOVING_UP
+                    if self._manual_direction == "up"
+                    else ManualMotionState.MOVING_DOWN
+                )
+                self._manual_motion_message = f"Moving {self._manual_direction}; release the button to stop."
+                self.state.set_motion(MotionState.RUNNING)
+                self._manual_keepalive.start(MANUAL_KEEPALIVE_INTERVAL_MS)
+                self._emit_snapshot()
+        elif self._active_operation == "manual_keepalive":
+            expected = (
+                FirmwareCommand.MANUAL_KEEPALIVE_UP
+                if self._manual_direction == "up"
+                else FirmwareCommand.MANUAL_KEEPALIVE_DOWN
+            )
+            if command != expected or response.fields.get("active") != "1":
+                self._fail_manual_motion("Firmware did not confirm manual-motion keepalive")
+            elif self._manual_stop_requested:
+                self._send_manual_stop()
+            else:
+                self._active_operation = "manual"
+                self._manual_keepalive.start(MANUAL_KEEPALIVE_INTERVAL_MS)
+        elif self._active_operation == "manual_stop_pending":
+            if command in (
+                FirmwareCommand.MANUAL_UP,
+                FirmwareCommand.MANUAL_DOWN,
+                FirmwareCommand.MANUAL_KEEPALIVE_UP,
+                FirmwareCommand.MANUAL_KEEPALIVE_DOWN,
+            ):
+                self._send_manual_stop()
+        if self._status_sync_deferred and self._active_operation is None:
+            self._request_status_sync()
+        if self._status_sync_deferred and self._active_operation is None:
+            self._request_status_sync()
 
     def _handle_system_check_response(
         self,
@@ -191,8 +331,18 @@ class MaintenanceService(QObject):
         fields = response.fields
         if command == FirmwareCommand.STATUS and self._bit_stage is None:
             self._set_check(CheckName.COMMUNICATION, CheckState.PASS, "Correlated firmware response received")
-            required = ("homed", "upper", "lower", "fault", "span_steps", "position_steps", "steps_per_mm")
+            required = ("homed", "fault", "position_steps", "steps_per_mm")
             missing = [name for name in required if name not in fields]
+            if "upper_limit" not in fields and "upper" not in fields:
+                missing.append("upper_limit")
+            if "lower_limit" not in fields and "lower" not in fields:
+                missing.append("lower_limit")
+            if "travel_span_steps" not in fields and "span_steps" not in fields:
+                missing.append("travel_span_steps")
+            if "active_mode" not in fields and not any(
+                name in fields for name in ("run", "sine", "parametric", "closed_loop")
+            ):
+                missing.append("active_mode")
             if missing:
                 self._set_check(
                     CheckName.FIRMWARE_STATUS,
@@ -253,8 +403,10 @@ class MaintenanceService(QObject):
         if command == FirmwareCommand.ANGLE:
             degrees = self._as_float(fields.get("degrees"))
             if degrees is None:
+                self._sensor_failure_latched = True
                 self._set_check(CheckName.ANGLE_SENSOR, CheckState.FAIL, "No valid AS5600 angle was returned")
             else:
+                self._sensor_failure_latched = False
                 self._current_angle_deg = degrees
                 raw_angle = fields.get("raw", "unknown")
                 self._set_check(CheckName.ANGLE_SENSOR, CheckState.PASS, f"AS5600 responded; raw={raw_angle}")
@@ -311,6 +463,7 @@ class MaintenanceService(QObject):
                 return
             self._current_angle_deg = degrees
             self._finish_zero(True, f"Angle reference set; subsequent reading is {degrees:+.2f} deg")
+            self._request_status_sync()
 
     def _handle_command_failed(self, failure: FirmwareCommandFailure) -> None:
         if self._active_operation == "system_check":
@@ -321,7 +474,31 @@ class MaintenanceService(QObject):
             self._finish_zero(False, failure.message)
 
     def _on_command_failed(self, failure: FirmwareCommandFailure) -> None:
+        if self._status_sync_pending and failure.command == FirmwareCommand.STATUS:
+            self._status_sync_pending = False
+            self.state.report_event(
+                EventSeverity.WARNING,
+                f"Could not synchronize STM32 status: {failure.message}",
+            )
+            self._emit_snapshot()
+            return
+        if failure.command == FirmwareCommand.MANUAL_STOP:
+            self._fail_manual_motion(failure.message, retry_stop=False)
+            return
+        if self._active_operation in (
+            "manual_start",
+            "manual",
+            "manual_keepalive",
+            "manual_stop",
+            "manual_stop_pending",
+        ):
+            self._fail_manual_motion(failure.message)
+            if self._status_sync_deferred and self._active_operation is None:
+                self._request_status_sync()
+            return
         self._handle_command_failed(failure)
+        if self._status_sync_deferred and self._active_operation is None:
+            self._request_status_sync()
 
     def _fail_system_check(
         self,
@@ -390,12 +567,83 @@ class MaintenanceService(QObject):
         severity = EventSeverity.INFO if success else EventSeverity.ERROR
         self.state.report_event(severity, message)
         self._emit_snapshot()
+        if success:
+            self._request_status_sync()
+
+    def _send_manual_keepalive(self) -> None:
+        if self._manual_direction is None or self._manual_stop_requested:
+            return
+        if self.commands.is_busy:
+            self._manual_keepalive.start(20)
+            return
+        self._active_operation = "manual_keepalive"
+        self._request(
+            self.commands.manual_keepalive_up
+            if self._manual_direction == "up"
+            else self.commands.manual_keepalive_down
+        )
+
+    def _send_manual_stop(self) -> None:
+        if self._manual_direction is None:
+            return
+        self._manual_keepalive.stop()
+        if self.commands.is_busy:
+            self._active_operation = "manual_stop_pending"
+            return
+        self._active_operation = "manual_stop"
+        try:
+            self.commands.manual_stop()
+        except (RuntimeError, ValueError, OSError) as error:
+            self._fail_manual_motion(str(error), retry_stop=False)
+
+    def _finish_manual_stop(self, confirmed: bool, message: str) -> None:
+        self._manual_keepalive.stop()
+        self._manual_direction = None
+        self._manual_stop_requested = False
+        self._active_operation = None
+        if confirmed and not self._manual_failure_latched:
+            self._manual_motion_state = ManualMotionState.IDLE
+            self._manual_motion_message = message or "Manual pivot is idle."
+            severity = EventSeverity.INFO
+        else:
+            self._manual_motion_state = ManualMotionState.FAULT
+            self._manual_motion_message = message or "Manual stop unconfirmed; firmware dead-man is the fallback."
+            severity = EventSeverity.ERROR
+        self._manual_failure_latched = False
+        self.state.set_motion(
+            MotionState.READY if self.state.snapshot.hardware_status.homed else MotionState.IDLE
+        )
+        self.state.report_event(severity, self._manual_motion_message)
+        self._emit_snapshot()
+        self._request_status_sync()
+
+    def _fail_manual_motion(self, message: str, *, retry_stop: bool = True) -> None:
+        self._manual_keepalive.stop()
+        self._manual_failure_latched = True
+        self._manual_motion_state = ManualMotionState.FAULT
+        self._manual_motion_message = (
+            f"Manual motion communication failed: {self._user_facing_error(message)}"
+        )
+        self.state.report_event(EventSeverity.ERROR, self._manual_motion_message)
+        self._emit_snapshot()
+        if (
+            retry_stop
+            and self.state.snapshot.connection == ConnectionState.CONNECTED
+            and self._manual_direction is not None
+            and not self.commands.is_busy
+        ):
+            self._manual_stop_requested = True
+            self._send_manual_stop()
+        elif self.state.snapshot.connection != ConnectionState.CONNECTED or not retry_stop:
+            self._manual_direction = None
+            self._manual_stop_requested = False
+            self._active_operation = None
 
     def _apply_status_fields(self, fields: dict[str, str]) -> None:
         self._update_travel_fields(fields)
         homed = self._as_bit(fields.get("homed"))
-        upper = self._as_bit(fields.get("upper"))
-        lower = self._as_bit(fields.get("lower"))
+        upper = self._as_bit(fields.get("upper_limit", fields.get("upper")))
+        lower = self._as_bit(fields.get("lower_limit", fields.get("lower")))
         fault_code = self._as_int(fields.get("fault"))
         if homed is None or upper is None or lower is None or fault_code is None:
             return
@@ -407,39 +655,148 @@ class MaintenanceService(QObject):
             fault=f"Firmware fault {fault_code}" if fault_code else None,
             fault_known=True,
             updated_at=datetime.now(timezone.utc),
+            travel_span_steps=self._as_int(
+                fields.get("travel_span_steps", fields.get("span_steps"))
+            ),
+            position_steps=self._as_int(fields.get("position_steps")),
+            steps_per_mm=self._as_float(fields.get("steps_per_mm")),
         )
         self.state.set_hardware_status(hardware_status)
         if fault_code:
             self.state.set_motion(MotionState.FAULT)
 
-        angle = self._as_float(fields.get("angle_deg")) if fields.get("angle_ok") == "1" else None
-        if angle is not None:
-            self._current_angle_deg = angle
-        self._emit_snapshot()
-
     def _update_travel_fields(self, fields: dict[str, str]) -> None:
-        self._travel_span_steps = self._as_int(fields.get("span_steps"), self._travel_span_steps)
+        self._travel_span_steps = self._as_int(
+            fields.get("travel_span_steps", fields.get("span_steps")),
+            self._travel_span_steps,
+        )
         self._position_steps = self._as_int(fields.get("position_steps"), self._position_steps)
         self._steps_per_mm = self._as_float(fields.get("steps_per_mm"), self._steps_per_mm)
         self._position_mm = self._as_float(fields.get("position_mm"), self._position_mm)
+        if (
+            "position_mm" not in fields
+            and self._position_steps is not None
+            and self._steps_per_mm is not None
+            and self._steps_per_mm > 0
+        ):
+            self._position_mm = self._position_steps / self._steps_per_mm
 
     def _on_device_message(self, message: str) -> None:
+        normalized = message.strip().lower()
+        if normalized == "angle sensor unavailable":
+            self._mark_angle_sensor_unavailable()
+            return
+        if normalized == "angle sensor communication restored":
+            self._mark_angle_sensor_restored()
+            return
         if self._active_operation != "homing":
             return
-        if message.strip().lower().startswith("homing:"):
+        if normalized.startswith("homing:"):
             self._operation_message = message.strip()
             self._emit_snapshot()
 
+    def _on_device_event(self, event: DeviceEvent) -> None:
+        if event.name == "angle_sensor_unavailable":
+            self._mark_angle_sensor_unavailable()
+            return
+        if event.name == "angle_sensor_restored":
+            self._mark_angle_sensor_restored()
+            return
+        if event.name == "fault_appeared":
+            self._operation_fault = True
+            self._operation_message = f"Firmware fault appeared: {event.fields.get('code', 'unknown')}"
+            if self._manual_direction is not None:
+                self.stop_manual_motion("blocking_fault")
+            self._emit_snapshot()
+            return
+        if event.name == "fault_cleared":
+            self._operation_fault = False
+            self._operation_message = "Firmware fault cleared; readiness still requires current BIT/home state."
+            self._emit_snapshot()
+            return
+        if event.name == "manual_motion_started":
+            direction = event.fields.get("direction")
+            if direction in ("up", "down"):
+                self._manual_direction = direction
+                self._manual_motion_state = (
+                    ManualMotionState.MOVING_UP
+                    if direction == "up"
+                    else ManualMotionState.MOVING_DOWN
+                )
+                self._manual_motion_message = f"Moving {direction}; release the button to stop."
+                self.state.set_motion(MotionState.RUNNING)
+                self._emit_snapshot()
+            return
+        if event.name != "manual_motion_stopped":
+            return
+
+        direction = event.fields.get("direction", self._manual_direction or "unknown")
+        reason = event.fields.get("reason", "unknown")
+        self._manual_keepalive.stop()
+        self._manual_direction = None
+        self._manual_stop_requested = False
+        self._active_operation = None
+        self._manual_motion_state = (
+            ManualMotionState.FAULT
+            if reason in ("deadman_timeout", "interlock")
+            else ManualMotionState.IDLE
+        )
+        self._manual_motion_message = f"Manual motion {direction} stopped: {reason.replace('_', ' ')}."
+        self.state.set_motion(
+            MotionState.READY if self.state.snapshot.hardware_status.homed else MotionState.IDLE
+        )
+        self._emit_snapshot()
+        self._request_status_sync()
+
+    def _mark_angle_sensor_unavailable(self) -> None:
+        self._sensor_failure_latched = True
+        self._bit_passed = False
+        self._bit_state = BitResultState.FAILED
+        self._operation_fault = True
+        self._set_check(
+            CheckName.ANGLE_SENSOR,
+            CheckState.FAIL,
+            "AS5600 communication failed; run System Check again after recovery.",
+        )
+        if self._manual_direction is not None:
+            self.stop_manual_motion("sensor_unavailable")
+        self._emit_snapshot()
+
+    def _mark_angle_sensor_restored(self) -> None:
+        self._sensor_failure_latched = False
+        self._bit_passed = False
+        self._operation_fault = False
+        self._set_check(
+            CheckName.ANGLE_SENSOR,
+            CheckState.WARNING,
+            "Communication restored; rerun System Check to validate the AS5600.",
+        )
+        self._operation_message = "AS5600 communication restored; System Check required."
+        self._emit_snapshot()
+
     def _on_telemetry_sample(self, sample: TelemetrySample) -> None:
         if (
-            sample.angle_deg is not None
-            and self.state.snapshot.data_source == DataSourceMode.REAL
-            and self.state.snapshot.connection == ConnectionState.CONNECTED
+            self.state.snapshot.data_source != DataSourceMode.REAL
+            or self.state.snapshot.connection != ConnectionState.CONNECTED
         ):
+            return
+        changed = False
+        if sample.angle_deg is not None:
             self._current_angle_deg = sample.angle_deg
+            changed = True
+        if sample.position_mm is not None:
+            self._position_mm = sample.position_mm
+            changed = True
+        if changed:
             self._emit_snapshot()
 
     def _on_application_snapshot(self, snapshot: ApplicationSnapshot) -> None:
+        if (
+            self._manual_direction is not None
+            and snapshot.connection == ConnectionState.CONNECTED
+            and snapshot.motion == MotionState.FAULT
+        ):
+            self.stop_manual_motion("blocking_fault")
         connection_changed = snapshot.connection != self._previous_connection
         source_changed = snapshot.data_source != self._previous_source
         new_session = (
@@ -459,8 +816,40 @@ class MaintenanceService(QObject):
         self._previous_connection = snapshot.connection
         self._previous_source = snapshot.data_source
         self._emit_snapshot()
+        if connection_changed and snapshot.connection == ConnectionState.CONNECTED:
+            self._request_status_sync()
+
+    def _request_status_sync(self) -> None:
+        if self.state.snapshot.connection != ConnectionState.CONNECTED:
+            return
+        if self.commands.is_busy:
+            self._status_sync_deferred = True
+            return
+        if self._status_sync_pending:
+            return
+        self._status_sync_deferred = False
+        self._status_sync_pending = True
+        try:
+            self.commands.request_status()
+        except (RuntimeError, ValueError, OSError) as error:
+            self._status_sync_pending = False
+            self.state.report_event(
+                EventSeverity.WARNING,
+                f"Could not request STM32 status sync: {error}",
+            )
 
     def _invalidate_session(self, *, preserve_incomplete: bool = False) -> None:
+        manual_was_active = self._manual_direction is not None
+        self._manual_keepalive.stop()
+        if manual_was_active:
+            self._manual_direction = None
+            self._manual_stop_requested = False
+            self._active_operation = None
+            self._manual_motion_state = ManualMotionState.FAULT
+            self._manual_motion_message = (
+                "Serial session ended during manual motion; firmware dead-man timeout must stop the pivot."
+            )
+            self.state.report_event(EventSeverity.ERROR, self._manual_motion_message)
         self._bit_passed = False
         if not preserve_incomplete:
             self._bit_state = BitResultState.NOT_RUN
@@ -468,6 +857,7 @@ class MaintenanceService(QObject):
             self._last_check_at = None
         self._operation_fault = False
         self._homing_failure_latched = False
+        self._sensor_failure_latched = False
         self._travel_span_steps = None
         self._position_steps = None
         self._steps_per_mm = None
@@ -496,7 +886,7 @@ class MaintenanceService(QObject):
             readiness = ReadinessState.NOT_CONNECTED
         elif application.hardware_status.fault_known and application.hardware_status.fault:
             readiness = ReadinessState.FAULT
-        elif self._operation_fault or self._homing_failure_latched:
+        elif self._operation_fault or self._homing_failure_latched or self._sensor_failure_latched:
             readiness = ReadinessState.FAULT
         elif not self._bit_passed:
             readiness = ReadinessState.CHECK_REQUIRED
@@ -516,6 +906,8 @@ class MaintenanceService(QObject):
             position_steps=self._position_steps,
             steps_per_mm=self._steps_per_mm,
             position_mm=self._position_mm,
+            manual_motion=self._manual_motion_state,
+            manual_motion_message=self._manual_motion_message,
         )
 
     def _emit_snapshot(self) -> None:
@@ -536,6 +928,17 @@ class MaintenanceService(QObject):
 
     @staticmethod
     def _mode_from_fields(fields: dict[str, str]) -> str:
+        active_mode = fields.get("active_mode")
+        active_modes = {
+            "idle": "Idle",
+            "manual_up": "Manual motion up",
+            "manual_down": "Manual motion down",
+            "manual_stepping": "Manual stepping",
+            "parametric_closed_loop": "Parametric closed loop",
+            "parametric_test": "Parametric test (no motion)",
+        }
+        if active_mode in active_modes:
+            return active_modes[active_mode]
         return (
             "Parametric closed loop" if fields.get("closed_loop") == "1" else
             "Sine" if fields.get("sine") == "1" else

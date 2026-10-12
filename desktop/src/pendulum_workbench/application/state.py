@@ -92,6 +92,24 @@ class ApplicationStateModel(QObject):
             fault=status.fault if status.fault_known else current.fault,
             fault_known=status.fault_known or current.fault_known,
             updated_at=status.updated_at or current.updated_at,
+            travel_span_steps=(
+                status.travel_span_steps
+                if status.travel_span_steps is not None
+                else current.travel_span_steps
+            ),
+            position_steps=(
+                status.position_steps
+                if status.position_steps is not None
+                else current.position_steps
+            ),
+            steps_per_mm=(
+                status.steps_per_mm
+                if status.steps_per_mm is not None
+                else current.steps_per_mm
+            ),
+            position_mm=(
+                status.position_mm if status.position_mm is not None else current.position_mm
+            ),
         )
         motion = self._snapshot.motion
         home_status = self._snapshot.home_status
@@ -105,7 +123,8 @@ class ApplicationStateModel(QObject):
         if merged.fault:
             motion = MotionState.FAULT
         elif merged.active_motion_mode in (
-            "Sine", "Parametric", "Parametric closed loop", "Manual stepping"
+            "Sine", "Parametric", "Parametric closed loop", "Manual stepping",
+            "Manual motion up", "Manual motion down",
         ):
             motion = MotionState.RUNNING
         elif merged.active_motion_mode in ("Idle", "Parametric test (no motion)"):

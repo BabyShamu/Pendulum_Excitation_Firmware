@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from PySide6.QtCore import QObject, Signal
+from PySide6.QtCore import QEventLoop, QObject, QTimer, Signal
 
 from pendulum_workbench.application.firmware_commands import FirmwareCommandService
 from pendulum_workbench.application.maintenance_service import MaintenanceService
@@ -10,13 +10,17 @@ from pendulum_workbench.domain.models import (
     ConnectionState,
     DataSourceMode,
     EventSeverity,
+    HardwareStatus,
     HomeStatus,
+    MotionState,
 )
 from pendulum_workbench.infrastructure.mock_telemetry import MockTelemetrySource
 from pendulum_workbench.infrastructure.serial_client import (
     SerialPortInfo,
     SerialTelemetryClient,
+    TelemetrySequenceGap,
 )
+from pendulum_workbench.infrastructure.firmware_protocol import DeviceEvent
 from pendulum_workbench.experiments.repository import ExperimentRepository, LoadedExperiment
 
 
@@ -54,6 +58,8 @@ class WorkbenchController(QObject):
         self.serial_client.telemetry_received.connect(self.state.publish_sample)
         self.serial_client.hardware_status_received.connect(self.state.set_hardware_status)
         self.serial_client.device_message_received.connect(self._on_device_message)
+        self.serial_client.device_event_received.connect(self._on_device_event)
+        self.serial_client.telemetry_sequence_gap.connect(self._on_telemetry_sequence_gap)
         self.serial_client.malformed_line_received.connect(self._on_malformed_line)
         self.serial_client.telemetry_stale_changed.connect(self._on_telemetry_stale)
 
@@ -138,6 +144,13 @@ class WorkbenchController(QObject):
             self.state.report_event(EventSeverity.ERROR, str(error))
 
     def disconnect_real(self) -> None:
+        if self.maintenance.is_manual_motion_active:
+            self.maintenance.stop_manual_motion("disconnect_requested")
+            self.state.report_event(
+                EventSeverity.WARNING,
+                "Manual pivot stop requested; disconnect again after motion is confirmed stopped.",
+            )
+            return
         if self.maintenance.is_homing:
             self.state.report_event(
                 EventSeverity.WARNING,
@@ -155,6 +168,24 @@ class WorkbenchController(QObject):
         self.serial_client.disconnect()
 
     def shutdown(self) -> None:
+        if self.maintenance.is_manual_motion_active:
+            self.maintenance.stop_manual_motion("application_shutdown")
+            if self.maintenance.is_manual_motion_active:
+                loop = QEventLoop()
+
+                def quit_when_manual_stops(_snapshot) -> None:
+                    if not self.maintenance.is_manual_motion_active:
+                        loop.quit()
+
+                self.maintenance.snapshot_changed.connect(quit_when_manual_stops)
+                QTimer.singleShot(750, loop.quit)
+                loop.exec()
+                self.maintenance.snapshot_changed.disconnect(quit_when_manual_stops)
+                if self.maintenance.is_manual_motion_active:
+                    self.state.report_event(
+                        EventSeverity.ERROR,
+                        "Manual stop was not confirmed before shutdown; firmware dead-man timeout is the fallback.",
+                    )
         self.stop_mock()
         self.experiment_recorder.shutdown()
         self.serial_client.shutdown()
@@ -188,7 +219,7 @@ class WorkbenchController(QObject):
             )
             self.state.report_event(
                 EventSeverity.INFO,
-                "Serial connected; read-only telemetry/status queries active.",
+                "STM32 serial connection opened; telemetry enabled and compact status synchronization requested.",
             )
 
     def _on_serial_failed(self, message: str) -> None:
@@ -209,8 +240,127 @@ class WorkbenchController(QObject):
             self.state.set_home_status(HomeStatus.HOMING_FAILED)
         elif normalized.startswith("homing:"):
             self.state.set_home_status(HomeStatus.HOMING)
-        if message and message != "Telemetry CSV header":
-            self.state.report_event(EventSeverity.INFO, f"Device: {message[:180]}")
+        meaningful_prefixes = (
+            "homing failed:",
+            "homing calibration:",
+            "closed loop stopped:",
+            "sine stopped:",
+            "stopped:",
+            "angle sensor unavailable",
+            "angle sensor communication restored",
+        )
+        if normalized.startswith(meaningful_prefixes) or (
+            normalized.startswith("homing:") and "moving to" in normalized
+        ):
+            severity = EventSeverity.ERROR if normalized.startswith(
+                ("homing failed:", "angle sensor unavailable")
+            ) else EventSeverity.INFO
+            self.state.report_event(severity, message[:180])
+
+    def _on_device_event(self, event: DeviceEvent) -> None:
+        fields = event.fields
+        messages = {
+            "homing_lower_limit_reached": "Homing reached the lower limit.",
+            "homing_upper_limit_reached": "Homing reached the upper limit.",
+            "homing_completed": "Firmware homing sequence completed; verifying status.",
+            "limit_state_changed": (
+                f"Limit state changed: upper={fields.get('upper', 'unknown')} "
+                f"lower={fields.get('lower', 'unknown')}."
+            ),
+        }
+        if event.name == "manual_motion_started":
+            direction = fields.get("direction", "unknown")
+            self.state.set_motion(MotionState.RUNNING)
+            self.state.set_hardware_status(
+                HardwareStatus(active_motion_mode=f"Manual motion {direction}")
+            )
+            message = f"Manual pivot motion started {direction}."
+            severity = EventSeverity.WARNING
+        elif event.name == "angle_sensor_unavailable":
+            severity = EventSeverity.ERROR
+            message = "AS5600 angle sensor communication is unavailable; BIT will fail until a fresh check passes."
+        elif event.name == "angle_sensor_restored":
+            severity = EventSeverity.INFO
+            message = "AS5600 communication restored; rerun System Check to validate the sensor."
+        elif event.name == "manual_motion_stopped":
+            direction = fields.get("direction", "unknown")
+            reason = fields.get("reason", "unknown")
+            if reason in ("upper_limit", "lower_limit", "deadman_timeout", "interlock"):
+                severity = EventSeverity.WARNING
+            else:
+                severity = EventSeverity.INFO
+            self.state.set_motion(MotionState.READY if self.state.snapshot.hardware_status.homed else MotionState.IDLE)
+            position_steps = self._optional_integer(fields.get("position_steps"))
+            current_hardware = self.state.snapshot.hardware_status
+            position_mm = (
+                position_steps / current_hardware.steps_per_mm
+                if position_steps is not None
+                and current_hardware.steps_per_mm is not None
+                and current_hardware.steps_per_mm > 0
+                else None
+            )
+            self.state.set_hardware_status(
+                HardwareStatus(
+                    active_motion_mode="Idle",
+                    position_steps=position_steps,
+                    position_mm=position_mm,
+                )
+            )
+            message = f"Manual pivot motion {direction} stopped: {reason.replace('_', ' ')}."
+        elif event.name in messages:
+            severity = EventSeverity.INFO
+            message = messages[event.name]
+            if event.name == "limit_state_changed":
+                upper = fields.get("upper")
+                lower = fields.get("lower")
+                if upper in ("0", "1") and lower in ("0", "1"):
+                    self.state.set_hardware_status(
+                        HardwareStatus(upper_limit=upper == "1", lower_limit=lower == "1")
+                    )
+            if event.name.startswith("homing_"):
+                self.state.set_home_status(HomeStatus.HOMING)
+            if event.name == "limit_state_changed":
+                upper = fields.get("upper")
+                lower = fields.get("lower")
+                if upper in ("0", "1") and lower in ("0", "1"):
+                    self.state.set_hardware_status(
+                        HardwareStatus(upper_limit=upper == "1", lower_limit=lower == "1")
+                    )
+        elif event.name == "fault_appeared":
+            severity = EventSeverity.ERROR
+            fault_code = fields.get("code", "unknown")
+            message = f"Firmware fault appeared: {fault_code}."
+            self.state.set_hardware_status(
+                HardwareStatus(fault=f"Firmware fault {fault_code}", fault_known=True)
+            )
+            self.state.set_motion(MotionState.FAULT)
+        elif event.name == "fault_cleared":
+            severity = EventSeverity.INFO
+            message = "Firmware reports the blocking fault cleared."
+            self.state.set_hardware_status(HardwareStatus(fault=None, fault_known=True))
+            self.state.set_motion(
+                MotionState.READY if self.state.snapshot.hardware_status.homed else MotionState.IDLE
+            )
+        elif event.name == "maintenance_command_rejected":
+            severity = EventSeverity.WARNING
+            message = f"Maintenance command rejected: {fields.get('reason', 'firmware interlock')}."
+        else:
+            severity = EventSeverity.INFO
+            message = event.raw_line
+        self.state.report_event(severity, message)
+
+    def _on_telemetry_sequence_gap(self, gap: TelemetrySequenceGap) -> None:
+        if gap.out_of_order:
+            message = (
+                f"Out-of-order/duplicate telemetry sample {gap.received_sample_index}; "
+                f"expected {gap.expected_sample_index}."
+            )
+        else:
+            message = (
+                f"Telemetry sequence gap: expected sample {gap.expected_sample_index}, "
+                f"received {gap.received_sample_index}; missing {gap.missing_count} sample(s)."
+            )
+        self.state.report_event(EventSeverity.WARNING, message)
 
     def _on_malformed_line(self, message: str) -> None:
         self.state.report_event(
@@ -228,3 +378,12 @@ class WorkbenchController(QObject):
             )
         elif was_stale and self.state.snapshot.connection == ConnectionState.CONNECTED:
             self.state.report_event(EventSeverity.INFO, "Valid telemetry stream restored.")
+
+    @staticmethod
+    def _optional_integer(value: str | None) -> int | None:
+        if value is None:
+            return None
+        try:
+            return int(value)
+        except ValueError:
+            return None

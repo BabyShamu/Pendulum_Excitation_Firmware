@@ -284,7 +284,9 @@ class ExperimentPage(QWidget):
             and snapshot.connection == ConnectionState.CONNECTED
         )
         self.start_recording_button.setEnabled(
-            live_source_ready and not recording_active and snapshot.motion != MotionState.HOMING
+            live_source_ready
+            and not recording_active
+            and snapshot.motion not in (MotionState.HOMING, MotionState.RUNNING, MotionState.STOPPING)
         )
         self.stop_recording_button.setEnabled(snapshot.recording == RecordingState.RECORDING)
         self.experiment_name_input.setEnabled(not recording_active)

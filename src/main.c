@@ -42,6 +42,13 @@
 #define MAX_HOMING_STEPS    20000U
 #define JOG_SPEED_HZ        150U
 #define HOMING_SPEED_HZ     1100U
+#ifndef MANUAL_MOTION_DEADMAN_TIMEOUT_MS
+// Development default only; validate timeout against the real stage and serial path before release.
+#define MANUAL_MOTION_DEADMAN_TIMEOUT_MS 350U
+#endif
+#ifndef FIRMWARE_DEBUG_RX
+#define FIRMWARE_DEBUG_RX   0U
+#endif
 #define PARAMETRIC_SPEED_HZ 4000U
 #define PARAMETRIC_UPDATE_PERIOD_MS   10U
 #define PARAMETRIC_TEST_PERIOD_MS      5U
@@ -73,6 +80,11 @@
 #define PARAMETRIC_DC_BLOCK_TIME_CONST_S 2.0f
 #define PARAMETRIC_AGC_TIME_CONST_S   1.0f
 #define PARAMETRIC_AGC_MIN_PEAK       1e-6f
+#define AS5600_STARTUP_PROBE_ATTEMPTS 3U
+#define AS5600_STARTUP_RETRY_DELAY_MS 25U
+#define AS5600_READ_FAILURE_RECOVERY_THRESHOLD 3U
+#define AS5600_RECOVERY_RETRY_INTERVAL_MS 1000U
+#define AS5600_I2C_BUS_CLEAR_CLOCK_PULSES 9U
 #define PARAMETRIC_SLEW_MM_PER_SEC    250.0f
 #define LIVE_PERIOD_MS      20U
 #define DEFAULT_STEPS_PER_MM 40.0f
@@ -94,10 +106,18 @@ static uint8_t UpperLimitPressedDebounced(void);
 static uint8_t LowerLimitPressedDebounced(void);
 static uint8_t WaitForDebouncedLimit(uint8_t upperLimit);
 static HAL_StatusTypeDef AS5600_ReadAngle(uint16_t *angle);
+static HAL_StatusTypeDef AS5600_ReadAngleOnce(uint16_t *angle);
+static uint8_t AS5600_RecoverI2c(void);
+static uint8_t AS5600_StartupProbe(void);
+static void AS5600_ReportUnavailable(void);
+static void AS5600_ReportRestored(void);
 static void SetDirection(uint8_t dir);
 static uint8_t StepOne(uint32_t hz, uint8_t stopUpper, uint8_t stopLower);
 static void Jog(uint8_t dir, uint32_t steps);
 static void Home(void);
+static void UpdateManualMotion(void);
+static void StopManualMotion(const char *reason);
+static const char *ActiveModeName(void);
 static void ReturnToCenter(void);
 static void UpdateSine(void);
 static void UpdateParametric(void);
@@ -112,6 +132,7 @@ static void PollUart(void);
 static void ProcessLine(char *line);
 static void PrintHelp(void);
 static void PrintStatus(void);
+static void PrintDiagnostics(void);
 static void PrintSwitches(void);
 static void ReportSwitchChanges(void);
 static void PrintAngle(void);
@@ -200,9 +221,16 @@ static uint8_t g_liveTelemetry = 0U;
 static uint8_t g_recording = 0U;
 static uint8_t g_suppressPromptOnce = 0U;
 static uint32_t g_lastLiveMs = 0U;
-static uint32_t g_recordStartMs = 0U;
+static uint32_t g_liveSampleIndex = 0U;
+static uint8_t g_manualMotionDirection = 0U;
+static uint32_t g_manualMotionLastKeepaliveMs = 0U;
 static float g_stepsPerMm = DEFAULT_STEPS_PER_MM;
 static uint8_t g_i2cReady = 0U;
+static uint8_t g_angleSensorUnavailable = 0U;
+static uint8_t g_angleSensorConsecutiveFailures = 0U;
+static uint32_t g_lastI2cRecoveryMs = 0U;
+static uint32_t g_i2cRecoveryCount = 0U;
+static uint32_t g_lastI2cError = HAL_I2C_ERROR_NONE;
 static uint16_t g_angleZeroRaw = 0U;
 static uint8_t g_angleZeroValid = 0U;
 static uint8_t g_switchStatusValid = 0U;
@@ -312,6 +340,14 @@ int main(void)
     SetDirection(g_dir);
 
     UartPrint(g_i2cReady != 0U ? "I2C1 ready\r\n" : "I2C1 unavailable; check SDA/SCL wiring\r\n");
+    if (AS5600_StartupProbe() != 0U)
+    {
+        UartPrint("AS5600 startup verified\r\n");
+    }
+    else
+    {
+        UartPrint("AS5600 unavailable after bounded startup probe\r\n");
+    }
     SetAngleZero();
     UartPrint("Stepper control ready\r\n");
     PrintHelp();
@@ -344,7 +380,11 @@ int main(void)
         PollUart();
         PrintLiveTelemetry();
 
-        if (g_parametricClosedLoopRunning != 0U)
+        if (g_manualMotionDirection != 0U)
+        {
+            UpdateManualMotion();
+        }
+        else if (g_parametricClosedLoopRunning != 0U)
         {
             UpdateParametricClosedLoop();
         }
@@ -479,27 +519,189 @@ static uint8_t WaitForDebouncedLimit(uint8_t upperLimit)
 
 static HAL_StatusTypeDef AS5600_ReadAngle(uint16_t *angle)
 {
+    HAL_StatusTypeDef status = AS5600_ReadAngleOnce(angle);
+    uint32_t now;
+
+    if (status == HAL_OK)
+    {
+        g_angleSensorConsecutiveFailures = 0U;
+        AS5600_ReportRestored();
+        return HAL_OK;
+    }
+
+    if (g_angleSensorConsecutiveFailures < 255U)
+    {
+        g_angleSensorConsecutiveFailures++;
+    }
+    if (g_angleSensorConsecutiveFailures < AS5600_READ_FAILURE_RECOVERY_THRESHOLD)
+    {
+        return HAL_ERROR;
+    }
+
+    AS5600_ReportUnavailable();
+    now = HAL_GetTick();
+    if (g_i2cRecoveryCount == 0U ||
+        (now - g_lastI2cRecoveryMs) >= AS5600_RECOVERY_RETRY_INTERVAL_MS)
+    {
+        g_lastI2cRecoveryMs = now;
+        g_i2cRecoveryCount++;
+        if (AS5600_RecoverI2c() != 0U && AS5600_ReadAngleOnce(angle) == HAL_OK)
+        {
+            g_angleSensorConsecutiveFailures = 0U;
+            AS5600_ReportRestored();
+            return HAL_OK;
+        }
+    }
+    return HAL_ERROR;
+}
+
+static HAL_StatusTypeDef AS5600_ReadAngleOnce(uint16_t *angle)
+{
     uint8_t data[2];
+    HAL_StatusTypeDef status;
 
     if (g_i2cReady == 0U)
     {
+        g_lastI2cError = HAL_I2C_GetError(&hi2c1);
         return HAL_ERROR;
     }
 
     if (HAL_GPIO_ReadPin(GPIOB, GPIO_PIN_8) == GPIO_PIN_RESET ||
         HAL_GPIO_ReadPin(GPIOB, GPIO_PIN_9) == GPIO_PIN_RESET)
     {
+        g_lastI2cError = HAL_I2C_ERROR_TIMEOUT;
         return HAL_ERROR;
     }
 
-    if (HAL_I2C_Mem_Read(&hi2c1, 0x36U << 1, 0x0CU, I2C_MEMADD_SIZE_8BIT,
-                         data, sizeof(data), 3U) != HAL_OK)
+    status = HAL_I2C_Mem_Read(&hi2c1, 0x36U << 1, 0x0CU, I2C_MEMADD_SIZE_8BIT,
+                              data, sizeof(data), 3U);
+    if (status != HAL_OK)
     {
-        return HAL_ERROR;
+        g_lastI2cError = HAL_I2C_GetError(&hi2c1);
+        return status;
     }
 
     *angle = (uint16_t)((((uint16_t)data[0] << 8U) | data[1]) & 0x0FFFU);
     return HAL_OK;
+}
+
+static uint8_t AS5600_RecoverI2c(void)
+{
+    GPIO_InitTypeDef gpio = {0};
+    uint8_t busReleased;
+
+    if (g_i2cReady != 0U)
+    {
+        (void)HAL_I2C_DeInit(&hi2c1);
+    }
+    g_i2cReady = 0U;
+    __HAL_RCC_I2C1_FORCE_RESET();
+    __HAL_RCC_I2C1_RELEASE_RESET();
+    hi2c1.State = HAL_I2C_STATE_RESET;
+    hi2c1.Lock = HAL_UNLOCKED;
+    hi2c1.ErrorCode = HAL_I2C_ERROR_NONE;
+
+    gpio.Pin = GPIO_PIN_8 | GPIO_PIN_9;
+    gpio.Mode = GPIO_MODE_OUTPUT_OD;
+    gpio.Pull = GPIO_PULLUP;
+    gpio.Speed = GPIO_SPEED_FREQ_HIGH;
+    HAL_GPIO_Init(GPIOB, &gpio);
+    HAL_GPIO_WritePin(GPIOB, GPIO_PIN_8 | GPIO_PIN_9, GPIO_PIN_SET);
+    HAL_Delay(1U);
+
+    // A released open-drain SCL pulse can let a slave finish an interrupted byte.
+    for (uint8_t pulse = 0U;
+         pulse < AS5600_I2C_BUS_CLEAR_CLOCK_PULSES &&
+         HAL_GPIO_ReadPin(GPIOB, GPIO_PIN_9) == GPIO_PIN_RESET;
+         pulse++)
+    {
+        HAL_GPIO_WritePin(GPIOB, GPIO_PIN_8, GPIO_PIN_RESET);
+        HAL_Delay(1U);
+        HAL_GPIO_WritePin(GPIOB, GPIO_PIN_8, GPIO_PIN_SET);
+        HAL_Delay(1U);
+    }
+
+    busReleased = (HAL_GPIO_ReadPin(GPIOB, GPIO_PIN_8) == GPIO_PIN_SET &&
+                   HAL_GPIO_ReadPin(GPIOB, GPIO_PIN_9) == GPIO_PIN_SET) ? 1U : 0U;
+    if (busReleased != 0U)
+    {
+        // Generate STOP: SDA low while SCL is low, then release SCL and SDA.
+        HAL_GPIO_WritePin(GPIOB, GPIO_PIN_8, GPIO_PIN_RESET);
+        HAL_GPIO_WritePin(GPIOB, GPIO_PIN_9, GPIO_PIN_RESET);
+        HAL_Delay(1U);
+        HAL_GPIO_WritePin(GPIOB, GPIO_PIN_8, GPIO_PIN_SET);
+        HAL_Delay(1U);
+        HAL_GPIO_WritePin(GPIOB, GPIO_PIN_9, GPIO_PIN_SET);
+        HAL_Delay(1U);
+        busReleased = (HAL_GPIO_ReadPin(GPIOB, GPIO_PIN_8) == GPIO_PIN_SET &&
+                       HAL_GPIO_ReadPin(GPIOB, GPIO_PIN_9) == GPIO_PIN_SET) ? 1U : 0U;
+    }
+
+    gpio.Pin = GPIO_PIN_8 | GPIO_PIN_9;
+    gpio.Mode = GPIO_MODE_AF_OD;
+    gpio.Pull = GPIO_PULLUP;
+    gpio.Speed = GPIO_SPEED_FREQ_HIGH;
+    gpio.Alternate = GPIO_AF4_I2C1;
+    HAL_GPIO_Init(GPIOB, &gpio);
+
+    __HAL_RCC_I2C1_FORCE_RESET();
+    __HAL_RCC_I2C1_RELEASE_RESET();
+    I2C1_Init();
+    if (g_i2cReady == 0U || busReleased == 0U)
+    {
+        return 0U;
+    }
+
+    if (HAL_I2C_IsDeviceReady(&hi2c1, 0x36U << 1, 2U, 10U) != HAL_OK)
+    {
+        g_lastI2cError = HAL_I2C_GetError(&hi2c1);
+        return 0U;
+    }
+    return 1U;
+}
+
+static uint8_t AS5600_StartupProbe(void)
+{
+    uint16_t angle;
+
+    for (uint8_t attempt = 0U; attempt < AS5600_STARTUP_PROBE_ATTEMPTS; attempt++)
+    {
+        if (AS5600_ReadAngle(&angle) == HAL_OK)
+        {
+            return 1U;
+        }
+        if ((attempt + 1U) < AS5600_STARTUP_PROBE_ATTEMPTS)
+        {
+            HAL_Delay(AS5600_STARTUP_RETRY_DELAY_MS);
+        }
+    }
+    return 0U;
+}
+
+static void AS5600_ReportUnavailable(void)
+{
+    char message[128];
+
+    if (g_angleSensorUnavailable != 0U)
+    {
+        return;
+    }
+    g_angleSensorUnavailable = 1U;
+    snprintf(message, sizeof(message),
+             "event: type=angle_sensor_unavailable failures=%u hal_error=0x%08lX\r\n",
+             (unsigned int)g_angleSensorConsecutiveFailures,
+             (unsigned long)g_lastI2cError);
+    UartPrint(message);
+}
+
+static void AS5600_ReportRestored(void)
+{
+    if (g_angleSensorUnavailable == 0U)
+    {
+        return;
+    }
+    g_angleSensorUnavailable = 0U;
+    UartPrint("event: type=angle_sensor_restored\r\n");
 }
 
 static void SetDirection(uint8_t dir)
@@ -756,6 +958,7 @@ static void Home(void)
     }
 
     UartPrint("homing: lower limit found; reversing\r\n");
+    UartPrint("event: type=homing_lower_limit_reached\r\n");
 
     UartPrint("homing: moving to upper limit\r\n");
     SetDirection(DIR_UP);
@@ -783,6 +986,7 @@ static void Home(void)
         UartPrint("homing failed: upper limit not found\r\n");
         return;
     }
+    UartPrint("event: type=homing_upper_limit_reached\r\n");
 
     {
         float travelMm = (float)spanSteps / g_stepsPerMm;
@@ -811,6 +1015,71 @@ static void Home(void)
     g_positionSteps = 0;
     g_homed = 1U;
     UartPrint("homing complete: midpoint reached\r\n");
+    UartPrint("event: type=homing_completed\r\n");
+}
+
+static void UpdateManualMotion(void)
+{
+    uint32_t now = HAL_GetTick();
+    uint8_t direction;
+    uint8_t stopUpper;
+    uint8_t stopLower;
+
+    if (g_manualMotionDirection == 0U)
+    {
+        return;
+    }
+
+    if ((now - g_manualMotionLastKeepaliveMs) >= MANUAL_MOTION_DEADMAN_TIMEOUT_MS)
+    {
+        StopManualMotion("deadman_timeout");
+        return;
+    }
+
+    if (g_closedLoopFault != 0U || g_homed == 0U || g_recording != 0U)
+    {
+        StopManualMotion("interlock");
+        return;
+    }
+
+    direction = (g_manualMotionDirection == 1U) ? DIR_UP : DIR_DOWN;
+    stopUpper = (direction == DIR_UP) ? 1U : 0U;
+    stopLower = (direction == DIR_DOWN) ? 1U : 0U;
+    if ((stopUpper != 0U && UpperLimitPressed() != 0U) ||
+        (stopLower != 0U && LowerLimitPressed() != 0U))
+    {
+        StopManualMotion((stopUpper != 0U) ? "upper_limit" : "lower_limit");
+        return;
+    }
+
+    if (g_dir != direction)
+    {
+        SetDirection(direction);
+    }
+    if (StepOne(JOG_SPEED_HZ, stopUpper, stopLower) == 0U)
+    {
+        StopManualMotion((stopUpper != 0U) ? "upper_limit" : "lower_limit");
+        return;
+    }
+    g_positionSteps += (direction == DIR_UP) ? 1 : -1;
+}
+
+static void StopManualMotion(const char *reason)
+{
+    uint8_t direction = g_manualMotionDirection;
+    char message[128];
+
+    if (direction == 0U)
+    {
+        return;
+    }
+    g_manualMotionDirection = 0U;
+    snprintf(message, sizeof(message),
+             "event: type=manual_motion_stopped direction=%s reason=%s position_steps=%ld\r\n",
+             (direction == 1U) ? "up" : "down",
+             reason,
+             (long)g_positionSteps);
+    UartPrint(message);
 }
 
 static void ReturnToCenter(void)
@@ -1292,14 +1561,17 @@ static void ReportClosedLoopFault(void)
 
     if (fault == 1U)
     {
+        UartPrint("event: type=fault_appeared code=upper_limit\r\n");
         UartPrint("closed loop stopped: upper limit reached\r\n");
     }
     else if (fault == 2U)
     {
+        UartPrint("event: type=fault_appeared code=lower_limit\r\n");
         UartPrint("closed loop stopped: lower limit reached\r\n");
     }
     else if (fault == 3U)
     {
+        UartPrint("event: type=fault_appeared code=angle_sensor\r\n");
         UartPrint("closed loop stopped: angle sensor unavailable\r\n");
     }
 }
@@ -1332,7 +1604,8 @@ static void PrintHelp(void)
     UartPrint("  help            - show commands\r\n");
     UartPrint("  status          - print current settings\r\n");
     UartPrint("  switches        - show upper/lower switch states\r\n");
-    UartPrint("  maint <id> <status|switches|angle|home|zero> - correlated maintenance request\r\n");
+    UartPrint("  maint <id> <status|switches|angle|home|zero|manual_up|manual_down|manual_keepalive_up|manual_keepalive_down|manual_stop>\r\n");
+    UartPrint("  diag            - print low-level firmware diagnostics\r\n");
     UartPrint("  angle           - read AS5600 raw angle (0..4095)\r\n");
     UartPrint("  zero            - set current pendulum angle to 0 degrees\r\n");
     UartPrint("  live 0|1        - stop/start angle and position stream\r\n");
@@ -1356,44 +1629,30 @@ static void PrintHelp(void)
 static void PrintStatus(void)
 {
     char msg[300];
-    char timerMsg[300];
-    uint16_t angle;
 
     UpdateLimitDebounce();
-
-    if (AS5600_ReadAngle(&angle) == HAL_OK)
-    {
-        snprintf(msg, sizeof(msg), "angle=%u/4095 ", (unsigned int)angle);
-        UartPrint(msg);
-    }
-    else
-    {
-        UartPrint("angle=unavailable ");
-    }
-
     snprintf(
         msg,
         sizeof(msg),
-        "status: run=%u homed=%u sine=%u parametric=%u parametric_test=%u closed_loop=%u fault=%u upper=%u lower=%u span=%lu position=%ld target=%ld scale=%.3f\r\n",
-        (unsigned int)g_run,
+        "status: homed=%u upper_limit=%u lower_limit=%u fault=%u active_mode=%s travel_span_steps=%lu position_steps=%ld steps_per_mm=%.3f\r\n",
         (unsigned int)g_homed,
-        (unsigned int)g_sineRunning,
-        (unsigned int)g_parametricRunning,
-        (unsigned int)g_parametricTestRunning,
-        (unsigned int)g_parametricClosedLoopRunning,
-        (unsigned int)g_closedLoopFault,
         (unsigned int)g_upperLimitDebounced,
         (unsigned int)g_lowerLimitDebounced,
+        (unsigned int)g_closedLoopFault,
+        ActiveModeName(),
         (unsigned long)g_travelSteps,
         (long)g_positionSteps,
-        (long)g_parametricClosedLoopTargetSteps,
         (double)g_stepsPerMm);
     UartPrint(msg);
+}
 
+static void PrintDiagnostics(void)
+{
+    char timerMsg[300];
     snprintf(
         timerMsg,
         sizeof(timerMsg),
-        "closed_loop_diag: command_sign=%.0f phase=%u kick=%lu arm=%lu irq=%lu callback=%lu step_high=%lu step_complete=%lu TIM6_CR1=0x%08lX DIER=0x%08lX SR=0x%08lX CNT=%lu PSC=%lu ARR=%lu\r\n",
+        "diag: closed_loop_sign=%.0f phase=%u kick=%lu arm=%lu irq=%lu callback=%lu step_high=%lu step_complete=%lu TIM6_CR1=0x%08lX DIER=0x%08lX SR=0x%08lX CNT=%lu PSC=%lu ARR=%lu\r\n",
         (double)CLOSED_LOOP_COMMAND_SIGN,
         (unsigned int)g_closedLoopActuatorPhase,
         (unsigned long)g_closedLoopKickCount,
@@ -1409,6 +1668,39 @@ static void PrintStatus(void)
         (unsigned long)TIM6->PSC,
         (unsigned long)TIM6->ARR);
     UartPrint(timerMsg);
+}
+
+static const char *ActiveModeName(void)
+{
+    if (g_manualMotionDirection == 1U)
+    {
+        return "manual_up";
+    }
+    if (g_manualMotionDirection == 2U)
+    {
+        return "manual_down";
+    }
+    if (g_parametricClosedLoopRunning != 0U)
+    {
+        return "parametric_closed_loop";
+    }
+    if (g_sineRunning != 0U)
+    {
+        return "sine";
+    }
+    if (g_parametricRunning != 0U)
+    {
+        return "parametric";
+    }
+    if (g_parametricTestRunning != 0U)
+    {
+        return "parametric_test";
+    }
+    if (g_run != 0U)
+    {
+        return "manual_stepping";
+    }
+    return "idle";
 }
 
 static void PrintAngle(void)
@@ -1466,27 +1758,17 @@ static uint8_t ProcessMaintenanceCommand(char *arguments)
     if (strcmp(end, "status") == 0)
     {
         UpdateLimitDebounce();
-        angleOk = (AS5600_ReadAngle(&angle) == HAL_OK) ? 1U : 0U;
         snprintf(msg, sizeof(msg),
-                 "maintenance: id=%lu type=status ok=1 angle_ok=%u angle_raw=%u angle_deg=%.2f run=%u sine=%u parametric=%u parametric_test=%u closed_loop=%u homed=%u upper=%u lower=%u fault=%u span_steps=%lu position_steps=%ld steps_per_mm=%.3f position_mm=%.3f\r\n",
+                 "maintenance: id=%lu type=status ok=1 homed=%u upper_limit=%u lower_limit=%u fault=%u active_mode=%s travel_span_steps=%lu position_steps=%ld steps_per_mm=%.3f\r\n",
                  requestId,
-                 (unsigned int)angleOk,
-                 (unsigned int)angle,
-                 angleOk != 0U ? (double)RelativeAngleDegrees(angle) : 0.0,
-                 (unsigned int)g_run,
-                 (unsigned int)g_sineRunning,
-                 (unsigned int)g_parametricRunning,
-                 (unsigned int)g_parametricTestRunning,
-                 (unsigned int)g_parametricClosedLoopRunning,
                  (unsigned int)g_homed,
                  (unsigned int)g_upperLimitDebounced,
                  (unsigned int)g_lowerLimitDebounced,
                  (unsigned int)g_closedLoopFault,
+                 ActiveModeName(),
                  (unsigned long)g_travelSteps,
                  (long)g_positionSteps,
-                 (double)g_stepsPerMm,
-                 g_stepsPerMm > 0.0f ?
-                     (double)((float)g_positionSteps / g_stepsPerMm) : 0.0);
+                 (double)g_stepsPerMm);
         UartPrint(msg);
         return 1U;
     }
@@ -1526,6 +1808,15 @@ static uint8_t ProcessMaintenanceCommand(char *arguments)
 
     if (strcmp(end, "home") == 0)
     {
+        if (g_manualMotionDirection != 0U)
+        {
+            snprintf(msg, sizeof(msg),
+                     "maintenance: id=%lu type=home ok=0 homed=0 fault=%u error=manual_motion_active\r\n",
+                     requestId,
+                     (unsigned int)g_closedLoopFault);
+            UartPrint(msg);
+            return 1U;
+        }
         if (g_closedLoopFault != 0U)
         {
             snprintf(msg, sizeof(msg),
@@ -1552,6 +1843,14 @@ static uint8_t ProcessMaintenanceCommand(char *arguments)
 
     if (strcmp(end, "zero") == 0)
     {
+        if (g_manualMotionDirection != 0U)
+        {
+            snprintf(msg, sizeof(msg),
+                     "maintenance: id=%lu type=zero ok=0 zeroed=0 error=manual_motion_active\r\n",
+                     requestId);
+            UartPrint(msg);
+            return 1U;
+        }
         SetAngleZero();
         angleOk = (g_angleZeroValid != 0U && AS5600_ReadAngle(&angle) == HAL_OK) ? 1U : 0U;
         if (angleOk != 0U)
@@ -1568,6 +1867,96 @@ static uint8_t ProcessMaintenanceCommand(char *arguments)
                      "maintenance: id=%lu type=zero ok=0 zeroed=0 error=as5600_unavailable\r\n",
                      requestId);
         }
+        UartPrint(msg);
+        return 1U;
+    }
+
+    if (strcmp(end, "manual_up") == 0 || strcmp(end, "manual_down") == 0)
+    {
+        uint8_t direction = (strcmp(end, "manual_up") == 0) ? 1U : 2U;
+        uint8_t dirPin = (direction == 1U) ? DIR_UP : DIR_DOWN;
+        uint8_t limitActive = (direction == 1U) ? UpperLimitPressed() : LowerLimitPressed();
+        const char *directionName = (direction == 1U) ? "up" : "down";
+        const char *error = NULL;
+
+        if (g_homed == 0U)
+        {
+            error = "home_required";
+        }
+        else if (g_manualMotionDirection != 0U || g_run != 0U || g_sineRunning != 0U ||
+                 g_parametricRunning != 0U || g_parametricTestRunning != 0U ||
+                 g_parametricClosedLoopRunning != 0U || g_recording != 0U)
+        {
+            error = "motion_or_recording_active";
+        }
+        else if (g_closedLoopFault != 0U)
+        {
+            error = "blocking_fault";
+        }
+        else if (limitActive != 0U)
+        {
+            error = (direction == 1U) ? "upper_limit_active" : "lower_limit_active";
+        }
+
+        if (error != NULL)
+        {
+            snprintf(msg, sizeof(msg),
+                     "maintenance: id=%lu type=%s ok=0 active=0 error=%s\r\n",
+                     requestId,
+                     end,
+                     error);
+            UartPrint(msg);
+            return 1U;
+        }
+
+        SetDirection(dirPin);
+        g_manualMotionDirection = direction;
+        g_manualMotionLastKeepaliveMs = HAL_GetTick();
+        snprintf(msg, sizeof(msg),
+                 "event: type=manual_motion_started direction=%s position_steps=%ld\r\n",
+                 directionName,
+                 (long)g_positionSteps);
+        UartPrint(msg);
+        snprintf(msg, sizeof(msg),
+                 "maintenance: id=%lu type=%s ok=1 active=1 direction=%s\r\n",
+                 requestId,
+                 end,
+                 directionName);
+        UartPrint(msg);
+        return 1U;
+    }
+
+    if (strcmp(end, "manual_keepalive_up") == 0 ||
+        strcmp(end, "manual_keepalive_down") == 0)
+    {
+        uint8_t requestedDirection =
+            (strcmp(end, "manual_keepalive_up") == 0) ? 1U : 2U;
+        if (g_manualMotionDirection != requestedDirection)
+        {
+            snprintf(msg, sizeof(msg),
+                     "maintenance: id=%lu type=%s ok=0 active=0 error=manual_direction_not_active\r\n",
+                     requestId,
+                     end);
+        }
+        else
+        {
+            g_manualMotionLastKeepaliveMs = HAL_GetTick();
+            snprintf(msg, sizeof(msg),
+                     "maintenance: id=%lu type=%s ok=1 active=1\r\n",
+                     requestId,
+                     end);
+        }
+        UartPrint(msg);
+        return 1U;
+    }
+
+    if (strcmp(end, "manual_stop") == 0)
+    {
+        StopManualMotion("operator_release");
+        snprintf(msg, sizeof(msg),
+                 "maintenance: id=%lu type=manual_stop ok=1 active=0 position_steps=%ld\r\n",
+                 requestId,
+                 (long)g_positionSteps);
         UartPrint(msg);
         return 1U;
     }
@@ -1597,9 +1986,11 @@ static float RelativeAngleDegrees(uint16_t rawAngle)
 
 static void PrintLiveTelemetry(void)
 {
-    char msg[140];
+    char msg[160];
     uint16_t angle;
     uint32_t now;
+    uint32_t sampleIndex;
+    float timeSeconds;
 
     if (g_liveTelemetry == 0U && g_recording == 0U)
     {
@@ -1612,40 +2003,43 @@ static void PrintLiveTelemetry(void)
         return;
     }
     g_lastLiveMs = now;
+    sampleIndex = ++g_liveSampleIndex;
+    timeSeconds = (float)now / 1000.0f;
 
     if (AS5600_ReadAngle(&angle) == HAL_OK)
     {
         if (g_recording != 0U)
         {
-            snprintf(msg, sizeof(msg), "%.3f,%.3f,%.3f\r\n",
-                     (double)((float)(now - g_recordStartMs) / 1000.0f),
-                     (double)((float)g_positionSteps / g_stepsPerMm),
-                     (double)RelativeAngleDegrees(angle));
+            snprintf(msg, sizeof(msg), "%lu,%.3f,%.2f,%.3f\r\n",
+                     (unsigned long)sampleIndex,
+                     (double)timeSeconds,
+                     (double)RelativeAngleDegrees(angle),
+                     (double)((float)g_positionSteps / g_stepsPerMm));
         }
         else
         {
-            snprintf(msg, sizeof(msg), "live time=%.3f angle_deg=%.2f position_mm=%.3f position_steps=%ld homed=%u\r\n",
-                     (double)((float)now / 1000.0f),
+            snprintf(msg, sizeof(msg), "telemetry sample_index=%lu time_s=%.3f angle_deg=%.2f position_mm=%.3f\r\n",
+                     (unsigned long)sampleIndex,
+                     (double)timeSeconds,
                      (double)RelativeAngleDegrees(angle),
-                     (double)((float)g_positionSteps / g_stepsPerMm),
-                     (long)g_positionSteps,
-                     (unsigned int)g_homed);
+                     (double)((float)g_positionSteps / g_stepsPerMm));
         }
     }
     else
     {
         if (g_recording != 0U)
         {
-            snprintf(msg, sizeof(msg), "%.3f,NaN,NaN\r\n",
-                     (double)((float)now / 1000.0f));
+            snprintf(msg, sizeof(msg), "%lu,%.3f,NaN,%.3f\r\n",
+                     (unsigned long)sampleIndex,
+                     (double)timeSeconds,
+                     (double)((float)g_positionSteps / g_stepsPerMm));
         }
         else
         {
-            snprintf(msg, sizeof(msg), "live time=%.3f angle=unavailable position_mm=%.3f position_steps=%ld homed=%u\r\n",
-                     (double)((float)now / 1000.0f),
-                     (double)((float)g_positionSteps / g_stepsPerMm),
-                     (long)g_positionSteps,
-                     (unsigned int)g_homed);
+            snprintf(msg, sizeof(msg), "telemetry sample_index=%lu time_s=%.3f angle_deg=NaN position_mm=%.3f\r\n",
+                     (unsigned long)sampleIndex,
+                     (double)timeSeconds,
+                     (double)((float)g_positionSteps / g_stepsPerMm));
         }
     }
     UartPrint(msg);
@@ -1668,6 +2062,7 @@ static void ReportSwitchChanges(void)
 {
     uint8_t upperLimit;
     uint8_t lowerLimit;
+    char message[96];
 
     UpdateLimitDebounce();
     upperLimit = g_upperLimitDebounced;
@@ -1679,7 +2074,11 @@ static void ReportSwitchChanges(void)
         g_lastUpperLimit = upperLimit;
         g_lastLowerLimit = lowerLimit;
         g_switchStatusValid = 1U;
-        PrintSwitches();
+        snprintf(message, sizeof(message),
+                 "event: type=limit_state_changed upper=%u lower=%u\r\n",
+                 (unsigned int)upperLimit,
+                 (unsigned int)lowerLimit);
+        UartPrint(message);
     }
 }
 
@@ -1717,7 +2116,8 @@ static void ProcessLine(char *line)
     }
 
     // TEMPORARY UART/PARSER DEBUG
-    if (g_parametricTestRunning == 0U && g_parametricClosedLoopRunning == 0U)
+        if (FIRMWARE_DEBUG_RX != 0U &&
+            g_parametricTestRunning == 0U && g_parametricClosedLoopRunning == 0U)
     {
         char debugMsg[200];
         size_t offset = 0U;
@@ -1743,6 +2143,16 @@ static void ProcessLine(char *line)
         }
     }
 
+    if (g_manualMotionDirection != 0U && strcmp(line, "stop") != 0 &&
+        strcmp(line, "help") != 0 && strcmp(line, "status") != 0 &&
+        strcmp(line, "diag") != 0 && strcmp(line, "angle") != 0 &&
+        strcmp(line, "switches") != 0)
+    {
+        UartPrint("event: type=maintenance_command_rejected reason=manual_motion_active\r\n");
+        UartPrint("maintenance command rejected: manual motion is active\r\n");
+        return;
+    }
+
     if (strcmp(line, "help") == 0)
     {
         PrintHelp();
@@ -1752,6 +2162,12 @@ static void ProcessLine(char *line)
     if (strcmp(line, "status") == 0)
     {
         PrintStatus();
+        return;
+    }
+
+    if (strcmp(line, "diag") == 0)
+    {
+        PrintDiagnostics();
         return;
     }
 
@@ -1795,8 +2211,7 @@ static void ProcessLine(char *line)
         g_lastLiveMs = HAL_GetTick();
         if (g_recording != 0U)
         {
-            g_recordStartMs = g_lastLiveMs;
-            UartPrint("time_sec,position_mm,angle_deg\r\n");
+            UartPrint("sample_index,time_s,angle_deg,position_mm\r\n");
         }
         else
         {
@@ -1807,6 +2222,7 @@ static void ProcessLine(char *line)
 
     if (strcmp(line, "stop") == 0)
     {
+        StopManualMotion("operator_stop");
         g_parametricClosedLoopRunning = 0U;
         ClosedLoopActuatorStop();
         g_sineRunning = 0U;
@@ -1902,6 +2318,10 @@ static void ProcessLine(char *line)
             g_parametricClosedLoopStartMs = now;
             g_parametricClosedLoopNextSampleMs = now + PARAMETRIC_TEST_PERIOD_MS;
             g_parametricClosedLoopTargetSteps = g_positionSteps;
+            if (g_closedLoopFault != 0U)
+            {
+                UartPrint("event: type=fault_cleared\r\n");
+            }
             g_closedLoopFault = 0U;
             g_closedLoopFaultPending = 0U;
             g_closedLoopKickCount = 0U;

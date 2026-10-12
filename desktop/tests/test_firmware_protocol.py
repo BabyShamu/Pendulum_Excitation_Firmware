@@ -37,3 +37,31 @@ class FirmwareProtocolParserTests(unittest.TestCase):
         self.assertIsNotNone(response)
         self.assertFalse(response.ok)
         self.assertEqual(response.fields["error"], "blocking_fault")
+
+    def test_operational_event_and_diagnostic_are_separate(self) -> None:
+        event = FirmwareProtocolParser.parse_device_event(
+            "event: type=limit_state_changed upper=1 lower=0"
+        )
+        diagnostic = FirmwareProtocolParser.parse_diagnostic(
+            "diag: phase=idle irq=12"
+        )
+
+        self.assertEqual(event.name, "limit_state_changed")
+        self.assertEqual(event.fields["upper"], "1")
+        self.assertEqual(diagnostic.text, "phase=idle irq=12")
+        self.assertIsNone(FirmwareProtocolParser.parse_device_event("diag: irq=12"))
+        self.assertIsNone(FirmwareProtocolParser.parse_diagnostic("event: type=fault_cleared"))
+
+    def test_events_and_diagnostics_have_separate_parsers(self) -> None:
+        event = FirmwareProtocolParser.parse_device_event(
+            "event: type=manual_motion_stopped direction=up reason=upper_limit"
+        )
+        diagnostic = FirmwareProtocolParser.parse_diagnostic(
+            "diag: tim6_irq=18 phase=idle"
+        )
+
+        self.assertEqual(event.name, "manual_motion_stopped")
+        self.assertEqual(event.fields["reason"], "upper_limit")
+        self.assertEqual(diagnostic.text, "tim6_irq=18 phase=idle")
+        self.assertIsNone(FirmwareProtocolParser.parse_device_event("diag: tim6_irq=18"))
+        self.assertIsNone(FirmwareProtocolParser.parse_diagnostic("event: type=fault_cleared"))

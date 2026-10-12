@@ -11,6 +11,16 @@ class ReadinessState(str, Enum):
     FAULT = "FAULT"
 
 
+class ManualMotionState(str, Enum):
+    IDLE = "IDLE"
+    STARTING_UP = "STARTING UP"
+    MOVING_UP = "MOVING UP"
+    STARTING_DOWN = "STARTING DOWN"
+    MOVING_DOWN = "MOVING DOWN"
+    STOPPING = "STOPPING"
+    FAULT = "FAULT"
+
+
 class BitResultState(str, Enum):
     NOT_RUN = "NOT RUN"
     CHECKING = "CHECKING"
@@ -56,3 +66,5 @@ class MaintenanceSnapshot:
     position_steps: int | None = None
     steps_per_mm: float | None = None
     position_mm: float | None = None
+    manual_motion: ManualMotionState = ManualMotionState.IDLE
+    manual_motion_message: str = ""

@@ -15,6 +15,11 @@ class FirmwareCommand(str, Enum):
     ANGLE = "angle"
     HOME = "home"
     ZERO = "zero"
+    MANUAL_UP = "manual_up"
+    MANUAL_DOWN = "manual_down"
+    MANUAL_KEEPALIVE_UP = "manual_keepalive_up"
+    MANUAL_KEEPALIVE_DOWN = "manual_keepalive_down"
+    MANUAL_STOP = "manual_stop"
 
 
 @dataclass(frozen=True, slots=True)
@@ -28,8 +33,9 @@ class FirmwareCommandService(QObject):
     command_failed = Signal(object)
 
     _RESPONSE_TIMEOUT_MS = 3500
-    _DISPATCH_TIMEOUT_MS = 2000
+    _DISPATCH_TIMEOUT_MS = 5000
     _HOME_TIMEOUT_MS = 65000
+    _MANUAL_COMMAND_TIMEOUT_MS = 500
 
     def __init__(
         self,
@@ -70,6 +76,37 @@ class FirmwareCommandService(QObject):
     def set_angle_zero(self) -> int:
         return self._request(FirmwareCommand.ZERO)
 
+    @staticmethod
+    def _is_routine_success(command: FirmwareCommand) -> bool:
+        return command in (
+            FirmwareCommand.STATUS,
+            FirmwareCommand.SWITCHES,
+            FirmwareCommand.ANGLE,
+            FirmwareCommand.MANUAL_KEEPALIVE_UP,
+            FirmwareCommand.MANUAL_KEEPALIVE_DOWN,
+        )
+
+    def manual_start_up(self) -> int:
+        return self._request(FirmwareCommand.MANUAL_UP, timeout_ms=self._MANUAL_COMMAND_TIMEOUT_MS)
+
+    def manual_start_down(self) -> int:
+        return self._request(FirmwareCommand.MANUAL_DOWN, timeout_ms=self._MANUAL_COMMAND_TIMEOUT_MS)
+
+    def manual_keepalive_up(self) -> int:
+        return self._request(
+            FirmwareCommand.MANUAL_KEEPALIVE_UP,
+            timeout_ms=self._MANUAL_COMMAND_TIMEOUT_MS,
+        )
+
+    def manual_keepalive_down(self) -> int:
+        return self._request(
+            FirmwareCommand.MANUAL_KEEPALIVE_DOWN,
+            timeout_ms=self._MANUAL_COMMAND_TIMEOUT_MS,
+        )
+
+    def manual_stop(self) -> int:
+        return self._request(FirmwareCommand.MANUAL_STOP, timeout_ms=self._MANUAL_COMMAND_TIMEOUT_MS)
+
     def _request(self, command: FirmwareCommand, *, timeout_ms: int | None = None) -> int:
         if self.state.snapshot.connection != ConnectionState.CONNECTED:
             raise RuntimeError("Connect to the STM32 before sending a maintenance command")
@@ -91,19 +128,21 @@ class FirmwareCommandService(QObject):
         except (RuntimeError, ValueError, OSError) as error:
             self._fail(str(error))
             raise
-        self.state.report_event(
-            EventSeverity.INFO,
-            f"Maintenance command requested: {command.value} (request {request_id}).",
-        )
+        if not self._is_routine_success(command):
+            self.state.report_event(
+                EventSeverity.INFO,
+                f"Maintenance command requested: {command.value} (request {request_id}).",
+            )
         return request_id
 
     def _on_command_written(self, request_id: str) -> None:
         if self._active_request_id is None or request_id != str(self._active_request_id):
             return
-        self.state.report_event(
-            EventSeverity.INFO,
-            f"Maintenance command sent: {self._active_command.value} (request {request_id}).",
-        )
+        if not self._is_routine_success(self._active_command):
+            self.state.report_event(
+                EventSeverity.INFO,
+                f"Maintenance command sent: {self._active_command.value} (request {request_id}).",
+            )
         self._waiting_for_write = False
         self._timer.start(self._response_timeout_ms)
 
@@ -124,10 +163,11 @@ class FirmwareCommandService(QObject):
 
         command = self._active_command
         self._clear_active()
-        self.state.report_event(
-            EventSeverity.INFO,
-            f"Maintenance response received: {command.value} (request {response.request_id}).",
-        )
+        if not self._is_routine_success(command):
+            self.state.report_event(
+                EventSeverity.INFO,
+                f"Maintenance response received: {command.value} (request {response.request_id}).",
+            )
         self.command_completed.emit((command, response))
 
     def _on_timeout(self) -> None:

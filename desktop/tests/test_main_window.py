@@ -52,8 +52,11 @@ class MainWindowTests(unittest.TestCase):
         self.assertIn("MOCK DATA · LIVE", window.source_badge.text())
         self.assertEqual(window.live_page.samples_value[1].text(), "1")
         self.assertEqual(window.live_page.event_list.count(), 1)
-        self.assertFalse(window.live_page.connect_button.isEnabled())
-        self.assertEqual(window.live_page.source_combo.currentData(), DataSourceMode.MOCK)
+        self.assertEqual(
+            window.monitor_page.connect_button.isEnabled(),
+            window.monitor_page.port_combo.currentData() is not None,
+        )
+        self.assertFalse(hasattr(window.monitor_page, "source_combo"))
         self.assertFalse(
             any(
                 button.text().lower() in {"home", "start sine", "parametric", "stop"}
@@ -91,7 +94,9 @@ class MainWindowTests(unittest.TestCase):
         self.assertEqual(window.page_stack.count(), 3)
         self.assertIs(window.page_stack.currentWidget(), window.live_page)
         self.assertTrue(window.live_navigation_button.isChecked())
-        self.assertEqual(window.live_navigation_button.text(), "Live")
+        self.assertEqual(window.monitor_navigation_button.text(), "Monitor")
+        self.assertEqual(window.monitor_navigation_button.objectName(), "workspaceNavigationButton")
+        self.assertTrue(window.monitor_navigation_button.property("selected"))
         self.assertEqual(window.experiment_navigation_button.text(), "Experiment")
         self.assertEqual(window.maintenance_navigation_button.text(), "Maintenance")
         self.assertEqual(window.navigation_group.id(window.maintenance_navigation_button), 2)
@@ -120,6 +125,8 @@ class MainWindowTests(unittest.TestCase):
         window.experiment_navigation_button.click()
         self.assertIs(window.page_stack.currentWidget(), window.experiment_page)
         self.assertTrue(window.experiment_navigation_button.isChecked())
+        self.assertTrue(window.experiment_navigation_button.property("selected"))
+        self.assertFalse(window.monitor_navigation_button.property("selected"))
         window.live_navigation_button.click()
         self.assertIs(window.page_stack.currentWidget(), window.live_page)
         self.assertEqual(controller.state.snapshot, snapshot)
@@ -173,8 +180,12 @@ class MainWindowTests(unittest.TestCase):
         controller.state.set_motion(MotionState.HOMING)
 
         self.assertFalse(window.experiment_page.start_recording_button.isEnabled())
-        with self.assertRaisesRegex(RuntimeError, "while homing is active"):
-            controller.experiment_recorder.start_recording("blocked during home", "")
+        with self.assertRaisesRegex(RuntimeError, "while device motion is active"):
+            controller.experiment_recorder.start_recording("blocked during motion", "")
+        controller.state.set_motion(MotionState.RUNNING)
+        self.assertFalse(window.experiment_page.start_recording_button.isEnabled())
+        with self.assertRaisesRegex(RuntimeError, "while device motion is active"):
+            controller.experiment_recorder.start_recording("blocked during motion", "")
         window.close()
 
     def test_real_mode_is_visually_distinct_and_does_not_run_mock_data(self) -> None:
@@ -185,7 +196,7 @@ class MainWindowTests(unittest.TestCase):
         controller.select_data_source(DataSourceMode.REAL)
 
         self.assertIn("REAL STM32 · DISCONNECTED", window.source_badge.text())
-        self.assertEqual(window.live_page.source_combo.currentData(), DataSourceMode.REAL)
+        self.assertFalse(hasattr(window.monitor_page, "source_combo"))
         self.assertEqual(controller.state.snapshot.samples_received, 0)
         self.assertEqual(controller.state.snapshot.connection, ConnectionState.DISCONNECTED)
         self.assertFalse(controller.mock_source.is_active)
@@ -196,7 +207,7 @@ class MainWindowTests(unittest.TestCase):
         )
         window.close()
 
-    def test_qt_real_source_string_becomes_enum_before_async_recording(self) -> None:
+    def test_real_recording_remains_programmatically_available_without_source_selector(self) -> None:
         temporary_directory = tempfile.TemporaryDirectory()
         self.addCleanup(temporary_directory.cleanup)
         repository = ExperimentRepository(Path(temporary_directory.name))
@@ -206,11 +217,8 @@ class MainWindowTests(unittest.TestCase):
         )
         self.addCleanup(controller.shutdown)
         window = MainWindow(controller)
-        real_index = window.live_page.source_combo.findData(DataSourceMode.REAL)
-
-        qt_item_data = window.live_page.source_combo.itemData(real_index)
-        self.assertIsInstance(qt_item_data, str)
-        window.live_page.source_combo.setCurrentIndex(real_index)
+        self.assertFalse(hasattr(window.monitor_page, "source_combo"))
+        controller.select_data_source(DataSourceMode.REAL)
         self.assertIs(controller.state.snapshot.data_source, DataSourceMode.REAL)
 
         controller.state.set_connection(ConnectionState.CONNECTED, "COM6")

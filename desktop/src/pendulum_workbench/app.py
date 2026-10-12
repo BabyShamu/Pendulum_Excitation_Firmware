@@ -4,6 +4,7 @@ from PySide6.QtGui import QFont
 from PySide6.QtWidgets import QApplication
 
 from pendulum_workbench.application.controller import WorkbenchController
+from pendulum_workbench.domain.models import DataSourceMode
 from pendulum_workbench.ui.main_window import MainWindow
 
 
@@ -14,7 +15,7 @@ def main() -> int:
 
     controller = WorkbenchController()
     window = MainWindow(controller)
-    controller.start_mock()
+    controller.select_data_source(DataSourceMode.REAL)
     window.show()
     app.aboutToQuit.connect(controller.shutdown)
     return app.exec()

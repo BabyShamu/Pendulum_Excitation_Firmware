@@ -1,3 +1,4 @@
+import logging
 import queue
 import time
 from dataclasses import dataclass
@@ -16,6 +17,7 @@ from pendulum_workbench.infrastructure.telemetry_parser import (
     TelemetryParser,
 )
 from pendulum_workbench.infrastructure.firmware_protocol import (
+    DeviceEvent,
     FirmwareProtocolParser,
     MaintenanceResponse,
 )
@@ -23,8 +25,8 @@ from pendulum_workbench.infrastructure.firmware_protocol import (
 SERIAL_BAUD_RATE = 115200
 SERIAL_READ_TIMEOUT_S = 0.1
 SERIAL_STARTUP_DELAY_S = 2.0
-STATUS_POLL_INTERVAL_S = 1.0
 TELEMETRY_STALE_AFTER_S = 1.5
+_LOGGER = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -48,6 +50,14 @@ class FramedLine:
     payload: bytes
     terminator: bytes
     partial: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class TelemetrySequenceGap:
+    expected_sample_index: int
+    received_sample_index: int
+    missing_count: int
+    out_of_order: bool = False
 
 
 class SerialLineFramer:
@@ -139,54 +149,34 @@ class SerialWorker(QThread):
             opened = True
             self.connection_opened.emit(str(capture.path))
 
-            queries_started = False
-            next_status_poll = 0.0
-            blocking_home_request_id: str | None = None
+            telemetry_started = False
 
             while not self.isInterruptionRequested():
                 chunk = connection.read(256)
                 if chunk:
                     lines = framer.feed(chunk)
                     self._record_lines(lines, capture, session_start)
-                    if blocking_home_request_id is not None:
-                        response_prefix = (
-                            f"maintenance: id={blocking_home_request_id} type=home ".encode("ascii")
-                        )
-                        if any(line.payload.startswith(response_prefix) for line in lines):
-                            blocking_home_request_id = None
-                            next_status_poll = time.monotonic() + STATUS_POLL_INTERVAL_S
 
-                while True:
-                    try:
-                        request_id, command = self._command_queue.get_nowait()
-                    except queue.Empty:
-                        break
-                    payload = f"{command}\r\n".encode("ascii")
-                    if connection.write(payload) != len(payload):
-                        raise IOError("serial command was only partially written")
-                    if command.startswith("maint ") and command.endswith(" home"):
-                        blocking_home_request_id = request_id
-                    self.command_written.emit(request_id)
+                if time.monotonic() - session_start >= self._startup_delay_s:
+                    while True:
+                        try:
+                            request_id, command = self._command_queue.get_nowait()
+                        except queue.Empty:
+                            break
+                        payload = f"{command}\r\n".encode("ascii")
+                        if connection.write(payload) != len(payload):
+                            raise IOError("serial command was only partially written")
+                        self.command_written.emit(request_id)
 
                 now = time.monotonic()
                 if (
-                    blocking_home_request_id is None
-                    and not queries_started
+                    not telemetry_started
                     and now - session_start >= self._startup_delay_s
                 ):
                     if self.isInterruptionRequested():
                         break
                     connection.write(b"live 1\r\n")
-                    connection.write(b"status\r\n")
-                    queries_started = True
-                    next_status_poll = now + STATUS_POLL_INTERVAL_S
-                elif (
-                    blocking_home_request_id is None
-                    and queries_started
-                    and now >= next_status_poll
-                ):
-                    connection.write(b"status\r\n")
-                    next_status_poll = now + STATUS_POLL_INTERVAL_S
+                    telemetry_started = True
 
         except Exception as error:
             close_reason = f"Serial connection to {self.port} failed: {error}"
@@ -245,8 +235,11 @@ class SerialTelemetryClient(QObject):
     device_message_received = Signal(str)
     malformed_line_received = Signal(str)
     telemetry_stale_changed = Signal(bool)
+    telemetry_sequence_gap = Signal(object)
     command_written = Signal(str)
     maintenance_response_received = Signal(object)
+    device_event_received = Signal(object)
+    diagnostic_received = Signal(str)
 
     def __init__(
         self,
@@ -267,6 +260,8 @@ class SerialTelemetryClient(QObject):
         self._parser = TelemetryParser()
         self._worker: SerialWorker | None = None
         self._sample_index = 0
+        self._last_device_sample_index: int | None = None
+        self._angle_sensor_available: bool | None = None
         self._connected_monotonic: float | None = None
         self._last_valid_monotonic: float | None = None
         self._is_stale = False
@@ -292,6 +287,8 @@ class SerialTelemetryClient(QObject):
             raise ValueError("A serial port must be selected")
 
         self._sample_index = 0
+        self._last_device_sample_index = None
+        self._angle_sensor_available = None
         self._connected_monotonic = None
         self._last_valid_monotonic = None
         self._set_stale(False)
@@ -350,6 +347,19 @@ class SerialTelemetryClient(QObject):
         if maintenance_response is not None:
             self.maintenance_response_received.emit(maintenance_response)
             return
+        device_event = FirmwareProtocolParser.parse_device_event(text)
+        if device_event is not None:
+            if device_event.name == "angle_sensor_unavailable":
+                self._angle_sensor_available = False
+            elif device_event.name == "angle_sensor_restored":
+                self._angle_sensor_available = True
+            self.device_event_received.emit(device_event)
+            return
+        diagnostic = FirmwareProtocolParser.parse_diagnostic(text)
+        if diagnostic is not None:
+            _LOGGER.debug("Firmware diagnostic: %s", diagnostic.text)
+            self.diagnostic_received.emit(diagnostic.text)
+            return
         result = self._parser.parse_line(
             text,
             sample_index=self._sample_index + 1,
@@ -359,6 +369,27 @@ class SerialTelemetryClient(QObject):
         )
         if result.kind == ParsedLineKind.TELEMETRY and result.telemetry is not None:
             self._sample_index += 1
+            angle_available = result.telemetry.angle_deg is not None
+            if angle_available != self._angle_sensor_available:
+                if not angle_available:
+                    self.device_message_received.emit("angle sensor unavailable")
+                elif self._angle_sensor_available is False:
+                    self.device_message_received.emit("angle sensor communication restored")
+                self._angle_sensor_available = angle_available
+            device_index = result.device_sample_index
+            if device_index is not None:
+                previous_index = self._last_device_sample_index
+                if previous_index is not None and device_index != previous_index + 1:
+                    missing_count = max(0, device_index - previous_index - 1)
+                    self.telemetry_sequence_gap.emit(
+                        TelemetrySequenceGap(
+                            expected_sample_index=previous_index + 1,
+                            received_sample_index=device_index,
+                            missing_count=missing_count,
+                            out_of_order=device_index <= previous_index,
+                        )
+                    )
+                self._last_device_sample_index = device_index
             self._last_valid_monotonic = time.monotonic()
             self._set_stale(False)
             self.telemetry_received.emit(result.telemetry)

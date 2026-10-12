@@ -116,8 +116,8 @@ class ExperimentRecordingService(QObject):
             raise RuntimeError("An experiment recording is already active")
 
         snapshot = self.state.snapshot
-        if snapshot.motion == MotionState.HOMING:
-            raise RuntimeError("Recording is unavailable while homing is active")
+        if snapshot.motion in (MotionState.HOMING, MotionState.RUNNING, MotionState.STOPPING):
+            raise RuntimeError("Recording is unavailable while device motion is active")
         if snapshot.data_source == DataSourceMode.REAL:
             if snapshot.connection != ConnectionState.CONNECTED:
                 raise RuntimeError("Connect to the STM32 before recording")
@@ -381,16 +381,20 @@ class ExperimentRecordingService(QObject):
                         )
                         telemetry_writer.writerow(
                             (
-                                sample.sample_index,
-                                sample.rx_line_index if sample.rx_line_index is not None else "",
-                                self._csv_value(sample.device_time_s),
-                                f"{sample.elapsed_s:.9f}",
-                                self._csv_value(sample.position_mm),
+                                sample.device_sample_index or sample.sample_index,
+                                f"{sample.time_s:.9f}",
                                 self._csv_value(sample.angle_deg),
-                                quality,
+                                self._csv_value(sample.position_mm),
+                                sample.rx_line_index if sample.rx_line_index is not None else "",
+                                (
+                                    f"{sample.received_elapsed_s:.9f}"
+                                    if sample.received_elapsed_s is not None
+                                    else ""
+                                ),
                                 (sample.received_at or datetime.now(timezone.utc))
                                 .astimezone(timezone.utc)
                                 .isoformat(),
+                                quality,
                             )
                         )
                         telemetry_file.flush()

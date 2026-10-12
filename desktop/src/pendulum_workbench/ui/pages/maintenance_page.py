@@ -1,12 +1,14 @@
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
+    QApplication,
     QFrame,
     QGridLayout,
     QHBoxLayout,
     QLabel,
     QMessageBox,
     QPushButton,
+    QScrollArea,
     QStyle,
     QVBoxLayout,
     QWidget,
@@ -19,11 +21,13 @@ from pendulum_workbench.domain.maintenance import (
     CheckName,
     CheckState,
     MaintenanceSnapshot,
+    ManualMotionState,
     ReadinessState,
 )
 from pendulum_workbench.domain.models import (
     ApplicationSnapshot,
     ConnectionState,
+    EventSeverity,
     HomeStatus,
     MotionState,
     RecordingState,
@@ -51,9 +55,18 @@ class MaintenancePage(QWidget):
         self.controller = controller
         self.maintenance = controller.maintenance
 
-        layout = QVBoxLayout(self)
+        outer_layout = QVBoxLayout(self)
+        outer_layout.setContentsMargins(0, 0, 0, 0)
+        self.scroll_area = QScrollArea()
+        self.scroll_area.setObjectName("maintenanceScrollArea")
+        self.scroll_area.setWidgetResizable(True)
+        self.scroll_area.setFrameShape(QFrame.Shape.NoFrame)
+        self.content = QWidget()
+        layout = QVBoxLayout(self.content)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(10)
+        self.scroll_area.setWidget(self.content)
+        outer_layout.addWidget(self.scroll_area)
 
         readiness_panel = QFrame()
         readiness_panel.setObjectName("surface")
@@ -199,12 +212,64 @@ class MaintenancePage(QWidget):
         self.zero_result_value.setWordWrap(True)
         home_layout.addWidget(self.zero_result_value)
         layout.addWidget(home_panel)
+
+        manual_panel = QFrame()
+        manual_panel.setObjectName("surface")
+        self._apply_card_depth(manual_panel)
+        manual_layout = QVBoxLayout(manual_panel)
+        manual_layout.setContentsMargins(16, 12, 16, 12)
+        manual_layout.setSpacing(8)
+        manual_heading = QLabel("MANUAL PIVOT CONTROL")
+        manual_heading.setObjectName("sectionTitle")
+        manual_layout.addWidget(manual_heading)
+        self.manual_motion_state_value = QLabel(ManualMotionState.IDLE.value)
+        self.manual_motion_state_value.setObjectName("manualMotionState")
+        self.manual_motion_state_value.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        manual_layout.addWidget(self.manual_motion_state_value)
+
+        manual_buttons = QHBoxLayout()
+        manual_buttons.setSpacing(12)
+        self.manual_up_button = QPushButton("MOVE UP")
+        self.manual_up_button.setObjectName("manualMoveButton")
+        self.manual_up_button.setProperty("direction", "up")
+        self.manual_up_button.setIcon(
+            self.style().standardIcon(QStyle.StandardPixmap.SP_ArrowUp)
+        )
+        self.manual_up_button.setMinimumHeight(72)
+        self.manual_up_button.pressed.connect(lambda: self._start_manual_motion("up"))
+        self.manual_up_button.released.connect(lambda: self._stop_manual_motion("button_release"))
+        manual_buttons.addWidget(self.manual_up_button, 1)
+        self.manual_down_button = QPushButton("MOVE DOWN")
+        self.manual_down_button.setObjectName("manualMoveButton")
+        self.manual_down_button.setProperty("direction", "down")
+        self.manual_down_button.setIcon(
+            self.style().standardIcon(QStyle.StandardPixmap.SP_ArrowDown)
+        )
+        self.manual_down_button.setMinimumHeight(72)
+        self.manual_down_button.pressed.connect(lambda: self._start_manual_motion("down"))
+        self.manual_down_button.released.connect(lambda: self._stop_manual_motion("button_release"))
+        manual_buttons.addWidget(self.manual_down_button, 1)
+        manual_layout.addLayout(manual_buttons)
+        self.manual_position_value = QLabel("Current pivot position: unavailable")
+        self.manual_position_value.setObjectName("hardwareInfoValue")
+        self.manual_position_value.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        manual_layout.addWidget(self.manual_position_value)
+        self.manual_safety_note = QLabel(
+            "Hold a direction to move; release to stop. Firmware dead-man default: 350 ms; validate during commissioning."
+        )
+        self.manual_safety_note.setObjectName("subtle")
+        self.manual_safety_note.setWordWrap(True)
+        manual_layout.addWidget(self.manual_safety_note)
+        layout.addWidget(manual_panel)
         layout.addStretch(1)
 
         controller.state.snapshot_changed.connect(self._update_application_state)
+        controller.state.telemetry_received.connect(self._update_manual_position)
+        controller.state.telemetry_received.connect(self._update_manual_position)
         self.maintenance.snapshot_changed.connect(self._update_maintenance_snapshot)
         self._update_application_state(controller.state.snapshot)
         self._update_maintenance_snapshot(self.maintenance.snapshot)
+        QApplication.instance().applicationStateChanged.connect(self._on_application_state_changed)
 
     @staticmethod
     def _apply_card_depth(card: QFrame) -> None:
@@ -232,6 +297,21 @@ class MaintenancePage(QWidget):
             self.maintenance.start_homing()
         except (RuntimeError, ValueError) as error:
             self.home_progress_value.setText(str(error))
+
+    def _start_manual_motion(self, direction: str) -> None:
+        try:
+            self.maintenance.start_manual_motion(direction)
+        except (RuntimeError, ValueError) as error:
+            self.manual_motion_state_value.setText(str(error))
+            self.controller.state.report_event(EventSeverity.WARNING, str(error))
+
+    def _stop_manual_motion(self, reason: str) -> None:
+        if self.maintenance.is_manual_motion_active:
+            self.maintenance.stop_manual_motion(reason)
+
+    def _on_application_state_changed(self, state) -> None:
+        if state != Qt.ApplicationState.ApplicationActive:
+            self._stop_manual_motion("application_focus_lost")
 
     def _confirm_angle_zero(self) -> None:
         angle = self.maintenance.snapshot.current_angle_deg
@@ -262,6 +342,15 @@ class MaintenancePage(QWidget):
         )
         blocking_fault = snapshot.hardware_status.fault_known and bool(snapshot.hardware_status.fault)
         moving = snapshot.motion in (MotionState.RUNNING, MotionState.STOPPING)
+        readiness = self.maintenance.snapshot.readiness
+        manual_ready = (
+            connected
+            and readiness == ReadinessState.SYSTEM_READY
+            and not busy
+            and not recording_active
+            and not moving
+            and not blocking_fault
+        )
         self.run_system_check_button.setEnabled(connected and not busy)
         self.home_button.setEnabled(
             connected and not busy and not blocking_fault and not recording_active and not moving
@@ -271,6 +360,16 @@ class MaintenancePage(QWidget):
             and not busy
             and not recording_active
             and snapshot.motion not in (MotionState.RUNNING, MotionState.HOMING, MotionState.STOPPING)
+        )
+        manual_active = self.maintenance.is_manual_motion_active
+        direction = self.maintenance.snapshot.manual_motion
+        self.manual_up_button.setEnabled(
+            manual_active and direction in (ManualMotionState.STARTING_UP, ManualMotionState.MOVING_UP)
+            or (manual_ready and snapshot.hardware_status.upper_limit is False)
+        )
+        self.manual_down_button.setEnabled(
+            manual_active and direction in (ManualMotionState.STARTING_DOWN, ManualMotionState.MOVING_DOWN)
+            or (manual_ready and snapshot.hardware_status.lower_limit is False)
         )
         self.home_state_value.setText(snapshot.home_status.value)
         self.upper_limit_value.setText(self._limit_text(snapshot.hardware_status.upper_limit))
@@ -319,7 +418,31 @@ class MaintenancePage(QWidget):
             self.zero_result_value.setText(snapshot.operation_message)
         elif snapshot.operation_message and self.zero_result_value.text().startswith("Waiting"):
             self.zero_result_value.setText(snapshot.operation_message)
+        self.manual_motion_state_value.setText(snapshot.manual_motion.value)
+        self.manual_motion_state_value.setToolTip(snapshot.manual_motion_message)
+        self.manual_up_button.setText(
+            "MOVING UP" if snapshot.manual_motion == ManualMotionState.MOVING_UP else "MOVE UP"
+        )
+        self.manual_down_button.setText(
+            "MOVING DOWN" if snapshot.manual_motion == ManualMotionState.MOVING_DOWN else "MOVE DOWN"
+        )
+        for button, is_active in (
+            (self.manual_up_button, snapshot.manual_motion == ManualMotionState.MOVING_UP),
+            (self.manual_down_button, snapshot.manual_motion == ManualMotionState.MOVING_DOWN),
+        ):
+            button.setProperty("manualActive", is_active)
+            button.style().unpolish(button)
+            button.style().polish(button)
         self._update_application_state(self.controller.state.snapshot)
+
+    def _update_manual_position(self, sample) -> None:
+        if sample.source != "real" or sample.position_mm is None:
+            return
+        self.manual_position_value.setText(f"Current pivot position: {sample.position_mm:+.2f} mm")
+
+    def hideEvent(self, event) -> None:
+        self._stop_manual_motion("maintenance_page_left")
+        super().hideEvent(event)
 
     @staticmethod
     def _limit_text(active: bool | None) -> str:

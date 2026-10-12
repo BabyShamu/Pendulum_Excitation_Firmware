@@ -4,6 +4,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from PySide6.QtCore import Qt
+from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QMessageBox
 
 from pendulum_workbench.application.controller import WorkbenchController
@@ -11,6 +13,7 @@ from pendulum_workbench.domain.maintenance import (
     BitResultState,
     CheckName,
     CheckState,
+    ManualMotionState,
     ReadinessState,
 )
 from pendulum_workbench.domain.models import (
@@ -19,8 +22,10 @@ from pendulum_workbench.domain.models import (
     HardwareStatus,
     HomeStatus,
     MotionState,
+    TelemetrySample,
 )
 from pendulum_workbench.infrastructure.serial_client import SerialTelemetryClient
+from pendulum_workbench.infrastructure.firmware_protocol import DeviceEvent
 from pendulum_workbench.ui.main_window import MainWindow
 
 
@@ -37,6 +42,11 @@ class MaintenanceFakeSerial:
         defer_status: bool = False,
         defer_home: bool = False,
         prepend_stale_response: bool = False,
+        manual_deadman_timeout_s: float = 0.35,
+        drop_manual_keepalives: bool = False,
+        drop_manual_stop: bool = False,
+        upper_active: bool = False,
+        lower_active: bool = False,
         **kwargs: object,
     ) -> None:
         del port, baud_rate, kwargs
@@ -47,6 +57,14 @@ class MaintenanceFakeSerial:
         self.defer_status = defer_status
         self.defer_home = defer_home
         self.prepend_stale_response = prepend_stale_response
+        self.manual_deadman_timeout_s = manual_deadman_timeout_s
+        self.drop_manual_keepalives = drop_manual_keepalives
+        self.drop_manual_stop = drop_manual_stop
+        self.upper_active = upper_active
+        self.lower_active = lower_active
+        self.manual_active = False
+        self.manual_direction: str | None = None
+        self.last_manual_keepalive = 0.0
         self.pending_status_id: str | None = None
         self.pending_home_id: str | None = None
         self._chunks: list[bytes] = []
@@ -85,16 +103,21 @@ class MaintenanceFakeSerial:
 
     def _respond(self, request_id: str, command: str) -> None:
         if command == "status":
-            angle_ok = int(self.angle_available)
+            active_mode = (
+                f"manual_{self.manual_direction}" if self.manual_active else "idle"
+            )
             response = (
-                f"maintenance: id={request_id} type=status ok=1 angle_ok={angle_ok} "
-                f"angle_raw=2048 angle_deg={0.0 if self.zeroed else 2.5:.2f} "
-                f"run=0 sine=0 parametric=0 closed_loop=0 homed={int(self.homed)} "
-                f"upper=0 lower=0 fault={self.fault_code} span_steps={1200 if self.homed else 0} "
-                "position_steps=0 steps_per_mm=40.000 position_mm=0.000\r\n"
+                f"maintenance: id={request_id} type=status ok=1 homed={int(self.homed)} "
+                f"upper_limit={int(self.upper_active)} lower_limit={int(self.lower_active)} "
+                f"fault={self.fault_code} active_mode={active_mode} "
+                f"travel_span_steps={1200 if self.homed else 0} position_steps=0 "
+                "steps_per_mm=40.000\r\n"
             )
         elif command == "switches":
-            response = f"maintenance: id={request_id} type=switches ok=1 upper=0 lower=0\r\n"
+            response = (
+                f"maintenance: id={request_id} type=switches ok=1 "
+                f"upper={int(self.upper_active)} lower={int(self.lower_active)}\r\n"
+            )
         elif command == "angle":
             if self.angle_available:
                 response = (
@@ -118,6 +141,44 @@ class MaintenanceFakeSerial:
                 f"zeroed={int(self.zeroed)} raw=2048 degrees=0.00"
                 f"{' error=as5600_unavailable' if not self.zeroed else ''}\r\n"
             )
+        elif command in ("manual_up", "manual_down"):
+            direction = "up" if command == "manual_up" else "down"
+            limit_active = self.upper_active if direction == "up" else self.lower_active
+            if limit_active:
+                limit_name = "upper" if direction == "up" else "lower"
+                response = (
+                    f"maintenance: id={request_id} type={command} ok=0 active=0 "
+                    f"error={limit_name}_limit_active\r\n"
+                )
+            else:
+                self.manual_active = True
+                self.manual_direction = direction
+                self.last_manual_keepalive = time.monotonic()
+                self._chunks.append(
+                    f"event: type=manual_motion_started direction={self.manual_direction}\r\n".encode("ascii")
+                )
+                response = (
+                    f"maintenance: id={request_id} type={command} ok=1 "
+                    f"active=1 direction={self.manual_direction}\r\n"
+                )
+        elif command in ("manual_keepalive_up", "manual_keepalive_down"):
+            if self.drop_manual_keepalives:
+                return
+            self.last_manual_keepalive = time.monotonic()
+            response = f"maintenance: id={request_id} type={command} ok=1 active=1\r\n"
+        elif command == "manual_stop":
+            if self.drop_manual_stop:
+                return
+            direction = self.manual_direction or "unknown"
+            self.manual_active = False
+            self.manual_direction = None
+            self._chunks.append(
+                f"event: type=manual_motion_stopped direction={direction} reason=operator_release\r\n".encode("ascii")
+            )
+            response = (
+                f"maintenance: id={request_id} type=manual_stop ok=1 active=0 "
+                "position_steps=0\r\n"
+            )
         else:
             response = f"maintenance: id={request_id} type=error ok=0 error=unsupported_command\r\n"
         if self.prepend_stale_response:
@@ -131,6 +192,29 @@ class MaintenanceFakeSerial:
     def read(self, size: int) -> bytes:
         del size
         if self._chunks:
+            return self._chunks.pop(0)
+        if self.manual_active and (
+            (self.manual_direction == "up" and self.upper_active)
+            or (self.manual_direction == "down" and self.lower_active)
+        ):
+            direction = self.manual_direction or "unknown"
+            limit = "upper_limit" if direction == "up" else "lower_limit"
+            self.manual_active = False
+            self.manual_direction = None
+            self._chunks.append(
+                f"event: type=manual_motion_stopped direction={direction} reason={limit}\r\n".encode("ascii")
+            )
+            return self._chunks.pop(0)
+        if (
+            self.manual_active
+            and time.monotonic() - self.last_manual_keepalive >= self.manual_deadman_timeout_s
+        ):
+            direction = self.manual_direction or "unknown"
+            self.manual_active = False
+            self.manual_direction = None
+            self._chunks.append(
+                f"event: type=manual_motion_stopped direction={direction} reason=deadman_timeout\r\n".encode("ascii")
+            )
             return self._chunks.pop(0)
         time.sleep(0.003)
         return b""
@@ -177,6 +261,12 @@ class MaintenanceServiceTests(unittest.TestCase):
             self.wait_for(lambda: controller.state.snapshot.connection == ConnectionState.CONNECTED)
         )
         self.assertTrue(serial_instances)
+        if serial_instances[0].defer_status:
+            self.assertTrue(self.wait_for(lambda: serial_instances[0].pending_status_id is not None))
+            serial_instances[0].release_status()
+            self.assertTrue(self.wait_for(lambda: not controller.firmware_commands.is_busy))
+            serial_instances[0].defer_status = True
+        self.assertTrue(self.wait_for(lambda: not controller.firmware_commands.is_busy))
         return controller, serial_instances[0]
 
     def run_system_check(self, controller: WorkbenchController) -> None:
@@ -197,6 +287,8 @@ class MaintenanceServiceTests(unittest.TestCase):
         self.assertFalse(page.run_system_check_button.isEnabled())
         self.assertFalse(page.home_button.isEnabled())
         self.assertFalse(page.zero_angle_button.isEnabled())
+        self.assertFalse(page.manual_up_button.isEnabled())
+        self.assertFalse(page.manual_down_button.isEnabled())
         self.assertEqual(page.readiness_indicator.text(), ReadinessState.NOT_CONNECTED.value)
         with self.assertRaisesRegex(RuntimeError, "Connect to the STM32"):
             controller.maintenance.run_system_check()
@@ -281,7 +373,7 @@ class MaintenanceServiceTests(unittest.TestCase):
         self.assertTrue(any(event.severity.value == "Error" for event in events))
 
     def test_bit_as5600_failure_is_visible_and_logged(self) -> None:
-        controller, _device = self.create_connected_controller(angle_available=False)
+        controller, device = self.create_connected_controller(angle_available=False)
         events = []
         controller.state.event_added.connect(events.append)
         window = MainWindow(controller)
@@ -299,7 +391,36 @@ class MaintenanceServiceTests(unittest.TestCase):
         self.assertEqual(state_label.text(), CheckState.FAIL.value)
         self.assertIn("AS5600", detail_label.text())
         self.assertTrue(any("system check failed" in event.message.lower() for event in events))
+
+        device.angle_available = True
+        window.maintenance_page.run_system_check_button.click()
+        self.assertTrue(
+            self.wait_for(lambda: controller.maintenance.snapshot.bit_state == BitResultState.PASSED)
+        )
+        self.assertEqual(
+            controller.maintenance.snapshot.readiness,
+            ReadinessState.BIT_PASSED_HOME_REQUIRED,
+        )
         window.close()
+
+    def test_runtime_as5600_loss_invalidates_bit_until_a_new_check_passes(self) -> None:
+        controller, device = self.create_connected_controller(initially_homed=True)
+        self.run_system_check(controller)
+        self.assertEqual(controller.maintenance.snapshot.readiness, ReadinessState.SYSTEM_READY)
+
+        controller.serial_client.device_message_received.emit("angle sensor unavailable")
+        self.assertEqual(controller.maintenance.snapshot.bit_state, BitResultState.FAILED)
+        self.assertEqual(controller.maintenance.snapshot.readiness, ReadinessState.FAULT)
+        self.assertEqual(controller.maintenance.snapshot.checks[3].state, CheckState.FAIL)
+
+        controller.serial_client.device_message_received.emit("angle sensor communication restored")
+        self.assertEqual(controller.maintenance.snapshot.readiness, ReadinessState.CHECK_REQUIRED)
+        self.assertFalse(controller.maintenance.snapshot.checks[3].state == CheckState.PASS)
+
+        device.angle_available = True
+        self.run_system_check(controller)
+        self.assertEqual(controller.maintenance.snapshot.bit_state, BitResultState.PASSED)
+        self.assertEqual(controller.maintenance.snapshot.readiness, ReadinessState.SYSTEM_READY)
 
     def test_disconnect_invalidates_bit_result_and_readiness(self) -> None:
         controller, _device = self.create_connected_controller()
@@ -364,6 +485,7 @@ class MaintenanceServiceTests(unittest.TestCase):
 
     def test_home_and_zero_are_blocked_during_reported_motion(self) -> None:
         controller, _device = self.create_connected_controller()
+        self.run_system_check(controller)
         window = MainWindow(controller)
         controller.state.set_hardware_status(
             HardwareStatus(active_motion_mode="Sine", homed=True, fault_known=True)
@@ -371,6 +493,8 @@ class MaintenanceServiceTests(unittest.TestCase):
 
         self.assertFalse(window.maintenance_page.home_button.isEnabled())
         self.assertFalse(window.maintenance_page.zero_angle_button.isEnabled())
+        self.assertFalse(window.maintenance_page.manual_up_button.isEnabled())
+        self.assertFalse(window.maintenance_page.manual_down_button.isEnabled())
         with self.assertRaisesRegex(RuntimeError, "Stop active device motion"):
             controller.maintenance.start_homing()
         with self.assertRaisesRegex(RuntimeError, "unavailable while device motion is active"):
@@ -398,7 +522,7 @@ class MaintenanceServiceTests(unittest.TestCase):
         self.assertEqual(snapshot.travel_span_steps, 1200)
         self.assertEqual(snapshot.position_mm, 0.0)
         self.assertTrue(any(item.operation_message.startswith("Homing in progress") for item in home_results))
-        self.assertTrue(any(write == b"maint 4 home\r\n" for write in device.writes))
+        self.assertTrue(any(write.endswith(b" home\r\n") for write in device.writes))
         self.assertTrue(any(write.endswith(b" status\r\n") for write in device.writes))
 
     def test_home_failure_is_reported_as_fault_without_homing(self) -> None:
@@ -442,6 +566,259 @@ class MaintenanceServiceTests(unittest.TestCase):
         self.assertTrue(any(write.endswith(b" zero\r\n") for write in device.writes))
         self.assertTrue(any(write.endswith(b" angle\r\n") for write in device.writes))
         window.close()
+
+    def test_manual_up_and_down_are_press_hold_and_stop_on_release(self) -> None:
+        controller, device = self.create_connected_controller(initially_homed=True)
+        window = MainWindow(controller)
+        window.show()
+        self.qt_app.processEvents()
+        page = window.maintenance_page
+        self.assertFalse(page.manual_up_button.isEnabled())
+        self.assertFalse(page.manual_down_button.isEnabled())
+        self.run_system_check(controller)
+        self.qt_app.processEvents()
+        self.assertTrue(page.manual_up_button.isEnabled())
+        self.assertTrue(page.manual_down_button.isEnabled())
+        events = []
+        controller.state.event_added.connect(events.append)
+
+        QTest.mousePress(page.manual_up_button, Qt.MouseButton.LeftButton)
+        self.assertTrue(
+            self.wait_for(lambda: page.maintenance.snapshot.manual_motion == ManualMotionState.MOVING_UP)
+        )
+        self.assertTrue(device.manual_active)
+        self.assertEqual(device.manual_direction, "up")
+        self.assertFalse(page.manual_down_button.isEnabled())
+        with self.assertRaisesRegex(RuntimeError, "Another maintenance operation or manual direction is active"):
+            controller.maintenance.start_manual_motion("down")
+        self.assertTrue(any(write.endswith(b" manual_up\r\n") for write in device.writes))
+        self.assertTrue(
+            self.wait_for(lambda: any(b"manual_keepalive_up" in write for write in device.writes))
+        )
+        self.qt_app.processEvents()
+        self.assertFalse(any("manual_keepalive" in event.message for event in events))
+
+        controller.state.publish_sample(TelemetrySample(201, 4.02, 1.0, 6.25, source="real"))
+        self.assertIn("6.25 mm", page.manual_position_value.text())
+        QTest.mouseRelease(page.manual_up_button, Qt.MouseButton.LeftButton)
+        self.assertTrue(
+            self.wait_for(lambda: page.maintenance.snapshot.manual_motion == ManualMotionState.IDLE)
+        )
+        self.assertFalse(device.manual_active)
+        self.assertTrue(any(write.endswith(b" manual_stop\r\n") for write in device.writes))
+        self.assertTrue(self.wait_for(lambda: not controller.firmware_commands.is_busy))
+
+        QTest.mousePress(page.manual_down_button, Qt.MouseButton.LeftButton)
+        self.assertTrue(
+            self.wait_for(lambda: page.maintenance.snapshot.manual_motion == ManualMotionState.MOVING_DOWN)
+        )
+        self.assertEqual(device.manual_direction, "down")
+        QTest.mouseRelease(page.manual_down_button, Qt.MouseButton.LeftButton)
+        self.assertTrue(
+            self.wait_for(lambda: page.maintenance.snapshot.manual_motion == ManualMotionState.IDLE)
+        )
+        self.assertFalse(device.manual_active)
+        window.close()
+
+    def test_disconnect_request_stops_manual_before_closing_serial(self) -> None:
+        controller, device = self.create_connected_controller(initially_homed=True)
+        self.run_system_check(controller)
+        controller.maintenance.start_manual_motion("up")
+        self.assertTrue(self.wait_for(lambda: device.manual_active))
+
+        controller.disconnect_real()
+
+        self.assertTrue(
+            self.wait_for(lambda: not device.manual_active)
+        )
+        self.assertEqual(controller.state.snapshot.connection, ConnectionState.CONNECTED)
+        self.assertTrue(any(write.endswith(b" manual_stop\r\n") for write in device.writes))
+        self.assertTrue(self.wait_for(lambda: not controller.firmware_commands.is_busy))
+        controller.disconnect_real()
+        self.assertTrue(
+            self.wait_for(lambda: controller.state.snapshot.connection == ConnectionState.DISCONNECTED)
+        )
+
+    def test_missing_manual_keepalive_expires_fake_firmware_deadman(self) -> None:
+        controller, device = self.create_connected_controller(
+            initially_homed=True,
+            drop_manual_keepalives=True,
+            manual_deadman_timeout_s=0.25,
+        )
+        self.run_system_check(controller)
+        window = MainWindow(controller)
+        page = window.maintenance_page
+        window.show()
+        self.qt_app.processEvents()
+        page.manual_up_button.pressed.emit()
+
+        self.assertTrue(
+            self.wait_for(
+                lambda: page.maintenance.snapshot.manual_motion == ManualMotionState.MOVING_UP
+            )
+        )
+        self.assertTrue(
+            self.wait_for(
+                lambda: not device.manual_active
+                and page.maintenance.snapshot.manual_motion == ManualMotionState.FAULT,
+                timeout_s=1.0,
+            )
+        )
+        self.assertFalse(device.manual_active)
+        window.close()
+
+    def test_upper_and_lower_limits_block_only_their_commanded_direction(self) -> None:
+        controller, device = self.create_connected_controller(
+            initially_homed=True,
+            upper_active=True,
+            lower_active=False,
+        )
+        self.run_system_check(controller)
+        window = MainWindow(controller)
+        page = window.maintenance_page
+
+        self.assertFalse(page.manual_up_button.isEnabled())
+        self.assertTrue(page.manual_down_button.isEnabled())
+        with self.assertRaisesRegex(RuntimeError, "up travel limit"):
+            controller.maintenance.start_manual_motion("up")
+
+        page.manual_down_button.pressed.emit()
+        self.assertTrue(
+            self.wait_for(lambda: page.maintenance.snapshot.manual_motion == ManualMotionState.MOVING_DOWN)
+        )
+        device.lower_active = True
+        self.assertTrue(
+            self.wait_for(
+                lambda: not device.manual_active
+                and page.maintenance.snapshot.manual_motion == ManualMotionState.IDLE
+            )
+        )
+        self.assertIn("lower limit", page.maintenance.snapshot.manual_motion_message)
+        window.close()
+
+    def test_lower_limit_only_blocks_downward_manual_motion(self) -> None:
+        controller, device = self.create_connected_controller(
+            initially_homed=True,
+            upper_active=False,
+            lower_active=True,
+        )
+        self.run_system_check(controller)
+        window = MainWindow(controller)
+        page = window.maintenance_page
+
+        self.assertTrue(page.manual_up_button.isEnabled())
+        self.assertFalse(page.manual_down_button.isEnabled())
+        with self.assertRaisesRegex(RuntimeError, "down travel limit"):
+            controller.maintenance.start_manual_motion("down")
+        page.manual_up_button.pressed.emit()
+        self.assertTrue(
+            self.wait_for(lambda: page.maintenance.snapshot.manual_motion == ManualMotionState.MOVING_UP)
+        )
+        self.assertEqual(device.manual_direction, "up")
+        controller.maintenance.stop_manual_motion("test_release")
+        self.assertTrue(self.wait_for(lambda: not device.manual_active))
+        window.close()
+
+    def test_leaving_maintenance_stops_manual_motion(self) -> None:
+        controller, device = self.create_connected_controller(initially_homed=True)
+        self.run_system_check(controller)
+        window = MainWindow(controller)
+        window.show()
+        self.qt_app.processEvents()
+        window.maintenance_navigation_button.click()
+        page = window.maintenance_page
+        page.manual_up_button.pressed.emit()
+        self.assertTrue(self.wait_for(lambda: device.manual_active))
+
+        window.monitor_navigation_button.click()
+
+        self.assertTrue(
+            self.wait_for(
+                lambda: not device.manual_active
+                and page.maintenance.snapshot.manual_motion == ManualMotionState.IDLE
+            )
+        )
+        window.close()
+
+    def test_application_deactivation_stops_manual_motion(self) -> None:
+        controller, device = self.create_connected_controller(initially_homed=True)
+        self.run_system_check(controller)
+        window = MainWindow(controller)
+        page = window.maintenance_page
+        controller.maintenance.start_manual_motion("down")
+        self.assertTrue(self.wait_for(lambda: device.manual_active))
+
+        page._on_application_state_changed(Qt.ApplicationState.ApplicationInactive)
+
+        self.assertTrue(
+            self.wait_for(
+                lambda: not device.manual_active
+                and controller.maintenance.snapshot.manual_motion == ManualMotionState.IDLE
+            )
+        )
+        window.close()
+
+    def test_controller_shutdown_requests_manual_stop_before_closing_serial(self) -> None:
+        controller, device = self.create_connected_controller(initially_homed=True)
+        self.run_system_check(controller)
+        controller.maintenance.start_manual_motion("up")
+        self.assertTrue(
+            self.wait_for(
+                lambda: controller.maintenance.snapshot.manual_motion == ManualMotionState.MOVING_UP
+            )
+        )
+
+        controller.shutdown()
+
+        self.assertFalse(device.manual_active)
+        self.assertTrue(any(write.endswith(b" manual_stop\r\n") for write in device.writes))
+
+    def test_failed_manual_stop_does_not_retry_forever_and_deadman_stops_fake_device(self) -> None:
+        controller, device = self.create_connected_controller(
+            initially_homed=True,
+            drop_manual_stop=True,
+            manual_deadman_timeout_s=0.25,
+        )
+        self.run_system_check(controller)
+        controller.maintenance.start_manual_motion("up")
+        self.assertTrue(
+            self.wait_for(
+                lambda: controller.maintenance.snapshot.manual_motion == ManualMotionState.MOVING_UP
+            )
+        )
+
+        controller.maintenance.stop_manual_motion("test_release")
+        self.assertTrue(
+            self.wait_for(
+                lambda: not device.manual_active
+                and controller.maintenance.snapshot.manual_motion == ManualMotionState.FAULT,
+                timeout_s=1.0,
+            )
+        )
+        self.assertEqual(
+            sum(write.endswith(b" manual_stop\r\n") for write in device.writes),
+            1,
+        )
+
+    def test_firmware_fault_event_latches_readiness_and_stops_manual_motion(self) -> None:
+        controller, device = self.create_connected_controller(initially_homed=True)
+        self.run_system_check(controller)
+        controller.maintenance.start_manual_motion("up")
+        self.assertTrue(self.wait_for(lambda: device.manual_active))
+
+        controller.serial_client.device_event_received.emit(
+            DeviceEvent("fault_appeared", {"code": "upper_limit"}, "event: type=fault_appeared")
+        )
+
+        self.assertTrue(
+            self.wait_for(
+                lambda: not device.manual_active
+                and controller.maintenance.snapshot.manual_motion == ManualMotionState.IDLE
+            )
+        )
+        self.assertEqual(controller.maintenance.snapshot.readiness, ReadinessState.FAULT)
+        self.assertTrue(controller.state.snapshot.hardware_status.fault_known)
+        self.assertIn("upper_limit", controller.state.snapshot.hardware_status.fault)
 
 
 if __name__ == "__main__":

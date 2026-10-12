@@ -36,7 +36,7 @@ from pendulum_workbench.ui.status_indicator import IndicatorTone
 from pendulum_workbench.ui.trend_plot import TrendPlot
 
 
-class LivePage(QWidget):
+class MonitorPage(QWidget):
     def __init__(self, controller: WorkbenchController) -> None:
         super().__init__()
         self.controller = controller
@@ -53,16 +53,6 @@ class LivePage(QWidget):
         connection_layout = QHBoxLayout(self.connection_panel)
         connection_layout.setContentsMargins(14, 10, 14, 10)
         connection_layout.setSpacing(8)
-        source_label = QLabel("DATA SOURCE")
-        source_label.setObjectName("sectionTitle")
-        connection_layout.addWidget(source_label)
-        self.source_combo = QComboBox()
-        self.source_combo.setObjectName("dataSourceCombo")
-        self.source_combo.addItem("Mock telemetry", DataSourceMode.MOCK)
-        self.source_combo.addItem("Real STM32", DataSourceMode.REAL)
-        self.source_combo.addItem("Saved experiment", DataSourceMode.SAVED)
-        self.source_combo.currentIndexChanged.connect(self._source_selection_changed)
-        connection_layout.addWidget(self.source_combo)
         self.port_combo = QComboBox()
         self.port_combo.setObjectName("serialPortCombo")
         self.port_combo.setMinimumWidth(180)
@@ -230,28 +220,10 @@ class LivePage(QWidget):
         self._refresh_ports()
 
     def connect_from_menu(self) -> None:
-        if self.controller.state.snapshot.data_source != DataSourceMode.REAL:
-            real_index = self.source_combo.findData(DataSourceMode.REAL)
-            if real_index >= 0:
-                self.source_combo.setCurrentIndex(real_index)
         self._connect_real()
 
     def clear_events(self) -> None:
         self.event_list.clear()
-
-    def _source_selection_changed(self, index: int) -> None:
-        mode = self.source_combo.itemData(index)
-        if mode is None:
-            return
-        try:
-            self.controller.select_data_source(mode)
-        except (RuntimeError, ValueError, TypeError) as error:
-            self.controller.state.report_event(EventSeverity.WARNING, str(error))
-            current_index = self.source_combo.findData(self.controller.state.snapshot.data_source)
-            if current_index >= 0:
-                self.source_combo.blockSignals(True)
-                self.source_combo.setCurrentIndex(current_index)
-                self.source_combo.blockSignals(False)
 
     def _refresh_ports(self) -> None:
         selected_port = self.port_combo.currentData()
@@ -282,17 +254,15 @@ class LivePage(QWidget):
                 "Select an available serial port before connecting.",
             )
             return
+        if self.controller.state.snapshot.data_source != DataSourceMode.REAL:
+            self.controller.select_data_source(DataSourceMode.REAL)
         self.controller.connect_real(port)
 
     def _update_source_controls(self, snapshot: ApplicationSnapshot) -> None:
-        is_real = snapshot.data_source == DataSourceMode.REAL
         is_idle = snapshot.connection in (ConnectionState.DISCONNECTED, ConnectionState.ERROR)
-        self.source_combo.setEnabled(is_idle)
-        self.port_combo.setEnabled(is_real and is_idle)
-        self.refresh_ports_button.setEnabled(is_real and is_idle)
-        self.connect_button.setEnabled(
-            is_real and is_idle and self.port_combo.currentData() is not None
-        )
+        self.port_combo.setEnabled(is_idle)
+        self.refresh_ports_button.setEnabled(is_idle)
+        self.connect_button.setEnabled(is_idle and self.port_combo.currentData() is not None)
         self.disconnect_button.setEnabled(
             snapshot.connection in (ConnectionState.CONNECTING, ConnectionState.CONNECTED)
             and not self.controller.maintenance.is_homing
@@ -312,12 +282,6 @@ class LivePage(QWidget):
             self.position_value[1].setText("--")
         self._last_displayed_source = snapshot.data_source
         self._last_connection_state = snapshot.connection
-
-        mode_index = self.source_combo.findData(snapshot.data_source)
-        if mode_index >= 0 and self.source_combo.currentIndex() != mode_index:
-            self.source_combo.blockSignals(True)
-            self.source_combo.setCurrentIndex(mode_index)
-            self.source_combo.blockSignals(False)
 
         if snapshot.latest_sample is not None:
             if snapshot.latest_sample.angle_deg is not None:

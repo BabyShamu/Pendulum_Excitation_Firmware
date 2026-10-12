@@ -6,6 +6,7 @@ from pathlib import Path
 
 from pendulum_workbench.domain.models import DataSourceMode
 from pendulum_workbench.experiments.repository import (
+    LEGACY_TELEMETRY_COLUMNS,
     TELEMETRY_COLUMNS,
     ExperimentRepository,
 )
@@ -72,7 +73,7 @@ class ExperimentRepositoryTests(unittest.TestCase):
                 writer = csv.writer(telemetry_file)
                 writer.writerow(TELEMETRY_COLUMNS)
                 writer.writerow(
-                    [1, 42, 0.02, 0.1, 1.25, -3.5, "valid", "2026-10-09T00:00:00+00:00"]
+                    [1, 0.02, -3.5, 1.25, 42, 0.1, "2026-10-09T00:00:00+00:00", "valid"]
                 )
 
             reopened = repository.load(session.directory)
@@ -83,8 +84,9 @@ class ExperimentRepositoryTests(unittest.TestCase):
             sample = reopened.telemetry[0]
             self.assertEqual(sample.sample_index, 1)
             self.assertEqual(sample.rx_line_index, 42)
-            self.assertEqual(sample.elapsed_s, 0.1)
+            self.assertEqual(sample.elapsed_s, 0.02)
             self.assertEqual(sample.device_time_s, 0.02)
+            self.assertEqual(sample.received_elapsed_s, 0.1)
             self.assertEqual(sample.position_mm, 1.25)
             self.assertEqual(sample.angle_deg, -3.5)
             self.assertEqual(sample.source, "saved")
@@ -103,7 +105,7 @@ class ExperimentRepositoryTests(unittest.TestCase):
                 "a", encoding="utf-8", newline=""
             ) as telemetry_file:
                 csv.writer(telemetry_file, lineterminator="\n").writerow(
-                    [1, "", "", 0.1, 2.0, -1.0, "valid", "2026-10-09T00:00:00+00:00"]
+                    [1, 0.1, -1.0, 2.0, "", "", "2026-10-09T00:00:00+00:00", "valid"]
                 )
             with (session.directory / "serial_capture.log").open("a", encoding="utf-8") as raw_file:
                 raw_file.write('{"rx_line_index":1}\n')
@@ -114,6 +116,30 @@ class ExperimentRepositoryTests(unittest.TestCase):
             self.assertEqual(reopened.manifest["sample_count"], 1)
             self.assertEqual(reopened.manifest["raw_line_count"], 1)
             self.assertIn("ended before recording was finalized", reopened.manifest["interruption_reason"])
+
+    def test_loads_legacy_schema_v2_telemetry_columns(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            repository = ExperimentRepository(Path(temporary_directory))
+            session = repository.create(
+                name="legacy schema",
+                notes="",
+                data_source=DataSourceMode.REAL,
+                serial_port="COM6",
+            )
+            with (session.directory / "telemetry.csv").open(
+                "w", encoding="utf-8", newline=""
+            ) as telemetry_file:
+                writer = csv.writer(telemetry_file)
+                writer.writerow(LEGACY_TELEMETRY_COLUMNS)
+                writer.writerow(
+                    [3, 14, 0.75, 1.2, 2.5, -1.0, "valid", "2026-10-09T00:00:00+00:00"]
+                )
+
+            loaded = repository.load(session.directory)
+
+            self.assertEqual(loaded.telemetry[0].sample_index, 3)
+            self.assertEqual(loaded.telemetry[0].elapsed_s, 0.75)
+            self.assertEqual(loaded.telemetry[0].received_elapsed_s, 1.2)
 
 
 if __name__ == "__main__":
