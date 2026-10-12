@@ -6,8 +6,6 @@ from pendulum_workbench.application.firmware_commands import FirmwareCommandServ
 from pendulum_workbench.application.maintenance_service import MaintenanceService
 from pendulum_workbench.application.experiment_recording import ExperimentRecordingService
 from pendulum_workbench.application.experiment_run import ExperimentRunService
-from pendulum_workbench.application.experiment_run import ExperimentRunService
-from pendulum_workbench.application.experiment_run import ExperimentRunService
 from pendulum_workbench.application.state import ApplicationStateModel
 from pendulum_workbench.domain.models import (
     ConnectionState,
@@ -52,18 +50,6 @@ class WorkbenchController(QObject):
             self.state,
             self.serial_client,
             self.firmware_commands,
-        )
-        self.experiment_run = ExperimentRunService(
-            self.state,
-            self.experiment_recorder,
-            self.firmware_commands,
-            self.maintenance,
-        )
-        self.experiment_run = ExperimentRunService(
-            self.state,
-            self.experiment_recorder,
-            self.firmware_commands,
-            self.maintenance,
         )
         self.experiment_run = ExperimentRunService(
             self.state,
