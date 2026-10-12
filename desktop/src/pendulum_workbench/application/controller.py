@@ -53,7 +53,8 @@ class WorkbenchController(QObject):
     def available_ports() -> list[SerialPortInfo]:
         return SerialTelemetryClient.available_ports()
 
-    def select_data_source(self, mode: DataSourceMode) -> None:
+    def select_data_source(self, mode: DataSourceMode | str) -> None:
+        mode = self._coerce_data_source_mode(mode)
         if self.state.snapshot.connection in (
             ConnectionState.CONNECTING,
             ConnectionState.CONNECTED,
@@ -79,6 +80,18 @@ class WorkbenchController(QObject):
             self.state.set_data_source(DataSourceMode.SAVED)
             self.state.set_saved_telemetry(self._loaded_experiment.telemetry)
             self.experiment_loaded.emit(self._loaded_experiment)
+
+    @staticmethod
+    def _coerce_data_source_mode(mode: DataSourceMode | str) -> DataSourceMode:
+        if isinstance(mode, DataSourceMode):
+            return mode
+        if isinstance(mode, str):
+            try:
+                return DataSourceMode(mode)
+            except ValueError as error:
+                allowed = ", ".join(item.value for item in DataSourceMode)
+                raise ValueError(f"Unknown data source {mode!r}; expected one of: {allowed}") from error
+        raise TypeError(f"data source must be DataSourceMode or str, got {type(mode).__name__}")
 
     def start_mock(self) -> None:
         if self.state.snapshot.data_source != DataSourceMode.MOCK:

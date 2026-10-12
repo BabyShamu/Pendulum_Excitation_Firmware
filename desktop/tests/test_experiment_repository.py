@@ -12,6 +12,18 @@ from pendulum_workbench.experiments.repository import (
 
 
 class ExperimentRepositoryTests(unittest.TestCase):
+    def test_repository_rejects_string_data_source_at_public_boundary(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            repository = ExperimentRepository(Path(temporary_directory))
+
+            with self.assertRaisesRegex(TypeError, "data_source must be DataSourceMode"):
+                repository.create(
+                    name="invalid type",
+                    notes="",
+                    data_source="Real STM32",
+                    serial_port="COM6",
+                )
+
     def test_creates_unique_experiment_folders_with_explicit_unknown_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             repository = ExperimentRepository(Path(temporary_directory))

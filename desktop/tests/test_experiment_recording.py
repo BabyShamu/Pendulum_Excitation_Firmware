@@ -10,6 +10,7 @@ from pathlib import Path
 from PySide6.QtWidgets import QApplication
 
 from pendulum_workbench.application.experiment_recording import ExperimentRecordingService
+from pendulum_workbench.application.experiment_recording import RecordingRequest
 from pendulum_workbench.application.state import ApplicationStateModel
 from pendulum_workbench.domain.models import (
     ConnectionState,
@@ -28,6 +29,16 @@ class ExperimentRecordingTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.qt_app = QApplication.instance() or QApplication([])
+
+    def test_recording_request_rejects_raw_string_data_source(self) -> None:
+        with self.assertRaisesRegex(TypeError, "data_source must be DataSourceMode"):
+            RecordingRequest(
+                experiment_id="test",
+                name="test",
+                notes="",
+                data_source="Real STM32",
+                serial_port="COM6",
+            )
 
     def wait_for(self, predicate, timeout_s: float = 2.0) -> bool:
         deadline = time.monotonic() + timeout_s

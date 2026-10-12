@@ -59,6 +59,11 @@ class ExperimentRepository:
         created_at: datetime | None = None,
         experiment_id: str | None = None,
     ) -> ExperimentSession:
+        if not isinstance(data_source, DataSourceMode):
+            raise TypeError(
+                "ExperimentRepository.create data_source must be DataSourceMode, "
+                f"got {type(data_source).__name__}"
+            )
         experiment_id = experiment_id or str(uuid4())
         directory = self.root / experiment_id
         directory.mkdir(parents=True, exist_ok=False)

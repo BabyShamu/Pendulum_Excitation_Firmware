@@ -38,6 +38,13 @@ class RecordingRequest:
     data_source: DataSourceMode
     serial_port: str | None
 
+    def __post_init__(self) -> None:
+        if not isinstance(self.data_source, DataSourceMode):
+            raise TypeError(
+                "RecordingRequest.data_source must be DataSourceMode, "
+                f"got {type(self.data_source).__name__}"
+            )
+
 
 class ExperimentRecordingService(QObject):
     recording_requested = Signal(str, str)
@@ -63,6 +70,7 @@ class ExperimentRecordingService(QObject):
         self._queue: queue.Queue[tuple[Any, ...]] = queue.Queue()
         self._pending_request: RecordingRequest | None = None
         self._active_session: ExperimentSession | None = None
+        self._last_completed_session: ExperimentSession | None = None
         self._active_source: DataSourceMode | None = None
         self._writer_failed = False
         self._stopping = False
@@ -96,6 +104,10 @@ class ExperimentRecordingService(QObject):
     def active_session(self) -> ExperimentSession | None:
         return self._active_session
 
+    @property
+    def last_completed_session(self) -> ExperimentSession | None:
+        return self._last_completed_session
+
     def start_recording(self, name: str = "", notes: str = "") -> str:
         if self._shutdown:
             raise RuntimeError("The recording service has shut down")
@@ -119,6 +131,7 @@ class ExperimentRecordingService(QObject):
             data_source=snapshot.data_source,
             serial_port=snapshot.real_port,
         )
+        self._last_completed_session = None
         self._pending_request = request
         self._active_source = snapshot.data_source
         if not self._thread_started:
@@ -257,6 +270,7 @@ class ExperimentRecordingService(QObject):
             self.state.report_event(EventSeverity.ERROR, error)
             self.recording_failed.emit(session.experiment_id, error)
             return
+        self._last_completed_session = session
         self.state.set_recording(
             RecordingState.INTERRUPTED
             if completion_status == "INTERRUPTED"
@@ -392,12 +406,17 @@ class ExperimentRecordingService(QObject):
                             telemetry_file.close()
                             telemetry_file = None
                             telemetry_writer = None
-                        self.repository.finalize(
+                        finalized_manifest = self.repository.finalize(
                             session,
                             completion_status=completion_status,
                             sample_count=sample_count,
                             raw_line_count=raw_line_count,
                             interruption_reason=interruption_reason,
+                        )
+                        session = ExperimentSession(
+                            session.experiment_id,
+                            session.directory,
+                            finalized_manifest,
                         )
                     except Exception as finalize_error:
                         error = (

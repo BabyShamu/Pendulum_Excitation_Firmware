@@ -1,20 +1,15 @@
-from collections import deque
-
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QAction, QColor
 from PySide6.QtWidgets import (
-    QComboBox,
+    QButtonGroup,
     QFrame,
-    QFileDialog,
+    QGraphicsDropShadowEffect,
     QHBoxLayout,
     QLabel,
-    QLineEdit,
-    QListWidget,
     QMainWindow,
     QMessageBox,
     QPushButton,
-    QGraphicsDropShadowEffect,
-    QSizePolicy,
+    QStackedWidget,
     QStyle,
     QVBoxLayout,
     QWidget,
@@ -22,31 +17,23 @@ from PySide6.QtWidgets import (
 
 from pendulum_workbench.application.controller import WorkbenchController
 from pendulum_workbench.domain.models import (
-    AppEvent,
     ApplicationSnapshot,
     ConnectionState,
     DataSourceMode,
-    EventSeverity,
     MotionState,
     RecordingState,
-    TelemetrySample,
 )
-from pendulum_workbench.domain.models import HomeStatus
 from pendulum_workbench.experiments.repository import LoadedExperiment
-from pendulum_workbench.ui.home_status_control import HomeStatusControl
-from pendulum_workbench.ui.hardware_status_card import HardwareStatusCard
+from pendulum_workbench.ui.pages.experiment_page import ExperimentPage
+from pendulum_workbench.ui.pages.live_page import LivePage
 from pendulum_workbench.ui.status_indicator import IndicatorTone, StatusChip
-from pendulum_workbench.ui.trend_plot import TrendPlot
 
 
 class MainWindow(QMainWindow):
     def __init__(self, controller: WorkbenchController) -> None:
         super().__init__()
         self.controller = controller
-        self._samples: deque[TelemetrySample] = deque(maxlen=180)
-        self._last_displayed_source: DataSourceMode | None = None
-        self._last_connection_state: ConnectionState | None = None
-        self._loaded_experiment: LoadedExperiment | None = None
+        self._saved_experiment_name: str | None = None
         self.setWindowTitle("Pendulum Workbench")
         self.resize(1220, 860)
         self.setMinimumSize(1000, 760)
@@ -57,24 +44,31 @@ class MainWindow(QMainWindow):
             QWidget#centralContent { background: #e9eeeb; }
             QLabel { background: transparent; }
             QLabel#eyebrow { color: #287b68; font-size: 10px; font-weight: 700; }
-            QLabel#title { color: #203238; font-size: 27px; font-weight: 700; }
+            QLabel#title { color: #203238; font-size: 25px; font-weight: 700; }
             QLabel#subtle { color: #71807d; font-size: 11px; }
-            QFrame#surface { background: #ffffff; border: 1px solid #d8e1dc; border-radius: 11px; }
-            QFrame#hardwareInfoCard { background: #f7f9f7; border: 1px solid #e0e7e2; border-radius: 6px; }
             QLabel#sectionTitle { color: #50615d; font-size: 10px; font-weight: 700; }
+            QFrame#hardwareInfoCard { background: #f7f9f7; border: 1px solid #e0e7e2; border-radius: 6px; }
             QLabel#hardwareInfoKey { color: #6b7973; font-size: 8px; font-weight: 700; }
             QLabel#hardwareInfoValue { color: #33463d; font-size: 10px; font-weight: 600; }
             QLabel#metricValue { color: #203238; font-size: 23px; font-weight: 600; }
             QLabel#metricUnit { color: #76837f; font-size: 10px; }
+            QLabel#pathValue, QLabel#experimentPathValue { color: #596c67; font-family: Consolas; font-size: 9px; }
+            QLabel#summaryKey { color: #71807d; font-size: 9px; font-weight: 700; }
+            QLabel#summaryValue { color: #33463d; font-size: 10px; }
+            QLabel#summaryPath { color: #596c67; font-family: Consolas; font-size: 9px; }
             QLabel#sourceBadge { color: #a8512c; background: #fff0e7; padding: 6px 9px; font-weight: 700; }
-            QComboBox { background: #ffffff; border: 1px solid #ccd8d1; border-radius: 7px; padding: 7px 9px; min-width: 130px; }
+            QComboBox { background: #ffffff; border: 1px solid #ccd8d1; border-radius: 7px; padding: 7px 9px; min-width: 110px; }
             QLineEdit { background: #ffffff; border: 1px solid #d5dfd9; border-radius: 6px; padding: 7px 9px; }
             QLineEdit:focus { border-color: #8ab29a; }
-            QLabel#pathValue { color: #596c67; font-family: Consolas; font-size: 9px; }
-            QPushButton { background: #f4f7f5; color: #28463b; border: 1px solid #cbd8d0; border-radius: 7px; padding: 8px 12px; font-weight: 600; }
+            QPushButton { background: #f4f7f5; color: #28463b; border: 1px solid #cbd8d0; border-radius: 7px; padding: 8px 11px; font-weight: 600; }
             QPushButton:hover { background: #eaf2ed; border-color: #aac2b4; }
             QPushButton:pressed { background: #e1ebe4; }
             QPushButton:disabled { background: #f1f3f2; color: #8a9691; border-color: #dce2df; }
+            QFrame#surface { background: #ffffff; border: 1px solid #d8e1dc; border-radius: 9px; }
+            QFrame#navRail { background: #f3f6f4; border: 1px solid #d8e1dc; border-radius: 8px; }
+            QPushButton#navigationButton { text-align: left; background: transparent; border: 0; border-radius: 6px; padding: 10px 12px; color: #50615d; }
+            QPushButton#navigationButton:hover { background: #e7eeea; }
+            QPushButton#navigationButton:checked { background: #dcebe2; color: #205f49; font-weight: 700; }
             QMenuBar { background: transparent; color: #344a41; }
             QMenuBar::item { background: transparent; padding: 5px 9px; border-radius: 5px; }
             QMenuBar::item:selected { background: #dfe9e3; }
@@ -88,268 +82,96 @@ class MainWindow(QMainWindow):
         root = QWidget()
         root.setObjectName("centralContent")
         layout = QVBoxLayout(root)
-        layout.setContentsMargins(24, 20, 24, 20)
-        layout.setSpacing(14)
+        layout.setContentsMargins(20, 16, 20, 16)
+        layout.setSpacing(12)
         self.setCentralWidget(root)
 
         header = QHBoxLayout()
-        titles = QVBoxLayout()
-        eyebrow = QLabel("INSTRUMENTATION  /  MILESTONE 3")
+        title_group = QVBoxLayout()
+        eyebrow = QLabel("EXPERIMENT WORKBENCH")
         eyebrow.setObjectName("eyebrow")
         title = QLabel("Pendulum Workbench")
         title.setObjectName("title")
-        subtitle = QLabel("Live telemetry · monitoring only · no motion controls")
+        subtitle = QLabel("Live instrumentation and experiment records")
         subtitle.setObjectName("subtle")
-        titles.addWidget(eyebrow)
-        titles.addWidget(title)
-        titles.addWidget(subtitle)
-        header.addLayout(titles)
+        title_group.addWidget(eyebrow)
+        title_group.addWidget(title)
+        title_group.addWidget(subtitle)
+        header.addLayout(title_group)
         header.addStretch(1)
-        self.source_badge = QLabel("MOCK DATA · PAUSED")
+        self.source_badge = QLabel()
         self.source_badge.setObjectName("sourceBadge")
         self.source_badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.source_badge.setAccessibleName("Selected telemetry source and status")
+        self.source_badge.setAccessibleName("Selected telemetry source and device state")
         header.addWidget(self.source_badge, alignment=Qt.AlignmentFlag.AlignTop)
         layout.addLayout(header)
 
-        self.connection_panel = QFrame()
-        self.connection_panel.setObjectName("surface")
-        connection_layout = QHBoxLayout(self.connection_panel)
-        connection_layout.setContentsMargins(14, 10, 14, 10)
-        self._apply_card_depth(self.connection_panel)
-        connection_layout.setSpacing(8)
-        source_label = QLabel("DATA SOURCE")
-        source_label.setObjectName("sectionTitle")
-        connection_layout.addWidget(source_label)
-        self.source_combo = QComboBox()
-        self.source_combo.setObjectName("dataSourceCombo")
-        self.source_combo.addItem("Mock telemetry", DataSourceMode.MOCK)
-        self.source_combo.addItem("Real STM32", DataSourceMode.REAL)
-        self.source_combo.addItem("Saved experiment", DataSourceMode.SAVED)
-        self.source_combo.currentIndexChanged.connect(self._source_selection_changed)
-        connection_layout.addWidget(self.source_combo)
-        self.port_combo = QComboBox()
-        self.port_combo.setObjectName("serialPortCombo")
-        self.port_combo.setMinimumWidth(220)
-        connection_layout.addWidget(self.port_combo, 1)
-        self.refresh_ports_button = QPushButton("Refresh ports")
-        self.refresh_ports_button.setObjectName("refreshPortsButton")
-        self.refresh_ports_button.setIcon(
-            self.style().standardIcon(QStyle.StandardPixmap.SP_BrowserReload)
+        workspace = QHBoxLayout()
+        workspace.setSpacing(12)
+        navigation = QFrame()
+        navigation.setObjectName("navRail")
+        navigation.setFixedWidth(148)
+        nav_layout = QVBoxLayout(navigation)
+        nav_layout.setContentsMargins(8, 12, 8, 10)
+        nav_layout.setSpacing(5)
+        nav_heading = QLabel("WORKSPACE")
+        nav_heading.setObjectName("sectionTitle")
+        nav_heading.setContentsMargins(8, 2, 0, 8)
+        nav_layout.addWidget(nav_heading)
+        self.navigation_group = QButtonGroup(self)
+        self.navigation_group.setExclusive(True)
+        self.live_navigation_button = self._navigation_button("Live", "liveNavigationButton", 0)
+        self.experiment_navigation_button = self._navigation_button(
+            "Experiment", "experimentNavigationButton", 1
         )
-        self.refresh_ports_button.clicked.connect(self._refresh_ports)
-        connection_layout.addWidget(self.refresh_ports_button)
-        self.connect_button = QPushButton("Connect")
-        self.connect_button.setObjectName("connectSerialButton")
-        self.connect_button.setIcon(
-            self.style().standardIcon(QStyle.StandardPixmap.SP_DialogApplyButton)
-        )
-        self.connect_button.clicked.connect(self._connect_real)
-        connection_layout.addWidget(self.connect_button)
-        self.disconnect_button = QPushButton("Disconnect")
-        self.disconnect_button.setObjectName("disconnectSerialButton")
-        self.disconnect_button.setIcon(
-            self.style().standardIcon(QStyle.StandardPixmap.SP_DialogCancelButton)
-        )
-        self.disconnect_button.clicked.connect(self.controller.disconnect_real)
-        connection_layout.addWidget(self.disconnect_button)
-        layout.addWidget(self.connection_panel)
+        for index, button in enumerate(
+            (self.live_navigation_button, self.experiment_navigation_button)
+        ):
+            self.navigation_group.addButton(button, index)
+            button.clicked.connect(lambda _checked=False, page=index: self._show_page(page))
+            nav_layout.addWidget(button)
+        nav_layout.addStretch(1)
+        workspace.addWidget(navigation)
 
-        self.capture_path_label = QLabel("Raw serial capture: not connected")
-        self.capture_path_label.setObjectName("pathValue")
-        self.capture_path_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        layout.addWidget(self.capture_path_label)
+        self.page_stack = QStackedWidget()
+        self.page_stack.setObjectName("pageStack")
+        self.live_page = LivePage(controller)
+        self.experiment_page = ExperimentPage(controller)
+        self.page_stack.addWidget(self.live_page)
+        self.page_stack.addWidget(self.experiment_page)
+        workspace.addWidget(self.page_stack, 1)
+        layout.addLayout(workspace, 1)
 
-        operational_row = QHBoxLayout()
-        operational_row.setSpacing(14)
-
-        hardware_panel = QFrame()
-        self.hardware_panel = hardware_panel
-        hardware_panel.setObjectName("surface")
-        self._apply_card_depth(hardware_panel)
-        hardware_panel.setMinimumWidth(420)
-        hardware_panel.setMinimumHeight(232)
-        hardware_layout = QVBoxLayout(hardware_panel)
-        hardware_layout.setContentsMargins(12, 10, 12, 10)
-        hardware_layout.setSpacing(8)
-        hardware_heading = QLabel("HARDWARE STATUS")
-        hardware_heading.setObjectName("sectionTitle")
-        hardware_layout.addWidget(hardware_heading)
-
-        self.home_status_control = HomeStatusControl()
-        hardware_layout.addWidget(self.home_status_control)
-
-        hardware_states = QHBoxLayout()
-        hardware_states.setSpacing(8)
-        self.upper_limit_value = HardwareStatusCard("Upper Limit")
-        self.lower_limit_value = HardwareStatusCard("Lower Limit")
-        self.fault_value = HardwareStatusCard("Fault")
-        for status_card in (self.upper_limit_value, self.lower_limit_value, self.fault_value):
-            hardware_states.addWidget(status_card, 1)
-        hardware_layout.addLayout(hardware_states)
-        hardware_layout.addSpacing(8)
-
-        hardware_text_row = QHBoxLayout()
-        hardware_text_row.setSpacing(8)
-        self.active_mode_value = self._info_card("ACTIVE MODE", "Unknown")
-        self.last_telemetry_value = self._info_card("LAST TELEMETRY", "No samples")
-        hardware_text_row.addWidget(self.active_mode_value[0], 1)
-        hardware_text_row.addWidget(self.last_telemetry_value[0], 1)
-        hardware_layout.addLayout(hardware_text_row)
-        operational_row.addWidget(hardware_panel, 3)
-
-        experiment_panel = QFrame()
-        experiment_panel.setObjectName("surface")
-        self._apply_card_depth(experiment_panel)
-        experiment_panel.setMinimumHeight(232)
-        experiment_layout = QVBoxLayout(experiment_panel)
-        experiment_layout.setContentsMargins(20, 16, 20, 16)
-        experiment_layout.setSpacing(14)
-        experiment_heading = QLabel("EXPERIMENT CONTROLS")
-        experiment_heading.setObjectName("sectionTitle")
-        experiment_layout.addWidget(experiment_heading)
-
-        experiment_fields = QHBoxLayout()
-        experiment_fields.setSpacing(12)
-        name_group = QVBoxLayout()
-        name_label = QLabel("EXPERIMENT NAME")
-        name_label.setObjectName("sectionTitle")
-        self.experiment_name_input = QLineEdit()
-        self.experiment_name_input.setPlaceholderText("Optional run name")
-        name_group.addWidget(name_label)
-        name_group.addWidget(self.experiment_name_input)
-        notes_group = QVBoxLayout()
-        notes_label = QLabel("NOTES")
-        notes_label.setObjectName("sectionTitle")
-        self.experiment_notes_input = QLineEdit()
-        self.experiment_notes_input.setPlaceholderText("Operator notes (optional)")
-        notes_group.addWidget(notes_label)
-        notes_group.addWidget(self.experiment_notes_input)
-        experiment_fields.addLayout(name_group, 1)
-        experiment_fields.addLayout(notes_group, 2)
-        experiment_layout.addLayout(experiment_fields)
-
-        recording_controls = QHBoxLayout()
-        recording_controls.setSpacing(8)
-        self.start_recording_button = QPushButton("Start Recording")
-        self.start_recording_button.setObjectName("startRecordingButton")
-        self.start_recording_button.clicked.connect(self._start_recording)
-        recording_controls.addWidget(self.start_recording_button)
-        self.stop_recording_button = QPushButton("Stop Recording")
-        self.stop_recording_button.setObjectName("stopRecordingButton")
-        self.stop_recording_button.clicked.connect(self._stop_recording)
-        recording_controls.addWidget(self.stop_recording_button)
-        self.experiment_recording_status = QLabel("Recording is idle")
-        self.experiment_recording_status.setObjectName("subtle")
-        recording_controls.addWidget(self.experiment_recording_status, 1)
-        experiment_layout.addLayout(recording_controls)
-        operational_row.addWidget(experiment_panel, 4)
-        layout.addLayout(operational_row)
-
-        metrics = QHBoxLayout()
-        metrics.setSpacing(12)
-        self.angle_value = self._metric("PENDULUM ANGLE", "deg")
-        self.position_value = self._metric("PIVOT POSITION", "mm")
-        self.samples_value = self._metric("SAMPLES RECEIVED", "samples")
-        for metric in (self.angle_value, self.position_value, self.samples_value):
-            self._apply_card_depth(metric[0])
-            metrics.addWidget(metric[0], 1)
-        layout.addLayout(metrics)
-
-        content = QHBoxLayout()
-        content.setSpacing(14)
-        charts = QFrame()
-        charts.setObjectName("surface")
-        self._apply_card_depth(charts)
-        charts_layout = QVBoxLayout(charts)
-        charts_layout.setContentsMargins(12, 8, 12, 8)
-        charts_layout.setSpacing(2)
-        self.angle_plot = TrendPlot("Pendulum angle", "deg", "#277a68")
-        self.position_plot = TrendPlot("Pivot position", "mm", "#d36b42")
-        charts_layout.addWidget(self.angle_plot, 1)
-        charts_layout.addWidget(self.position_plot, 1)
-        content.addWidget(charts, 3)
-
-        events_panel = QFrame()
-        events_panel.setObjectName("surface")
-        self._apply_card_depth(events_panel)
-        events_layout = QVBoxLayout(events_panel)
-        events_layout.setContentsMargins(14, 12, 14, 12)
-        events_layout.setSpacing(8)
-        events_heading = QLabel("EVENTS & STATUS")
-        events_heading.setObjectName("sectionTitle")
-        events_hint = QLabel("Application messages and source state")
-        events_hint.setObjectName("subtle")
-        self.event_list = QListWidget()
-        self.event_list.setObjectName("eventList")
-        events_layout.addWidget(events_heading)
-        events_layout.addWidget(events_hint)
-        events_layout.addWidget(self.event_list, 1)
-        content.addWidget(events_panel, 2)
-        layout.addLayout(content, 1)
-
-        state_panel = QFrame()
-        state_panel.setObjectName("surface")
-        self._apply_card_depth(state_panel)
-        state_layout = QHBoxLayout(state_panel)
-        state_layout.setContentsMargins(16, 8, 16, 8)
-        state_layout.setSpacing(28)
+        status_panel = QFrame()
+        status_panel.setObjectName("surface")
+        self._apply_card_depth(status_panel)
+        status_layout = QHBoxLayout(status_panel)
+        status_layout.setContentsMargins(14, 7, 14, 7)
+        status_layout.setSpacing(24)
         self.connection_value = StatusChip("Device", "Disconnected", IndicatorTone.NORMAL)
         self.motion_value = StatusChip("Motion")
         self.recording_value = StatusChip("Recording", "Off", IndicatorTone.NORMAL)
-        state_layout.addWidget(self.connection_value)
-        state_layout.addWidget(self.motion_value)
-        state_layout.addWidget(self.recording_value)
-        state_layout.addStretch(1)
-        layout.addWidget(state_panel)
+        status_layout.addWidget(self.connection_value)
+        status_layout.addWidget(self.motion_value)
+        status_layout.addWidget(self.recording_value)
+        status_layout.addStretch(1)
+        layout.addWidget(status_panel)
 
-        self.controller.state.snapshot_changed.connect(self._update_snapshot)
-        self.controller.state.telemetry_received.connect(self._append_sample)
-        self.controller.state.event_added.connect(self._append_event)
-        self.controller.experiment_loaded.connect(self._show_saved_experiment)
-        self.controller.experiment_recorder.recording_requested.connect(self._on_recording_requested)
-        self.controller.experiment_recorder.recording_started.connect(self._on_recording_started)
-        self.controller.experiment_recorder.recording_finished.connect(self._on_recording_finished)
-        self.controller.experiment_recorder.recording_failed.connect(self._on_recording_failed)
-        self._update_snapshot(self.controller.state.snapshot)
-        self._refresh_ports()
+        self.controller.state.snapshot_changed.connect(self._update_global_status)
+        self.controller.experiment_loaded.connect(self._on_experiment_loaded)
+        self._update_global_status(self.controller.state.snapshot)
+        self._show_page(0)
         self._create_menu_bar()
 
     @staticmethod
-    def _info_card(name: str, initial: str) -> tuple[QFrame, QLabel]:
-        card = QFrame()
-        card.setObjectName("hardwareInfoCard")
-        card.setMinimumHeight(36)
-        card.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
-        layout = QHBoxLayout(card)
-        layout.setContentsMargins(9, 4, 9, 4)
-        layout.setSpacing(6)
-        label = QLabel(name)
-        label.setObjectName("hardwareInfoKey")
-        value = QLabel(initial)
-        value.setObjectName("hardwareInfoValue")
-        value.setWordWrap(False)
-        layout.addWidget(label)
-        layout.addWidget(value, 1)
-        return card, value
-
-    @staticmethod
-    def _metric(name: str, unit: str) -> tuple[QFrame, QLabel]:
-        surface = QFrame()
-        surface.setObjectName("surface")
-        column = QVBoxLayout(surface)
-        column.setContentsMargins(14, 10, 14, 10)
-        column.setSpacing(3)
-        label = QLabel(name)
-        label.setObjectName("sectionTitle")
-        value = QLabel("--")
-        value.setObjectName("metricValue")
-        units = QLabel(unit)
-        units.setObjectName("metricUnit")
-        column.addWidget(label)
-        column.addWidget(value)
-        column.addWidget(units)
-        return surface, value
+    def _navigation_button(text: str, object_name: str, index: int) -> QPushButton:
+        button = QPushButton(text)
+        button.setObjectName(object_name)
+        button.setProperty("pageIndex", index)
+        button.setCheckable(True)
+        button.setAccessibleName(f"Show {text} page")
+        button.setAccessibleDescription(f"Navigate to the {text.lower()} workspace page")
+        return button
 
     @staticmethod
     def _apply_card_depth(card: QFrame) -> None:
@@ -359,13 +181,21 @@ class MainWindow(QMainWindow):
         shadow.setColor(QColor(36, 56, 47, 24))
         card.setGraphicsEffect(shadow)
 
+    def _show_page(self, index: int) -> None:
+        if index < 0 or index >= self.page_stack.count():
+            return
+        self.page_stack.setCurrentIndex(index)
+        button = self.navigation_group.button(index)
+        if button is not None:
+            button.setChecked(True)
+
     def _create_menu_bar(self) -> None:
         file_menu = self.menuBar().addMenu("File")
         self.open_experiment_action = QAction("Open Experiment", self)
         self.open_experiment_action.setIcon(
             self.style().standardIcon(QStyle.StandardPixmap.SP_FileIcon)
         )
-        self.open_experiment_action.triggered.connect(self._open_experiment)
+        self.open_experiment_action.triggered.connect(self.experiment_page.open_experiment_dialog)
         file_menu.addAction(self.open_experiment_action)
         file_menu.addSeparator()
         self.exit_action = QAction("Exit", self)
@@ -380,13 +210,13 @@ class MainWindow(QMainWindow):
         self.refresh_ports_action.setIcon(
             self.style().standardIcon(QStyle.StandardPixmap.SP_BrowserReload)
         )
-        self.refresh_ports_action.triggered.connect(self._refresh_ports)
+        self.refresh_ports_action.triggered.connect(self.live_page.refresh_ports)
         device_menu.addAction(self.refresh_ports_action)
         self.connect_action = QAction("Connect", self)
         self.connect_action.setIcon(
             self.style().standardIcon(QStyle.StandardPixmap.SP_DialogApplyButton)
         )
-        self.connect_action.triggered.connect(self._connect_from_menu)
+        self.connect_action.triggered.connect(self.live_page.connect_from_menu)
         device_menu.addAction(self.connect_action)
         self.disconnect_action = QAction("Disconnect", self)
         self.disconnect_action.setIcon(
@@ -400,7 +230,7 @@ class MainWindow(QMainWindow):
         self.clear_events_action.setIcon(
             self.style().standardIcon(QStyle.StandardPixmap.SP_DialogResetButton)
         )
-        self.clear_events_action.triggered.connect(self.event_list.clear)
+        self.clear_events_action.triggered.connect(self.live_page.clear_events)
         view_menu.addAction(self.clear_events_action)
 
         help_menu = self.menuBar().addMenu("Help")
@@ -411,193 +241,7 @@ class MainWindow(QMainWindow):
         self.about_action.triggered.connect(self._show_about)
         help_menu.addAction(self.about_action)
 
-    def _open_experiment(self) -> None:
-        source, _ = QFileDialog.getOpenFileName(
-            self,
-            "Open Experiment Manifest",
-            str(self.controller.experiment_recorder.repository.root),
-            "Experiment manifest (manifest.json)",
-        )
-        if not source:
-            return
-        try:
-            self.controller.open_experiment(source)
-        except (OSError, ValueError, RuntimeError, KeyError) as error:
-            self.controller.state.report_event(
-                EventSeverity.ERROR,
-                f"Could not open experiment: {error}",
-            )
-
-    def _connect_from_menu(self) -> None:
-        if self.controller.state.snapshot.data_source != DataSourceMode.REAL:
-            real_index = self.source_combo.findData(DataSourceMode.REAL)
-            if real_index >= 0:
-                self.source_combo.setCurrentIndex(real_index)
-        self._connect_real()
-
-    def _show_about(self) -> None:
-        QMessageBox.about(
-            self,
-            "About Pendulum Workbench",
-            "Pendulum Workbench\n\n"
-            "Milestone 3 provides live telemetry and read-only hardware status. "
-            "Experiment motion commands are not available.",
-        )
-
-    def _source_selection_changed(self, index: int) -> None:
-        mode = self.source_combo.itemData(index)
-        if mode is None:
-            return
-        try:
-            self.controller.select_data_source(mode)
-        except RuntimeError as error:
-            self.controller.state.report_event(EventSeverity.WARNING, str(error))
-            current_index = self.source_combo.findData(self.controller.state.snapshot.data_source)
-            if current_index >= 0:
-                self.source_combo.blockSignals(True)
-                self.source_combo.setCurrentIndex(current_index)
-                self.source_combo.blockSignals(False)
-
-    def _start_recording(self) -> None:
-        try:
-            experiment_id = self.controller.experiment_recorder.start_recording(
-                self.experiment_name_input.text(),
-                self.experiment_notes_input.text(),
-            )
-        except (OSError, RuntimeError, TimeoutError, ValueError) as error:
-            self.controller.state.report_event(EventSeverity.ERROR, str(error))
-            return
-
-    def _on_recording_requested(self, experiment_id: str, directory: str) -> None:
-        self.experiment_recording_status.setText(f"Preparing experiment {experiment_id}...")
-        self.capture_path_label.setText(f"Experiment folder: {directory}")
-
-    def _stop_recording(self) -> None:
-        try:
-            session = self.controller.experiment_recorder.stop_recording()
-            if session is not None or self.controller.experiment_recorder.is_recording:
-                self.experiment_recording_status.setText("Finalizing recording...")
-        except (OSError, RuntimeError, TimeoutError) as error:
-            self.controller.state.report_event(EventSeverity.ERROR, str(error))
-
-    def _on_recording_started(self, experiment_id: str, directory: str) -> None:
-        self.experiment_recording_status.setText(f"Recording {experiment_id}")
-        self.capture_path_label.setText(f"Experiment raw capture: {directory}\\serial_capture.log")
-
-    def _on_recording_finished(self, experiment_id: str, status: str) -> None:
-        self.experiment_recording_status.setText(f"{status.title()}: {experiment_id}")
-        self.capture_path_label.setText(
-            f"Experiment folder: {self.controller.experiment_recorder.repository.root / experiment_id}"
-        )
-
-    def _on_recording_failed(self, experiment_id: str, message: str) -> None:
-        self.experiment_recording_status.setText(f"Recording failed: {experiment_id}")
-        self.capture_path_label.setText(message)
-
-    def _on_recording_failed(self, experiment_id: str, message: str) -> None:
-        self.experiment_recording_status.setText(f"Recording failed: {experiment_id}")
-        self.capture_path_label.setText(message)
-
-    def _show_saved_experiment(self, experiment: LoadedExperiment) -> None:
-        self._loaded_experiment = experiment
-        experiment_name = experiment.manifest.get("name") or experiment.experiment_id
-        self.source_badge.setText(f"SAVED EXPERIMENT · {experiment_name}")
-        self.source_badge.setStyleSheet(
-            "color: #344f67; background: #eaf1f7; padding: 6px 9px; font-weight: 700;"
-        )
-        self._samples.clear()
-        self._samples.extend(experiment.telemetry[-self._samples.maxlen:])
-        self.angle_plot.set_samples(
-            [(sample.elapsed_s, sample.angle_deg) for sample in self._samples
-             if sample.angle_deg is not None]
-        )
-        self.position_plot.set_samples(
-            [(sample.elapsed_s, sample.position_mm) for sample in self._samples
-             if sample.position_mm is not None]
-        )
-        self.samples_value[1].setText(f"{len(experiment.telemetry):,}")
-        if experiment.telemetry:
-            latest = experiment.telemetry[-1]
-            if latest.angle_deg is not None:
-                self.angle_value[1].setText(f"{latest.angle_deg:+.2f}")
-            if latest.position_mm is not None:
-                self.position_value[1].setText(f"{latest.position_mm:+.2f}")
-        self.experiment_name_input.setText(experiment.manifest.get("name", ""))
-        self.experiment_notes_input.setText(experiment.manifest.get("notes", ""))
-        self.experiment_recording_status.setText(
-            f"Loaded {experiment_name}"
-        )
-        self.capture_path_label.setText(
-            f"Experiment folder: {experiment.directory}"
-        )
-
-    def _refresh_ports(self) -> None:
-        selected_port = self.port_combo.currentData()
-        self.port_combo.clear()
-        try:
-            ports = self.controller.available_ports()
-        except Exception as error:
-            ports = []
-            self.controller.state.report_event(
-                EventSeverity.ERROR,
-                f"Serial port enumeration failed: {error}",
-            )
-        for port in ports:
-            self.port_combo.addItem(f"{port.device}  ·  {port.description}", port.device)
-        if not ports:
-            self.port_combo.addItem("No serial ports detected", None)
-        if selected_port is not None:
-            selected_index = self.port_combo.findData(selected_port)
-            if selected_index >= 0:
-                self.port_combo.setCurrentIndex(selected_index)
-        self._update_source_controls(self.controller.state.snapshot)
-
-    def _connect_real(self) -> None:
-        port = self.port_combo.currentData()
-        if port is None:
-            self.controller.state.report_event(
-                EventSeverity.WARNING,
-                "Select an available serial port before connecting.",
-            )
-            return
-        self.controller.connect_real(port)
-
-    def _update_source_controls(self, snapshot: ApplicationSnapshot) -> None:
-        is_real = snapshot.data_source == DataSourceMode.REAL
-        is_idle = snapshot.connection in (ConnectionState.DISCONNECTED, ConnectionState.ERROR)
-        self.source_combo.setEnabled(is_idle)
-        self.port_combo.setEnabled(is_real and is_idle)
-        self.refresh_ports_button.setEnabled(is_real and is_idle)
-        self.connect_button.setEnabled(
-            is_real
-            and is_idle
-            and self.port_combo.currentData() is not None
-        )
-        self.disconnect_button.setEnabled(
-            snapshot.connection in (ConnectionState.CONNECTING, ConnectionState.CONNECTED)
-        )
-
-    def _update_snapshot(self, snapshot: ApplicationSnapshot) -> None:
-        new_source = snapshot.data_source != self._last_displayed_source
-        new_serial_session = (
-            snapshot.connection == ConnectionState.CONNECTING
-            and self._last_connection_state != ConnectionState.CONNECTING
-        )
-        if new_source or new_serial_session:
-            self._samples.clear()
-            self.angle_plot.set_samples([])
-            self.position_plot.set_samples([])
-            self.angle_value[1].setText("--")
-            self.position_value[1].setText("--")
-        self._last_displayed_source = snapshot.data_source
-        self._last_connection_state = snapshot.connection
-
-        mode_index = self.source_combo.findData(snapshot.data_source)
-        if mode_index >= 0 and self.source_combo.currentIndex() != mode_index:
-            self.source_combo.blockSignals(True)
-            self.source_combo.setCurrentIndex(mode_index)
-            self.source_combo.blockSignals(False)
-
+    def _update_global_status(self, snapshot: ApplicationSnapshot) -> None:
         connection_indicators = {
             ConnectionState.DISCONNECTED: IndicatorTone.NORMAL,
             ConnectionState.CONNECTING: IndicatorTone.WARNING,
@@ -609,19 +253,16 @@ class MainWindow(QMainWindow):
             snapshot.connection.value,
             connection_indicators[snapshot.connection],
         )
-        motion_text = snapshot.motion.value
-        motion_tone = IndicatorTone.UNKNOWN
-        if snapshot.motion in (MotionState.READY, MotionState.IDLE):
-            motion_tone = IndicatorTone.NORMAL
-        elif snapshot.motion == MotionState.RUNNING:
-            motion_tone = IndicatorTone.GOOD
-        elif snapshot.motion == MotionState.HOMING:
-            motion_tone = IndicatorTone.WARNING
-        elif snapshot.motion == MotionState.STOPPING:
-            motion_tone = IndicatorTone.WARNING
-        elif snapshot.motion == MotionState.FAULT:
-            motion_tone = IndicatorTone.ERROR
-        self.motion_value.set_status(motion_text, motion_tone)
+        motion_tones = {
+            MotionState.UNKNOWN: IndicatorTone.UNKNOWN,
+            MotionState.IDLE: IndicatorTone.NORMAL,
+            MotionState.READY: IndicatorTone.NORMAL,
+            MotionState.RUNNING: IndicatorTone.GOOD,
+            MotionState.HOMING: IndicatorTone.WARNING,
+            MotionState.STOPPING: IndicatorTone.WARNING,
+            MotionState.FAULT: IndicatorTone.ERROR,
+        }
+        self.motion_value.set_status(snapshot.motion.value, motion_tones[snapshot.motion])
         recording_indicators = {
             RecordingState.OFF: ("Off", IndicatorTone.NORMAL),
             RecordingState.STARTING: ("Starting", IndicatorTone.WARNING),
@@ -632,112 +273,34 @@ class MainWindow(QMainWindow):
             RecordingState.ERROR: ("Error", IndicatorTone.ERROR),
         }
         self.recording_value.set_status(*recording_indicators[snapshot.recording])
+        self._update_source_badge(snapshot)
+
+    def _update_source_badge(self, snapshot: ApplicationSnapshot) -> None:
         if snapshot.data_source == DataSourceMode.MOCK:
-            self.source_badge.setText(
-                "MOCK DATA · LIVE" if snapshot.mock_source_active else "MOCK DATA · PAUSED"
-            )
-            self.source_badge.setStyleSheet(
-                "color: #a8512c; background: #fff0e7; padding: 6px 9px; font-weight: 700;"
-            )
+            text = "MOCK DATA · LIVE" if snapshot.mock_source_active else "MOCK DATA · PAUSED"
+            foreground, background = "#a8512c", "#fff0e7"
+        elif snapshot.data_source == DataSourceMode.SAVED:
+            text = f"SAVED EXPERIMENT · {self._saved_experiment_name or 'Saved data'}"
+            foreground, background = "#344f67", "#eaf1f7"
         else:
-            self.source_badge.setText(f"REAL STM32 · {snapshot.connection.value.upper()}")
-            badge_color = "#1b6455" if snapshot.connection == ConnectionState.CONNECTED else "#a8512c"
-            badge_background = "#e5f4ed" if snapshot.connection == ConnectionState.CONNECTED else "#fff0e7"
-            self.source_badge.setStyleSheet(
-                f"color: {badge_color}; background: {badge_background}; padding: 6px 9px; font-weight: 700;"
-            )
-        if snapshot.data_source == DataSourceMode.SAVED:
-            experiment_name = (
-                self._loaded_experiment.manifest.get("name")
-                if self._loaded_experiment is not None
-                else "Saved data"
-            )
-            self.source_badge.setText(f"SAVED EXPERIMENT · {experiment_name}")
-            self.source_badge.setStyleSheet(
-                "color: #344f67; background: #eaf1f7; padding: 6px 9px; font-weight: 700;"
-            )
-        self.samples_value[1].setText(f"{snapshot.samples_received:,}")
-        if snapshot.latest_sample is not None:
-            if snapshot.latest_sample.angle_deg is not None:
-                self.angle_value[1].setText(f"{snapshot.latest_sample.angle_deg:+.2f}")
-            if snapshot.latest_sample.position_mm is not None:
-                self.position_value[1].setText(f"{snapshot.latest_sample.position_mm:+.2f}")
-
-        hardware = snapshot.hardware_status
-        self.home_status_control.set_home_status(snapshot.home_status)
-        self._set_limit_card(self.upper_limit_value, hardware.upper_limit)
-        self._set_limit_card(self.lower_limit_value, hardware.lower_limit)
-
-        mode = hardware.active_motion_mode
-        self.active_mode_value[1].setText(mode)
-
-        if not hardware.fault_known:
-            fault_text, fault_tone = "Unknown", IndicatorTone.UNKNOWN
-        elif hardware.fault:
-            fault_text, fault_tone = hardware.fault, IndicatorTone.ERROR
-        else:
-            fault_text, fault_tone = "No fault", IndicatorTone.GOOD
-        self.fault_value.set_state(fault_text, fault_tone)
-
-        if snapshot.last_valid_telemetry_at is None:
-            telemetry_text = "No valid samples"
-            telemetry_color = "#596a66"
-        else:
-            time_text = snapshot.last_valid_telemetry_at.astimezone().strftime("%H:%M:%S.%f")[:-3]
-            telemetry_text = f"STALE · {time_text}" if snapshot.telemetry_stale else time_text
-            telemetry_color = "#8a4f0d" if snapshot.telemetry_stale else "#205f49"
-        self.last_telemetry_value[1].setText(telemetry_text)
-        self.last_telemetry_value[1].setStyleSheet(f"color: {telemetry_color}; font-weight: 600;")
-        self.capture_path_label.setText(
-            f"Raw serial capture: {snapshot.raw_capture_path or 'not connected'}"
+            text = f"REAL STM32 · {snapshot.connection.value.upper()}"
+            if snapshot.connection == ConnectionState.CONNECTED:
+                foreground, background = "#1b6455", "#e5f4ed"
+            else:
+                foreground, background = "#a8512c", "#fff0e7"
+        self.source_badge.setText(text)
+        self.source_badge.setStyleSheet(
+            f"color: {foreground}; background: {background}; padding: 6px 9px; font-weight: 700;"
         )
-        self._update_recording_controls(snapshot)
-        self._update_source_controls(snapshot)
 
-    def _update_recording_controls(self, snapshot: ApplicationSnapshot) -> None:
-        live_source_ready = (
-            snapshot.data_source == DataSourceMode.MOCK and snapshot.mock_source_active
-        ) or (
-            snapshot.data_source == DataSourceMode.REAL
-            and snapshot.connection == ConnectionState.CONNECTED
+    def _on_experiment_loaded(self, experiment: LoadedExperiment) -> None:
+        self._saved_experiment_name = experiment.manifest.get("name") or experiment.experiment_id
+        self._update_source_badge(self.controller.state.snapshot)
+
+    def _show_about(self) -> None:
+        QMessageBox.about(
+            self,
+            "About Pendulum Workbench",
+            "Pendulum Workbench\n\n"
+            "Live instrumentation and reproducible experiment recording.",
         )
-        recording_active = snapshot.recording in (
-            RecordingState.STARTING,
-            RecordingState.RECORDING,
-            RecordingState.STOPPING,
-        )
-        self.start_recording_button.setEnabled(live_source_ready and not recording_active)
-        self.stop_recording_button.setEnabled(snapshot.recording == RecordingState.RECORDING)
-        self.experiment_name_input.setEnabled(not recording_active)
-        self.experiment_notes_input.setEnabled(not recording_active)
-
-    @staticmethod
-    def _set_limit_card(card: HardwareStatusCard, active: bool | None) -> None:
-        states = {
-            True: ("Active", IndicatorTone.WARNING),
-            False: ("Clear", IndicatorTone.NORMAL),
-            None: ("Unknown", IndicatorTone.UNKNOWN),
-        }
-        card.set_state(*states[active])
-
-    def _append_sample(self, sample: TelemetrySample) -> None:
-        if sample.angle_deg is None or sample.position_mm is None:
-            return
-        self._samples.append(sample)
-        self.angle_plot.set_samples([(item.elapsed_s, item.angle_deg) for item in self._samples])
-        self.position_plot.set_samples([(item.elapsed_s, item.position_mm) for item in self._samples])
-
-    def _append_event(self, event: AppEvent) -> None:
-        item_text = f"{event.timestamp.astimezone().strftime('%H:%M:%S')}  {event.message}"
-        item = self.event_list.addItem(item_text)
-        del item
-        row = self.event_list.count() - 1
-        color = {
-            EventSeverity.INFO: "#277a68",
-            EventSeverity.WARNING: "#b5682f",
-            EventSeverity.ERROR: "#b34037",
-        }[event.severity]
-        self.event_list.item(row).setForeground(QColor(color))
-        self.event_list.scrollToBottom()
-        while self.event_list.count() > 200:
-            self.event_list.takeItem(0)
