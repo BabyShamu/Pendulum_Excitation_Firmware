@@ -34,7 +34,9 @@ Each real connection writes received serial lines to `%LOCALAPPDATA%/PendulumWor
 
 Maintenance provides correlated `latch_hold`, `latch_open`, and `latch_status` commands. The displayed state is the firmware's commanded state only; there is no physical position feedback, and the latch is not part of the System Check/BIT.
 
-The hobby servo signal uses D9 / PC7 with TIM8 channel 2 PWM at 50 Hz. `SERVO_LATCH_HOLD_PULSE_US` and `SERVO_LATCH_OPEN_PULSE_US` currently use 1400 us and 1600 us development defaults. These values are commissioning placeholders, not mechanically calibrated or validated angles. Firmware starts with PC7 inactive and latch state UNKNOWN; it does not actuate the servo at boot.
+The hobby servo signal uses D9 / PC7 with TIM8 channel 2 PWM at 50 Hz. The current manually calibrated pulse values are `SERVO_LATCH_HOLD_PULSE_US = 700 us` and `SERVO_LATCH_OPEN_PULSE_US = 1700 us`; these are pulse widths, not servo angles. Firmware starts with PC7 inactive and latch state UNKNOWN; it does not actuate the servo at boot. The latch state is command-only because there is no physical position sensor.
+
+Homing requires the Pendulum Latch to be explicitly commanded OPEN in the current STM32 session. Startup remains manual: the firmware does not automatically OPEN the latch during boot, connection, or a Home request. Confirm OPEN in Maintenance before starting Home.
 
 Servo power is temporarily connected to 5 V for commissioning only. This is not the validated power design; plan for a suitable external regulated supply with a common ground. Calibrate mechanically in Maintenance by commanding HOLD and OPEN separately; do not sweep positions or treat the servo as setting the pendulum's initial angle.
 

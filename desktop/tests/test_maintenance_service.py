@@ -29,7 +29,7 @@ from pendulum_workbench.domain.models import (
     TelemetrySample,
 )
 from pendulum_workbench.infrastructure.serial_client import SerialTelemetryClient
-from pendulum_workbench.infrastructure.firmware_protocol import DeviceEvent
+from pendulum_workbench.infrastructure.firmware_protocol import DeviceEvent, FirmwareProtocolParser
 from pendulum_workbench.ui.main_window import MainWindow
 from pendulum_workbench.ui.pages.maintenance_page import MaintenancePage
 
@@ -61,6 +61,7 @@ class MaintenanceFakeSerial:
         self.fault_code = fault_code
         self.homed = initially_homed
         self.home_succeeds = home_succeeds
+        self.home_motion_start_count = 0
         self.angle_available = angle_available
         self.defer_status = defer_status
         self.defer_home = defer_home
@@ -84,6 +85,7 @@ class MaintenanceFakeSerial:
         self.pending_latch_command: tuple[str, str] | None = None
         self.latch_state = "unknown"
         self.latch_commands: list[tuple[str, str]] = []
+        self.maintenance_responses: list[str] = []
         self._chunks: list[bytes] = []
         self.writes: list[bytes] = []
         self.closed = False
@@ -182,13 +184,20 @@ class MaintenanceFakeSerial:
             else:
                 response = f"maintenance: id={request_id} type=angle ok=0 error=as5600_unavailable\r\n"
         elif command == "home":
-            self.homed = self.home_succeeds
-            response = (
-                f"maintenance: id={request_id} type=home ok={int(self.home_succeeds)} "
-                f"homed={int(self.homed)} fault={self.fault_code} "
-                f"span_steps={1200 if self.homed else 0} position_steps=0 steps_per_mm=40.000"
-                f"{' error=home_test_failure' if not self.home_succeeds else ''}\r\n"
-            )
+            if self.latch_state != "open":
+                response = (
+                    f"maintenance: id={request_id} type=home ok=0 homed=0 "
+                    f"fault={self.fault_code} error=latch_not_open\r\n"
+                )
+            else:
+                self.home_motion_start_count += 1
+                self.homed = self.home_succeeds
+                response = (
+                    f"maintenance: id={request_id} type=home ok={int(self.home_succeeds)} "
+                    f"homed={int(self.homed)} fault={self.fault_code} "
+                    f"span_steps={1200 if self.homed else 0} position_steps=0 steps_per_mm=40.000"
+                    f"{' error=home_test_failure' if not self.home_succeeds else ''}\r\n"
+                )
         elif command == "zero":
             self.zeroed = self.angle_available
             response = (
@@ -260,6 +269,7 @@ class MaintenanceFakeSerial:
             self._chunks.append(
                 f"maintenance: id={stale_id} type={command} ok=0 error=stale_response\r\n".encode("ascii")
             )
+        self.maintenance_responses.append(response.strip())
         self._chunks.append(response.encode("ascii"))
 
     def read(self, size: int) -> bytes:
@@ -340,6 +350,7 @@ class MaintenanceServiceTests(unittest.TestCase):
             self.assertTrue(self.wait_for(lambda: not controller.firmware_commands.is_busy))
             serial_instances[0].defer_status = True
         self.assertTrue(self.wait_for(lambda: not controller.firmware_commands.is_busy))
+        controller._maintenance_fake_devices = serial_instances
         return controller, serial_instances[0]
 
     def test_manual_motion_signal_subscriptions_are_single(self) -> None:
@@ -503,6 +514,7 @@ class MaintenanceServiceTests(unittest.TestCase):
 
     def test_latch_interlocks_cover_homing_manual_motion_and_recording(self) -> None:
         controller, device = self.create_connected_controller(defer_home=True)
+        self.command_latch_open(controller)
         controller.maintenance.start_homing()
         self.assertTrue(self.wait_for(lambda: device.pending_home_id is not None))
         with self.assertRaisesRegex(RuntimeError, "maintenance operation"):
@@ -540,6 +552,15 @@ class MaintenanceServiceTests(unittest.TestCase):
             self.wait_for(
                 lambda: controller.maintenance.snapshot.bit_state
                 in (BitResultState.PASSED, BitResultState.FAILED)
+            )
+        )
+
+    def command_latch_open(self, controller: WorkbenchController) -> None:
+        controller.maintenance.command_latch(PendulumLatchState.OPEN)
+        self.assertTrue(
+            self.wait_for(
+                lambda: controller.maintenance.snapshot.latch_state == PendulumLatchState.OPEN
+                and not controller.firmware_commands.is_busy
             )
         )
 
@@ -597,6 +618,7 @@ class MaintenanceServiceTests(unittest.TestCase):
             self.wait_for(lambda: controller.maintenance.snapshot.bit_state == BitResultState.PASSED)
         )
 
+        self.command_latch_open(controller)
         controller.maintenance.start_homing()
         self.assertTrue(self.wait_for(lambda: device.pending_home_id is not None))
         window.live_navigation_button.click()
@@ -748,6 +770,95 @@ class MaintenanceServiceTests(unittest.TestCase):
             controller.maintenance.start_homing()
         self.assertIsNone(controller.maintenance.snapshot.operation)
 
+    def test_home_requires_latch_open_and_firmware_rejects_unknown_or_hold(self) -> None:
+        controller, device = self.create_connected_controller()
+
+        for latch_state in ("unknown", "hold"):
+            device.latch_state = latch_state
+            controller.firmware_commands.home()
+            self.assertTrue(self.wait_for(lambda: not controller.firmware_commands.is_busy))
+            response = FirmwareProtocolParser.parse_maintenance_response(
+                device.maintenance_responses[-1]
+            )
+            self.assertEqual(response.response_type, "home")
+            self.assertFalse(response.ok)
+            self.assertEqual(response.fields.get("error"), "latch_not_open")
+            self.assertEqual(device.home_motion_start_count, 0)
+
+        self.command_latch_open(controller)
+        controller.maintenance.start_homing()
+        self.assertTrue(
+            self.wait_for(
+                lambda: controller.state.snapshot.home_status == HomeStatus.HOMED
+                and not controller.firmware_commands.is_busy
+            )
+        )
+        self.assertEqual(device.home_motion_start_count, 1)
+        self.assertEqual([command for _, command in device.latch_commands], ["latch_open"])
+
+    def test_home_button_tracks_confirmed_latch_state_and_session(self) -> None:
+        controller, device = self.create_connected_controller(defer_latch_commands=True)
+        window = MainWindow(controller)
+        page = window.maintenance_page
+
+        self.assertEqual(page.maintenance.snapshot.latch_state, PendulumLatchState.UNKNOWN)
+        self.assertEqual(device.latch_commands, [])
+        self.assertFalse(page.home_button.isEnabled())
+        self.assertFalse(page.home_latch_interlock_note.isHidden())
+        self.assertEqual(page.home_latch_interlock_note.text(), "Homing requires Pendulum Latch OPEN.")
+
+        controller.maintenance.command_latch(PendulumLatchState.HOLD)
+        self.assertTrue(self.wait_for(lambda: device.pending_latch_command is not None))
+        self.assertEqual(
+            controller.maintenance.snapshot.latch_state,
+            PendulumLatchState.COMMANDING_HOLD,
+        )
+        self.assertFalse(page.home_button.isEnabled())
+        self.assertFalse(page.home_latch_interlock_note.isHidden())
+        device.release_latch_command()
+        self.assertTrue(
+            self.wait_for(lambda: controller.maintenance.snapshot.latch_state == PendulumLatchState.HOLD)
+        )
+        self.assertFalse(page.home_button.isEnabled())
+
+        device.defer_latch_commands = True
+        controller.maintenance.command_latch(PendulumLatchState.OPEN)
+        self.assertTrue(self.wait_for(lambda: device.pending_latch_command is not None))
+        self.assertEqual(
+            controller.maintenance.snapshot.latch_state,
+            PendulumLatchState.COMMANDING_OPEN,
+        )
+        self.assertFalse(page.home_button.isEnabled())
+        self.assertFalse(page.home_latch_interlock_note.isHidden())
+        device.release_latch_command()
+        self.assertTrue(
+            self.wait_for(lambda: controller.maintenance.snapshot.latch_state == PendulumLatchState.OPEN)
+        )
+        self.assertTrue(page.home_button.isEnabled())
+        self.assertTrue(page.home_latch_interlock_note.isHidden())
+
+        controller.disconnect_real()
+        self.assertTrue(
+            self.wait_for(lambda: controller.state.snapshot.connection == ConnectionState.DISCONNECTED)
+        )
+        self.assertEqual(page.maintenance.snapshot.latch_state, PendulumLatchState.UNKNOWN)
+        self.assertFalse(page.home_button.isEnabled())
+
+        controller.connect_real("COM_MAINTENANCE_FAKE")
+        self.assertTrue(
+            self.wait_for(
+                lambda: controller.state.snapshot.connection == ConnectionState.CONNECTED
+                and controller.state.snapshot.hardware_status.active_motion_mode == "Idle"
+                and not controller.firmware_commands.is_busy
+            )
+        )
+        self.assertEqual(page.maintenance.snapshot.latch_state, PendulumLatchState.UNKNOWN)
+        self.assertFalse(page.home_button.isEnabled())
+        reconnected_device = controller._maintenance_fake_devices[-1]
+        self.assertIsNot(reconnected_device, device)
+        self.assertEqual(reconnected_device.latch_commands, [])
+        window.close()
+
     def test_home_and_zero_are_blocked_during_reported_motion(self) -> None:
         controller, _device = self.create_connected_controller()
         self.run_system_check(controller)
@@ -769,6 +880,7 @@ class MaintenanceServiceTests(unittest.TestCase):
     def test_home_requires_firmware_confirmation_and_updates_readiness(self) -> None:
         controller, device = self.create_connected_controller()
         self.run_system_check(controller)
+        self.command_latch_open(controller)
         home_results = []
         controller.maintenance.snapshot_changed.connect(home_results.append)
 
@@ -793,6 +905,7 @@ class MaintenanceServiceTests(unittest.TestCase):
     def test_home_failure_is_reported_as_fault_without_homing(self) -> None:
         controller, _device = self.create_connected_controller(home_succeeds=False)
         self.run_system_check(controller)
+        self.command_latch_open(controller)
         controller.maintenance.start_homing()
 
         self.assertTrue(

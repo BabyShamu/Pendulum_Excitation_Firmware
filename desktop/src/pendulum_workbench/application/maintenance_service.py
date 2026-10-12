@@ -207,6 +207,8 @@ class MaintenanceService(QObject):
             raise RuntimeError("Stop the active experiment recording before homing")
         if snapshot.hardware_status.fault_known and snapshot.hardware_status.fault:
             raise RuntimeError("Homing is blocked by the firmware fault state")
+        if self._latch_state != PendulumLatchState.OPEN:
+            raise RuntimeError("Homing requires Pendulum Latch OPEN.")
 
         self._operation_fault = False
         self._homing_failure_latched = False

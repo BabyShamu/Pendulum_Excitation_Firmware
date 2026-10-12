@@ -167,6 +167,11 @@ class MaintenancePage(QWidget):
         home_row.addWidget(self.home_button)
         home_layout.addLayout(home_row)
 
+        self.home_latch_interlock_note = QLabel("Homing requires Pendulum Latch OPEN.")
+        self.home_latch_interlock_note.setObjectName("subtle")
+        self.home_latch_interlock_note.setWordWrap(True)
+        home_layout.addWidget(self.home_latch_interlock_note)
+
         self.home_progress_value = QLabel("Homing has not been run in this session.")
         self.home_progress_value.setObjectName("subtle")
         self.home_progress_value.setWordWrap(True)
@@ -420,8 +425,15 @@ class MaintenancePage(QWidget):
             and not blocking_fault
         )
         self.run_system_check_button.setEnabled(connected and not busy)
-        self.home_button.setEnabled(
+        home_otherwise_enabled = (
             connected and not busy and not blocking_fault and not recording_active and not moving
+        )
+        self.home_button.setEnabled(
+            home_otherwise_enabled
+            and maintenance.latch_state == PendulumLatchState.OPEN
+        )
+        self.home_latch_interlock_note.setVisible(
+            connected and maintenance.latch_state != PendulumLatchState.OPEN
         )
         self.zero_angle_button.setEnabled(
             connected

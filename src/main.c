@@ -48,10 +48,10 @@
 #define MANUAL_STOP_REASON_INTERLOCK   2U
 #define MANUAL_STOP_REASON_UPPER_LIMIT 3U
 #define MANUAL_STOP_REASON_LOWER_LIMIT 4U
-// Commissioning defaults only; neither position is mechanically calibrated or validated.
+// Current mechanically calibrated pulse widths, not servo angles.
 #define SERVO_LATCH_PWM_PERIOD_US 20000U
-#define SERVO_LATCH_HOLD_PULSE_US 1400U
-#define SERVO_LATCH_OPEN_PULSE_US 1600U
+#define SERVO_LATCH_HOLD_PULSE_US 700U
+#define SERVO_LATCH_OPEN_PULSE_US 1700U
 #define SERVO_LATCH_STATE_UNKNOWN 0U
 #define SERVO_LATCH_STATE_HOLD    1U
 #define SERVO_LATCH_STATE_OPEN    2U
@@ -1129,7 +1129,7 @@ static uint8_t ServoLatchCommand(uint16_t pulseUs, uint8_t commandedState)
     gpio.Mode = GPIO_MODE_AF_PP;
     gpio.Pull = GPIO_NOPULL;
     gpio.Speed = GPIO_SPEED_FREQ_LOW;
-    gpio.Alternate = GPIO_AF3_TIM8;
+    gpio.Alternate = GPIO_AF4_TIM8;
     HAL_GPIO_Init(GPIOC, &gpio);
 
     __HAL_TIM_SET_COMPARE(&htim8, TIM_CHANNEL_2, pulseUs);
@@ -1242,6 +1242,12 @@ static void Home(void)
 {
     uint32_t lowerSteps = 0U;
     uint32_t spanSteps = 0U;
+
+    if (g_servoLatchCommandedState != SERVO_LATCH_STATE_OPEN)
+    {
+        UartPrint("homing rejected: latch_not_open\r\n");
+        return;
+    }
 
     g_homed = 0U;
     g_homingActive = 1U;
@@ -2258,6 +2264,15 @@ static uint8_t ProcessMaintenanceCommand(char *arguments)
         {
             snprintf(msg, sizeof(msg),
                      "maintenance: id=%lu type=home ok=0 homed=0 fault=%u error=blocking_fault\r\n",
+                     requestId,
+                     (unsigned int)g_closedLoopFault);
+            UartPrint(msg);
+            return 1U;
+        }
+        if (g_servoLatchCommandedState != SERVO_LATCH_STATE_OPEN)
+        {
+            snprintf(msg, sizeof(msg),
+                     "maintenance: id=%lu type=home ok=0 homed=0 fault=%u error=latch_not_open\r\n",
                      requestId,
                      (unsigned int)g_closedLoopFault);
             UartPrint(msg);

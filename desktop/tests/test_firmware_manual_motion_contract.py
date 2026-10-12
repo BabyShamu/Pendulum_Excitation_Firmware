@@ -141,12 +141,12 @@ class FirmwareManualMotionContractTests(unittest.TestCase):
         self.assertNotIn("HAL_TIM_PWM_Start", pwm_init)
         self.assertIn("HAL_TIM_PWM_Start(&htim8, TIM_CHANNEL_2)", pwm_command)
 
-    def test_latch_uses_pc7_tim8_channel_two_at_50_hz_with_tbd_defaults(self) -> None:
+    def test_latch_uses_pc7_tim8_channel_two_at_50_hz_with_calibrated_pulses(self) -> None:
         self.assertRegex(FIRMWARE_SOURCE, r"#define SERVO_LATCH_PWM_PERIOD_US\s+20000U")
-        self.assertRegex(FIRMWARE_SOURCE, r"#define SERVO_LATCH_HOLD_PULSE_US\s+1400U")
-        self.assertRegex(FIRMWARE_SOURCE, r"#define SERVO_LATCH_OPEN_PULSE_US\s+1600U")
-        self.assertIn("mechanically calibrated or validated", FIRMWARE_SOURCE)
-        self.assertIn("GPIO_AF3_TIM8", function_body("ServoLatchCommand"))
+        self.assertRegex(FIRMWARE_SOURCE, r"#define SERVO_LATCH_HOLD_PULSE_US\s+700U")
+        self.assertRegex(FIRMWARE_SOURCE, r"#define SERVO_LATCH_OPEN_PULSE_US\s+1700U")
+        self.assertIn("pulse widths, not servo angles", FIRMWARE_SOURCE)
+        self.assertIn("GPIO_AF4_TIM8", function_body("ServoLatchCommand"))
         self.assertIn("TIM_CHANNEL_2", function_body("ServoLatchCommand"))
         self.assertIn("SERVO_LATCH_HOLD_PULSE_US", function_body("ProcessMaintenanceCommand"))
         self.assertIn("SERVO_LATCH_OPEN_PULSE_US", function_body("ProcessMaintenanceCommand"))
@@ -174,6 +174,33 @@ class FirmwareManualMotionContractTests(unittest.TestCase):
             FIRMWARE_SOURCE,
             r"g_servoLatchCommandedState\s*=\s*SERVO_LATCH_STATE_UNKNOWN",
         )
+
+    def test_home_latch_guard_precedes_all_homing_side_effects(self) -> None:
+        home = function_body("Home")
+        latch_guard = home.index(
+            "if (g_servoLatchCommandedState != SERVO_LATCH_STATE_OPEN)"
+        )
+        for side_effect in (
+            "g_homed = 0U;",
+            "g_homingActive = 1U;",
+            "ClosedLoopActuatorStop();",
+            "SetDirection(DIR_DOWN);",
+            "StepOne(HOMING_SPEED_HZ",
+        ):
+            self.assertLess(latch_guard, home.index(side_effect))
+        self.assertNotIn("ServoLatchCommand", home)
+        self.assertNotIn("latch_open", home)
+        self.assertIn('"homing rejected: latch_not_open', home)
+
+        handler = function_body("ProcessMaintenanceCommand")
+        home_command = handler.split('if (strcmp(end, "home") == 0)', 1)[1].split(
+            'if (strcmp(end, "zero") == 0)', 1
+        )[0]
+        correlated_guard = home_command.index(
+            "g_servoLatchCommandedState != SERVO_LATCH_STATE_OPEN"
+        )
+        self.assertIn("error=latch_not_open", home_command)
+        self.assertLess(correlated_guard, home_command.index("Home();"))
 
 
 if __name__ == "__main__":
