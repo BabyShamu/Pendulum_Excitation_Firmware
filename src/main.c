@@ -42,6 +42,12 @@
 #define MAX_HOMING_STEPS    20000U
 #define JOG_SPEED_HZ        150U
 #define HOMING_SPEED_HZ     1100U
+#define MANUAL_MOTION_SPEED_HZ HOMING_SPEED_HZ
+#define MANUAL_STOP_REASON_NONE        0U
+#define MANUAL_STOP_REASON_DEADMAN     1U
+#define MANUAL_STOP_REASON_INTERLOCK   2U
+#define MANUAL_STOP_REASON_UPPER_LIMIT 3U
+#define MANUAL_STOP_REASON_LOWER_LIMIT 4U
 #ifndef MANUAL_MOTION_DEADMAN_TIMEOUT_MS
 // Development default only; validate timeout against the real stage and serial path before release.
 #define MANUAL_MOTION_DEADMAN_TIMEOUT_MS 350U
@@ -95,6 +101,11 @@ static void GPIO_Init(void);
 static void USART2_Init(void);
 static void I2C1_Init(void);
 static void ClosedLoopStepTimerInit(void);
+static void ManualStepTimerInit(void);
+static void ManualStepTimerStart(void);
+static void ManualStepTimerStop(void);
+static void ManualStepTimerStopFromIsr(uint8_t reason);
+static void ManualStepTimerOnTimer(void);
 static void ClosedLoopActuatorKick(void);
 static void ClosedLoopActuatorStop(void);
 static void ClosedLoopActuatorOnTimer(void);
@@ -117,6 +128,8 @@ static void Jog(uint8_t dir, uint32_t steps);
 static void Home(void);
 static void UpdateManualMotion(void);
 static void StopManualMotion(const char *reason);
+static uint8_t ManualMotionSafetyStopReason(void);
+static const char *ManualMotionStopReasonText(uint8_t reason);
 static const char *ActiveModeName(void);
 static void ReturnToCenter(void);
 static void UpdateSine(void);
@@ -140,6 +153,8 @@ static void PrintLiveTelemetry(void);
 static void SetAngleZero(void);
 static float RelativeAngleDegrees(uint16_t rawAngle);
 static void UartPrint(const char *text);
+static uint8_t UartTryEnqueue(const char *text, size_t length);
+static void ReportUartTxOverflow(void);
 static void Error_Handler(void);
 
 static UART_HandleTypeDef huart2;
@@ -160,6 +175,8 @@ static volatile uint16_t g_uartTxHead = 0U;
 static volatile uint16_t g_uartTxTail = 0U;
 static volatile uint8_t g_uartTxBusy = 0U;
 static volatile uint16_t g_uartTxInFlight = 0U;
+static volatile uint32_t g_uartTxDroppedMessages = 0U;
+static volatile uint32_t g_uartTxDroppedBytes = 0U;
 
 static uint32_t g_targetHz = DEFAULT_TARGET_HZ;
 static uint32_t g_currentHz = 50U;
@@ -170,6 +187,10 @@ static uint8_t g_homed = 0U;
 static uint8_t g_sineRunning = 0U;
 static uint32_t g_travelSteps = 0U;
 static volatile int32_t g_positionSteps = 0;
+static volatile uint8_t g_manualMotionDirection = 0U;
+static volatile uint32_t g_manualMotionLastKeepaliveMs = 0U;
+static volatile uint8_t g_manualMotionStopPending = MANUAL_STOP_REASON_NONE;
+static volatile uint8_t g_manualStepPulseHigh = 0U;
 static float g_sineAmplitudeMm = 0.0f;
 static float g_sineFrequencyHz = 0.0f;
 static uint32_t g_sineStartMs = 0U;
@@ -222,8 +243,6 @@ static uint8_t g_recording = 0U;
 static uint8_t g_suppressPromptOnce = 0U;
 static uint32_t g_lastLiveMs = 0U;
 static uint32_t g_liveSampleIndex = 0U;
-static uint8_t g_manualMotionDirection = 0U;
-static uint32_t g_manualMotionLastKeepaliveMs = 0U;
 static float g_stepsPerMm = DEFAULT_STEPS_PER_MM;
 static uint8_t g_i2cReady = 0U;
 static uint8_t g_angleSensorUnavailable = 0U;
@@ -266,6 +285,15 @@ void TIM6_DAC_IRQHandler(void)
     {
         TIM6->SR = 0U;
         ClosedLoopActuatorOnTimer();
+    }
+}
+
+void TIM7_DAC_IRQHandler(void)
+{
+    if ((TIM7->SR & TIM_SR_UIF) != 0U)
+    {
+        TIM7->SR = 0U;
+        ManualStepTimerOnTimer();
     }
 }
 
@@ -327,6 +355,7 @@ int main(void)
     HAL_Init();
     GPIO_Init();
     ClosedLoopStepTimerInit();
+    ManualStepTimerInit();
     USART2_Init();
     UartPrint("\r\nStepper control starting\r\n");
     I2C1_Init();
@@ -378,6 +407,7 @@ int main(void)
         }
 
         PollUart();
+        ReportUartTxOverflow();
         PrintLiveTelemetry();
 
         if (g_manualMotionDirection != 0U)
@@ -426,6 +456,7 @@ int main(void)
         }
 
         PollUart();
+        ReportUartTxOverflow();
         PrintLiveTelemetry();
     }
 }
@@ -896,6 +927,151 @@ static void ClosedLoopStepTimerInit(void)
     HAL_NVIC_EnableIRQ(TIM6_DAC_IRQn);
 }
 
+static void ManualStepTimerInit(void)
+{
+    RCC_ClkInitTypeDef clockConfig;
+    uint32_t flashLatency;
+    uint32_t timerClockHz;
+
+    __HAL_RCC_TIM7_CLK_ENABLE();
+    HAL_RCC_GetClockConfig(&clockConfig, &flashLatency);
+    timerClockHz = HAL_RCC_GetPCLK1Freq();
+    if (clockConfig.APB1CLKDivider != RCC_HCLK_DIV1)
+    {
+        timerClockHz *= 2U;
+    }
+
+    TIM7->CR1 = TIM_CR1_URS;
+    TIM7->PSC = (timerClockHz / 1000000U) - 1U;
+    TIM7->ARR = 1U;
+    TIM7->EGR = TIM_EGR_UG;
+    TIM7->SR = 0U;
+    TIM7->DIER = TIM_DIER_UIE;
+
+    HAL_NVIC_SetPriority(TIM7_DAC_IRQn, 1U, 0U);
+    HAL_NVIC_EnableIRQ(TIM7_DAC_IRQn);
+}
+
+static void ManualStepTimerStart(void)
+{
+    uint32_t halfPeriodUs = 500000U / MANUAL_MOTION_SPEED_HZ;
+
+    if (halfPeriodUs < 2U)
+    {
+        halfPeriodUs = 2U;
+    }
+    TIM7->CR1 &= ~TIM_CR1_CEN;
+    TIM7->ARR = halfPeriodUs - 1U;
+    TIM7->CNT = 0U;
+    TIM7->EGR = TIM_EGR_UG;
+    TIM7->SR = 0U;
+    g_manualStepPulseHigh = 0U;
+    HAL_GPIO_WritePin(STEP_PORT, STEP_PIN, ActiveState(0U));
+    TIM7->CR1 |= TIM_CR1_CEN;
+}
+
+static void ManualStepTimerStop(void)
+{
+    uint32_t primask = __get_PRIMASK();
+
+    __disable_irq();
+    TIM7->CR1 &= ~TIM_CR1_CEN;
+    TIM7->SR = 0U;
+    HAL_NVIC_ClearPendingIRQ(TIM7_DAC_IRQn);
+    g_manualStepPulseHigh = 0U;
+    g_manualMotionStopPending = MANUAL_STOP_REASON_NONE;
+    HAL_GPIO_WritePin(STEP_PORT, STEP_PIN, ActiveState(0U));
+    if (primask == 0U)
+    {
+        __enable_irq();
+    }
+}
+
+static void ManualStepTimerStopFromIsr(uint8_t reason)
+{
+    TIM7->CR1 &= ~TIM_CR1_CEN;
+    TIM7->SR = 0U;
+    g_manualStepPulseHigh = 0U;
+    HAL_GPIO_WritePin(STEP_PORT, STEP_PIN, ActiveState(0U));
+    if (reason != MANUAL_STOP_REASON_NONE)
+    {
+        g_manualMotionStopPending = reason;
+    }
+}
+
+static uint8_t ManualMotionSafetyStopReason(void)
+{
+    uint32_t now;
+
+    if (g_manualMotionDirection == 0U)
+    {
+        return MANUAL_STOP_REASON_NONE;
+    }
+    now = HAL_GetTick();
+    if ((now - g_manualMotionLastKeepaliveMs) >= MANUAL_MOTION_DEADMAN_TIMEOUT_MS)
+    {
+        return MANUAL_STOP_REASON_DEADMAN;
+    }
+    if (g_closedLoopFault != 0U || g_homed == 0U || g_recording != 0U)
+    {
+        return MANUAL_STOP_REASON_INTERLOCK;
+    }
+    if (g_manualMotionDirection == 1U && UpperLimitPressed() != 0U)
+    {
+        return MANUAL_STOP_REASON_UPPER_LIMIT;
+    }
+    if (g_manualMotionDirection == 2U && LowerLimitPressed() != 0U)
+    {
+        return MANUAL_STOP_REASON_LOWER_LIMIT;
+    }
+    return MANUAL_STOP_REASON_NONE;
+}
+
+static const char *ManualMotionStopReasonText(uint8_t reason)
+{
+    switch (reason)
+    {
+        case MANUAL_STOP_REASON_DEADMAN:
+            return "deadman_timeout";
+        case MANUAL_STOP_REASON_INTERLOCK:
+            return "interlock";
+        case MANUAL_STOP_REASON_UPPER_LIMIT:
+            return "upper_limit";
+        case MANUAL_STOP_REASON_LOWER_LIMIT:
+            return "lower_limit";
+        default:
+            return "unknown";
+    }
+}
+
+static void ManualStepTimerOnTimer(void)
+{
+    uint8_t reason;
+
+    if (g_manualMotionDirection == 0U)
+    {
+        ManualStepTimerStopFromIsr(MANUAL_STOP_REASON_NONE);
+        return;
+    }
+
+    if (g_manualStepPulseHigh != 0U)
+    {
+        HAL_GPIO_WritePin(STEP_PORT, STEP_PIN, ActiveState(0U));
+        g_manualStepPulseHigh = 0U;
+        g_positionSteps += (g_manualMotionDirection == 1U) ? 1 : -1;
+    }
+
+    reason = ManualMotionSafetyStopReason();
+    if (reason != MANUAL_STOP_REASON_NONE)
+    {
+        ManualStepTimerStopFromIsr(reason);
+        return;
+    }
+
+    HAL_GPIO_WritePin(STEP_PORT, STEP_PIN, ActiveState(1U));
+    g_manualStepPulseHigh = 1U;
+}
+
 static void Jog(uint8_t dir, uint32_t steps)
 {
     g_parametricClosedLoopRunning = 0U;
@@ -1020,60 +1196,72 @@ static void Home(void)
 
 static void UpdateManualMotion(void)
 {
-    uint32_t now = HAL_GetTick();
+    uint8_t pendingReason;
+    uint8_t reason;
     uint8_t direction;
-    uint8_t stopUpper;
-    uint8_t stopLower;
+    uint32_t primask;
 
     if (g_manualMotionDirection == 0U)
     {
         return;
     }
 
-    if ((now - g_manualMotionLastKeepaliveMs) >= MANUAL_MOTION_DEADMAN_TIMEOUT_MS)
+    primask = __get_PRIMASK();
+    __disable_irq();
+    pendingReason = g_manualMotionStopPending;
+    g_manualMotionStopPending = MANUAL_STOP_REASON_NONE;
+    if (primask == 0U)
     {
-        StopManualMotion("deadman_timeout");
+        __enable_irq();
+    }
+    if (pendingReason != MANUAL_STOP_REASON_NONE)
+    {
+        StopManualMotion(ManualMotionStopReasonText(pendingReason));
         return;
     }
 
-    if (g_closedLoopFault != 0U || g_homed == 0U || g_recording != 0U)
+    reason = ManualMotionSafetyStopReason();
+    if (reason != MANUAL_STOP_REASON_NONE)
     {
-        StopManualMotion("interlock");
+        StopManualMotion(ManualMotionStopReasonText(reason));
         return;
     }
 
     direction = (g_manualMotionDirection == 1U) ? DIR_UP : DIR_DOWN;
-    stopUpper = (direction == DIR_UP) ? 1U : 0U;
-    stopLower = (direction == DIR_DOWN) ? 1U : 0U;
-    if ((stopUpper != 0U && UpperLimitPressed() != 0U) ||
-        (stopLower != 0U && LowerLimitPressed() != 0U))
-    {
-        StopManualMotion((stopUpper != 0U) ? "upper_limit" : "lower_limit");
-        return;
-    }
-
     if (g_dir != direction)
     {
         SetDirection(direction);
     }
-    if (StepOne(JOG_SPEED_HZ, stopUpper, stopLower) == 0U)
+    if ((TIM7->CR1 & TIM_CR1_CEN) == 0U)
     {
-        StopManualMotion((stopUpper != 0U) ? "upper_limit" : "lower_limit");
-        return;
+        ManualStepTimerStart();
     }
-    g_positionSteps += (direction == DIR_UP) ? 1 : -1;
 }
 
 static void StopManualMotion(const char *reason)
 {
-    uint8_t direction = g_manualMotionDirection;
+    uint8_t direction;
+    uint8_t pendingReason;
+    uint32_t primask = __get_PRIMASK();
     char message[128];
 
+    __disable_irq();
+    direction = g_manualMotionDirection;
+    pendingReason = g_manualMotionStopPending;
+    g_manualMotionDirection = 0U;
+    if (primask == 0U)
+    {
+        __enable_irq();
+    }
     if (direction == 0U)
     {
         return;
     }
-    g_manualMotionDirection = 0U;
+    if (pendingReason != MANUAL_STOP_REASON_NONE)
+    {
+        reason = ManualMotionStopReasonText(pendingReason);
+    }
+    ManualStepTimerStop();
     snprintf(message, sizeof(message),
              "event: type=manual_motion_stopped direction=%s reason=%s position_steps=%ld\r\n",
              (direction == 1U) ? "up" : "down",
@@ -1579,23 +1767,101 @@ static void ReportClosedLoopFault(void)
 static void UartPrint(const char *text)
 {
     size_t length = strlen(text);
+    if (UartTryEnqueue(text, length) == 0U)
+    {
+        uint32_t primask = __get_PRIMASK();
+        __disable_irq();
+        if (g_uartTxDroppedMessages < UINT32_MAX)
+        {
+            g_uartTxDroppedMessages++;
+        }
+        if ((UINT32_MAX - g_uartTxDroppedBytes) < length)
+        {
+            g_uartTxDroppedBytes = UINT32_MAX;
+        }
+        else
+        {
+            g_uartTxDroppedBytes += (uint32_t)length;
+        }
+        if (primask == 0U)
+        {
+            __enable_irq();
+        }
+    }
+}
 
-    // Enqueue into the TX ring and let the ISR drain it, so printing never
-    // blocks the step-timing loop for the several milliseconds a full
-    // telemetry line takes to shift out at 115200 baud.
+static uint8_t UartTryEnqueue(const char *text, size_t length)
+{
+    uint16_t used;
+    uint16_t available;
+    uint32_t primask = __get_PRIMASK();
+
+    if (length >= UART_TX_RING_SIZE)
+    {
+        return 0U;
+    }
+
     __disable_irq();
+    used = (g_uartTxHead >= g_uartTxTail)
+               ? (uint16_t)(g_uartTxHead - g_uartTxTail)
+               : (uint16_t)(UART_TX_RING_SIZE - g_uartTxTail + g_uartTxHead);
+    available = (uint16_t)(UART_TX_RING_SIZE - 1U - used);
+    if (length > available)
+    {
+        if (primask == 0U)
+        {
+            __enable_irq();
+        }
+        return 0U;
+    }
+
     for (size_t i = 0U; i < length; i++)
     {
-        uint16_t nextHead = (uint16_t)((g_uartTxHead + 1U) % UART_TX_RING_SIZE);
-        if (nextHead == g_uartTxTail)
-        {
-            break;
-        }
         g_uartTxRing[g_uartTxHead] = (uint8_t)text[i];
-        g_uartTxHead = nextHead;
+        g_uartTxHead = (uint16_t)((g_uartTxHead + 1U) % UART_TX_RING_SIZE);
     }
-    __enable_irq();
+    if (primask == 0U)
+    {
+        __enable_irq();
+    }
     UartTxKick();
+    return 1U;
+}
+
+static void ReportUartTxOverflow(void)
+{
+    uint32_t droppedMessages;
+    uint32_t droppedBytes;
+    uint32_t primask = __get_PRIMASK();
+    char message[112];
+
+    __disable_irq();
+    droppedMessages = g_uartTxDroppedMessages;
+    droppedBytes = g_uartTxDroppedBytes;
+    if (primask == 0U)
+    {
+        __enable_irq();
+    }
+    if (droppedMessages == 0U)
+    {
+        return;
+    }
+
+    snprintf(message, sizeof(message),
+             "event: type=uart_tx_overflow dropped_messages=%lu dropped_bytes=%lu\r\n",
+             (unsigned long)droppedMessages,
+             (unsigned long)droppedBytes);
+    if (UartTryEnqueue(message, strlen(message)) != 0U)
+    {
+        primask = __get_PRIMASK();
+        __disable_irq();
+        g_uartTxDroppedMessages -= droppedMessages;
+        g_uartTxDroppedBytes -= droppedBytes;
+        if (primask == 0U)
+        {
+            __enable_irq();
+        }
+    }
 }
 
 static void PrintHelp(void)
@@ -1745,7 +2011,7 @@ static uint8_t ProcessMaintenanceCommand(char *arguments)
     uint8_t ok;
     char msg[320];
 
-    if (end == arguments || requestId == 0UL || requestId > 2147483647UL)
+    if (end == arguments || requestId > 2147483647UL)
     {
         UartPrint("maintenance: id=0 type=error ok=0 error=invalid_request_id\r\n");
         return 1U;
@@ -1753,6 +2019,27 @@ static uint8_t ProcessMaintenanceCommand(char *arguments)
     while (*end == ' ' || *end == '\t')
     {
         end++;
+    }
+
+    if (requestId == 0UL)
+    {
+        if (strcmp(end, "manual_keepalive_up") == 0 && g_manualMotionDirection == 1U)
+        {
+            g_manualMotionLastKeepaliveMs = HAL_GetTick();
+            return 1U;
+        }
+        if (strcmp(end, "manual_keepalive_down") == 0 && g_manualMotionDirection == 2U)
+        {
+            g_manualMotionLastKeepaliveMs = HAL_GetTick();
+            return 1U;
+        }
+        if (strcmp(end, "manual_keepalive_up") == 0 ||
+            strcmp(end, "manual_keepalive_down") == 0)
+        {
+            return 1U;
+        }
+        UartPrint("maintenance: id=0 type=error ok=0 error=invalid_request_id\r\n");
+        return 1U;
     }
 
     if (strcmp(end, "status") == 0)

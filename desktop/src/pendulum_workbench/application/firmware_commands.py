@@ -17,8 +17,6 @@ class FirmwareCommand(str, Enum):
     ZERO = "zero"
     MANUAL_UP = "manual_up"
     MANUAL_DOWN = "manual_down"
-    MANUAL_KEEPALIVE_UP = "manual_keepalive_up"
-    MANUAL_KEEPALIVE_DOWN = "manual_keepalive_down"
     MANUAL_STOP = "manual_stop"
 
 
@@ -82,8 +80,6 @@ class FirmwareCommandService(QObject):
             FirmwareCommand.STATUS,
             FirmwareCommand.SWITCHES,
             FirmwareCommand.ANGLE,
-            FirmwareCommand.MANUAL_KEEPALIVE_UP,
-            FirmwareCommand.MANUAL_KEEPALIVE_DOWN,
         )
 
     def manual_start_up(self) -> int:
@@ -91,18 +87,6 @@ class FirmwareCommandService(QObject):
 
     def manual_start_down(self) -> int:
         return self._request(FirmwareCommand.MANUAL_DOWN, timeout_ms=self._MANUAL_COMMAND_TIMEOUT_MS)
-
-    def manual_keepalive_up(self) -> int:
-        return self._request(
-            FirmwareCommand.MANUAL_KEEPALIVE_UP,
-            timeout_ms=self._MANUAL_COMMAND_TIMEOUT_MS,
-        )
-
-    def manual_keepalive_down(self) -> int:
-        return self._request(
-            FirmwareCommand.MANUAL_KEEPALIVE_DOWN,
-            timeout_ms=self._MANUAL_COMMAND_TIMEOUT_MS,
-        )
 
     def manual_stop(self) -> int:
         return self._request(FirmwareCommand.MANUAL_STOP, timeout_ms=self._MANUAL_COMMAND_TIMEOUT_MS)

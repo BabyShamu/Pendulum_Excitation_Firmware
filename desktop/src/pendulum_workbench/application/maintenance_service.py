@@ -78,10 +78,10 @@ class MaintenanceService(QObject):
         self._manual_direction: str | None = None
         self._manual_stop_requested = False
         self._manual_failure_latched = False
+        self._manual_communication_failed = False
         self._manual_motion_state = ManualMotionState.IDLE
         self._manual_motion_message = "Manual pivot is idle."
         self._manual_keepalive = QTimer(self)
-        self._manual_keepalive.setSingleShot(True)
         self._manual_keepalive.timeout.connect(self._send_manual_keepalive)
         self._previous_connection = state.snapshot.connection
         self._previous_source = state.snapshot.data_source
@@ -90,7 +90,6 @@ class MaintenanceService(QObject):
         state.snapshot_changed.connect(self._on_application_snapshot)
         state.telemetry_received.connect(self._on_telemetry_sample)
         serial_client.device_message_received.connect(self._on_device_message)
-        serial_client.device_event_received.connect(self._on_device_event)
         serial_client.device_event_received.connect(self._on_device_event)
         commands.command_completed.connect(self._on_command_completed)
         commands.command_failed.connect(self._on_command_failed)
@@ -143,6 +142,8 @@ class MaintenanceService(QObject):
         self._manual_direction = direction
         self._manual_stop_requested = False
         self._manual_failure_latched = False
+        self._manual_communication_failed = False
+        self.serial_client.set_manual_heartbeat(None)
         self._manual_motion_state = (
             ManualMotionState.STARTING_UP if direction == "up" else ManualMotionState.STARTING_DOWN
         )
@@ -157,11 +158,11 @@ class MaintenanceService(QObject):
     def stop_manual_motion(self, reason: str = "button_release") -> None:
         if self._manual_direction is None:
             return
-        self._manual_keepalive.stop()
+        self._stop_manual_keepalive()
         self._manual_stop_requested = True
         self._manual_motion_state = ManualMotionState.STOPPING
         self._manual_motion_message = f"Stopping manual motion: {reason.replace('_', ' ')}."
-        if self._active_operation in ("manual_start", "manual", "manual_keepalive"):
+        if self._active_operation in ("manual_start", "manual"):
             self._active_operation = "manual_stop_pending"
         self._emit_snapshot()
         if not self.commands.is_busy:
@@ -249,7 +250,6 @@ class MaintenanceService(QObject):
             elif self._active_operation in (
                 "manual_start",
                 "manual",
-                "manual_keepalive",
                 "manual_stop",
                 "manual_stop_pending",
             ):
@@ -297,29 +297,12 @@ class MaintenanceService(QObject):
                 self.state.set_motion(MotionState.RUNNING)
                 self._manual_keepalive.start(MANUAL_KEEPALIVE_INTERVAL_MS)
                 self._emit_snapshot()
-        elif self._active_operation == "manual_keepalive":
-            expected = (
-                FirmwareCommand.MANUAL_KEEPALIVE_UP
-                if self._manual_direction == "up"
-                else FirmwareCommand.MANUAL_KEEPALIVE_DOWN
-            )
-            if command != expected or response.fields.get("active") != "1":
-                self._fail_manual_motion("Firmware did not confirm manual-motion keepalive")
-            elif self._manual_stop_requested:
-                self._send_manual_stop()
-            else:
-                self._active_operation = "manual"
-                self._manual_keepalive.start(MANUAL_KEEPALIVE_INTERVAL_MS)
         elif self._active_operation == "manual_stop_pending":
             if command in (
                 FirmwareCommand.MANUAL_UP,
                 FirmwareCommand.MANUAL_DOWN,
-                FirmwareCommand.MANUAL_KEEPALIVE_UP,
-                FirmwareCommand.MANUAL_KEEPALIVE_DOWN,
             ):
                 self._send_manual_stop()
-        if self._status_sync_deferred and self._active_operation is None:
-            self._request_status_sync()
         if self._status_sync_deferred and self._active_operation is None:
             self._request_status_sync()
 
@@ -488,7 +471,6 @@ class MaintenanceService(QObject):
         if self._active_operation in (
             "manual_start",
             "manual",
-            "manual_keepalive",
             "manual_stop",
             "manual_stop_pending",
         ):
@@ -573,20 +555,19 @@ class MaintenanceService(QObject):
     def _send_manual_keepalive(self) -> None:
         if self._manual_direction is None or self._manual_stop_requested:
             return
-        if self.commands.is_busy:
-            self._manual_keepalive.start(20)
-            return
-        self._active_operation = "manual_keepalive"
-        self._request(
-            self.commands.manual_keepalive_up
-            if self._manual_direction == "up"
-            else self.commands.manual_keepalive_down
-        )
+        try:
+            self.serial_client.set_manual_heartbeat(self._manual_direction)
+        except (RuntimeError, ValueError, OSError) as error:
+            self._fail_manual_motion(str(error))
+
+    def _stop_manual_keepalive(self) -> None:
+        self._manual_keepalive.stop()
+        self.serial_client.set_manual_heartbeat(None)
 
     def _send_manual_stop(self) -> None:
         if self._manual_direction is None:
             return
-        self._manual_keepalive.stop()
+        self._stop_manual_keepalive()
         if self.commands.is_busy:
             self._active_operation = "manual_stop_pending"
             return
@@ -597,19 +578,27 @@ class MaintenanceService(QObject):
             self._fail_manual_motion(str(error), retry_stop=False)
 
     def _finish_manual_stop(self, confirmed: bool, message: str) -> None:
-        self._manual_keepalive.stop()
+        self._stop_manual_keepalive()
         self._manual_direction = None
         self._manual_stop_requested = False
         self._active_operation = None
-        if confirmed and not self._manual_failure_latched:
+        if self._manual_failure_latched:
+            self._manual_motion_state = ManualMotionState.FAULT
+            severity = EventSeverity.ERROR
+        elif self._manual_communication_failed or not confirmed:
+            self._manual_motion_state = ManualMotionState.COMMUNICATION_STOP
+            severity = EventSeverity.ERROR
+        elif self._manual_motion_state in (
+            ManualMotionState.DEADMAN_STOP,
+            ManualMotionState.SAFETY_STOP,
+        ):
+            severity = EventSeverity.WARNING
+        else:
             self._manual_motion_state = ManualMotionState.IDLE
             self._manual_motion_message = message or "Manual pivot is idle."
             severity = EventSeverity.INFO
-        else:
-            self._manual_motion_state = ManualMotionState.FAULT
-            self._manual_motion_message = message or "Manual stop unconfirmed; firmware dead-man is the fallback."
-            severity = EventSeverity.ERROR
         self._manual_failure_latched = False
+        self._manual_communication_failed = False
         self.state.set_motion(
             MotionState.READY if self.state.snapshot.hardware_status.homed else MotionState.IDLE
         )
@@ -618,11 +607,11 @@ class MaintenanceService(QObject):
         self._request_status_sync()
 
     def _fail_manual_motion(self, message: str, *, retry_stop: bool = True) -> None:
-        self._manual_keepalive.stop()
-        self._manual_failure_latched = True
-        self._manual_motion_state = ManualMotionState.FAULT
+        self._stop_manual_keepalive()
+        self._manual_communication_failed = True
+        self._manual_motion_state = ManualMotionState.COMMUNICATION_STOP
         self._manual_motion_message = (
-            f"Manual motion communication failed: {self._user_facing_error(message)}"
+            f"Manual motion communication/safety stop: {self._user_facing_error(message)}"
         )
         self.state.report_event(EventSeverity.ERROR, self._manual_motion_message)
         self._emit_snapshot()
@@ -706,6 +695,8 @@ class MaintenanceService(QObject):
             self._operation_fault = True
             self._operation_message = f"Firmware fault appeared: {event.fields.get('code', 'unknown')}"
             if self._manual_direction is not None:
+                self._manual_failure_latched = True
+                self._manual_motion_message = self._operation_message
                 self.stop_manual_motion("blocking_fault")
             self._emit_snapshot()
             return
@@ -732,15 +723,22 @@ class MaintenanceService(QObject):
 
         direction = event.fields.get("direction", self._manual_direction or "unknown")
         reason = event.fields.get("reason", "unknown")
-        self._manual_keepalive.stop()
+        self._stop_manual_keepalive()
         self._manual_direction = None
         self._manual_stop_requested = False
         self._active_operation = None
-        self._manual_motion_state = (
-            ManualMotionState.FAULT
-            if reason in ("deadman_timeout", "interlock")
-            else ManualMotionState.IDLE
-        )
+        if self._manual_failure_latched:
+            self._manual_motion_state = ManualMotionState.FAULT
+        elif self._manual_communication_failed:
+            self._manual_motion_state = ManualMotionState.COMMUNICATION_STOP
+        elif reason == "deadman_timeout":
+            self._manual_motion_state = ManualMotionState.DEADMAN_STOP
+        elif reason == "interlock":
+            self._manual_motion_state = ManualMotionState.SAFETY_STOP
+        elif reason in ("upper_limit", "lower_limit"):
+            self._manual_motion_state = ManualMotionState.SAFETY_STOP
+        else:
+            self._manual_motion_state = ManualMotionState.IDLE
         self._manual_motion_message = f"Manual motion {direction} stopped: {reason.replace('_', ' ')}."
         self.state.set_motion(
             MotionState.READY if self.state.snapshot.hardware_status.homed else MotionState.IDLE
@@ -840,12 +838,13 @@ class MaintenanceService(QObject):
 
     def _invalidate_session(self, *, preserve_incomplete: bool = False) -> None:
         manual_was_active = self._manual_direction is not None
-        self._manual_keepalive.stop()
+        self._stop_manual_keepalive()
         if manual_was_active:
             self._manual_direction = None
             self._manual_stop_requested = False
             self._active_operation = None
-            self._manual_motion_state = ManualMotionState.FAULT
+            self._manual_communication_failed = True
+            self._manual_motion_state = ManualMotionState.COMMUNICATION_STOP
             self._manual_motion_message = (
                 "Serial session ended during manual motion; firmware dead-man timeout must stop the pivot."
             )

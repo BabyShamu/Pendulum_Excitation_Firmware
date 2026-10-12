@@ -1,5 +1,6 @@
 import logging
 import queue
+import threading
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -23,7 +24,7 @@ from pendulum_workbench.infrastructure.firmware_protocol import (
 )
 
 SERIAL_BAUD_RATE = 115200
-SERIAL_READ_TIMEOUT_S = 0.1
+SERIAL_READ_TIMEOUT_S = 0.02
 SERIAL_STARTUP_DELAY_S = 2.0
 TELEMETRY_STALE_AFTER_S = 1.5
 _LOGGER = logging.getLogger(__name__)
@@ -124,11 +125,21 @@ class SerialWorker(QThread):
         self._serial_factory = serial_factory or serial.Serial
         self._startup_delay_s = startup_delay_s
         self._command_queue: queue.Queue[tuple[str, str]] = queue.Queue()
+        self._manual_heartbeat_lock = threading.Lock()
+        self._manual_heartbeat_direction: str | None = None
+        self._manual_heartbeat_revision = 0
 
     def enqueue_command(self, request_id: str, command: str) -> None:
         if not command or "\r" in command or "\n" in command:
             raise ValueError("serial command must be a single non-empty line")
         self._command_queue.put((request_id, command))
+
+    def set_manual_heartbeat(self, direction: str | None) -> None:
+        if direction not in (None, "up", "down"):
+            raise ValueError("manual heartbeat direction must be 'up', 'down', or None")
+        with self._manual_heartbeat_lock:
+            self._manual_heartbeat_direction = direction
+            self._manual_heartbeat_revision += 1
 
     def run(self) -> None:
         connection = None
@@ -137,6 +148,7 @@ class SerialWorker(QThread):
         close_reason = "Serial connection closed"
         framer = SerialLineFramer()
         session_start = 0.0
+        heartbeat_revision = 0
         try:
             connection = self._serial_factory(
                 self.port,
@@ -177,6 +189,16 @@ class SerialWorker(QThread):
                         break
                     connection.write(b"live 1\r\n")
                     telemetry_started = True
+
+                with self._manual_heartbeat_lock:
+                    if self._manual_heartbeat_revision != heartbeat_revision:
+                        direction = self._manual_heartbeat_direction
+                        heartbeat_revision = self._manual_heartbeat_revision
+                        if direction is not None:
+                            command = f"manual_keepalive_{direction}"
+                            payload = f"maint 0 {command}\r\n".encode("ascii")
+                            if connection.write(payload) != len(payload):
+                                raise IOError("serial heartbeat was only partially written")
 
         except Exception as error:
             close_reason = f"Serial connection to {self.port} failed: {error}"
@@ -311,6 +333,16 @@ class SerialTelemetryClient(QObject):
         if worker is None or not worker.isRunning():
             raise RuntimeError("STM32 serial connection is not running")
         worker.enqueue_command(request_id, command)
+
+    def set_manual_heartbeat(self, direction: str | None) -> None:
+        worker = self._worker
+        if direction is None:
+            if worker is not None:
+                worker.set_manual_heartbeat(None)
+            return
+        if worker is None or not worker.isRunning():
+            raise RuntimeError("STM32 serial connection is not running")
+        worker.set_manual_heartbeat(direction)
 
     def disconnect(self) -> None:
         if self._worker is not None and self._worker.isRunning():

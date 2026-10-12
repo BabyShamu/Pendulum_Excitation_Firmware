@@ -369,6 +369,41 @@ class SerialWorkerTests(unittest.TestCase):
 
             self.assertEqual(devices[0].writes, [b"live 1\r\n"])
 
+    def test_manual_heartbeat_updates_replace_the_single_pending_value(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            devices: list[FakeSerial] = []
+
+            def serial_factory(port: str, baud_rate: int, **kwargs: object) -> FakeSerial:
+                device = FakeSerial(port, baud_rate, **kwargs)
+                devices.append(device)
+                return device
+
+            worker = SerialWorker(
+                "COM_HEARTBEAT_SLOT",
+                capture_root=Path(temporary_directory),
+                serial_factory=serial_factory,
+                startup_delay_s=0.0,
+            )
+            worker.set_manual_heartbeat("up")
+            worker.set_manual_heartbeat("down")
+            worker.set_manual_heartbeat("up")
+            worker.start()
+
+            deadline = time.monotonic() + 1.0
+            while time.monotonic() < deadline and (
+                not devices or b"maint 0 manual_keepalive_up\r\n" not in devices[0].writes
+            ):
+                self.qt_app.processEvents()
+                time.sleep(0.005)
+            worker.requestInterruption()
+            worker.wait(1000)
+            self.qt_app.processEvents()
+
+            heartbeats = [
+                write for write in devices[0].writes if write.startswith(b"maint 0 manual_keepalive_")
+            ]
+            self.assertEqual(heartbeats, [b"maint 0 manual_keepalive_up\r\n"])
+
     def test_real_mode_delivers_status_and_disconnects_without_hardware(self) -> None:
         temporary_directory = tempfile.TemporaryDirectory()
         self.addCleanup(temporary_directory.cleanup)

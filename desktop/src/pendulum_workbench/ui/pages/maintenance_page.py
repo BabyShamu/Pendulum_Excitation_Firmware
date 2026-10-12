@@ -265,7 +265,6 @@ class MaintenancePage(QWidget):
 
         controller.state.snapshot_changed.connect(self._update_application_state)
         controller.state.telemetry_received.connect(self._update_manual_position)
-        controller.state.telemetry_received.connect(self._update_manual_position)
         self.maintenance.snapshot_changed.connect(self._update_maintenance_snapshot)
         self._update_application_state(controller.state.snapshot)
         self._update_maintenance_snapshot(self.maintenance.snapshot)
