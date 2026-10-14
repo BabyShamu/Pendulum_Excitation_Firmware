@@ -26,6 +26,7 @@ class FirmwareCommand(str, Enum):
     LATCH_HOLD = "latch_hold"
     LATCH_OPEN = "latch_open"
     LATCH_STATUS = "latch_status"
+    FAULT_CLEAR = "fault_clear"
     SINE_START = "sine_start"
     SINE_STOP = "sine_stop"
     AUTO_RESONANCE_START = "autores_start"
@@ -113,6 +114,9 @@ class FirmwareCommandService(QObject):
 
     def latch_status(self) -> int:
         return self._request(FirmwareCommand.LATCH_STATUS)
+
+    def clear_fault(self) -> int:
+        return self._request(FirmwareCommand.FAULT_CLEAR)
 
     def start_vertical_sine(self, amplitude_mm: float, frequency_hz: float) -> int:
         if not math.isfinite(amplitude_mm) or amplitude_mm < 0.0:

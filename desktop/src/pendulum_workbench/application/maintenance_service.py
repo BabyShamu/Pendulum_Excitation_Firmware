@@ -301,6 +301,32 @@ class MaintenanceService(QObject):
         self._emit_snapshot()
         self._request(self.commands.latch_status)
 
+    def clear_fault(self) -> None:
+        self._require_connected()
+        if self.is_busy:
+            raise RuntimeError("Another maintenance operation is already active")
+
+        snapshot = self.state.snapshot
+        if self.is_homing or self.is_manual_motion_active or snapshot.motion in (
+            MotionState.RUNNING,
+            MotionState.HOMING,
+            MotionState.STOPPING,
+        ):
+            raise RuntimeError("Fault clear is blocked while motion is active")
+        if snapshot.hardware_status.active_motion_mode.strip().lower() != "idle":
+            raise RuntimeError("Fault clear requires firmware motion state to be idle")
+        if snapshot.recording in (
+            RecordingState.STARTING,
+            RecordingState.RECORDING,
+            RecordingState.STOPPING,
+        ):
+            raise RuntimeError("Fault clear is blocked while recording is active")
+
+        self._active_operation = "fault_clear"
+        self._operation_message = "Asking firmware to validate and clear the current fault..."
+        self._emit_snapshot()
+        self._request(self.commands.clear_fault)
+
     def _request(self, command: Callable[[], int]) -> None:
         try:
             command()
@@ -311,6 +337,8 @@ class MaintenanceService(QObject):
                 self._fail_homing(str(error))
             elif self._active_operation == "zero":
                 self._finish_zero(False, str(error))
+            elif self._active_operation == "fault_clear":
+                self._finish_fault_clear(False, str(error))
             elif self._active_operation in ("latch", "latch_status"):
                 self._finish_latch(PendulumLatchState.UNCONFIRMED, str(error))
             elif self._active_operation in (
@@ -346,6 +374,8 @@ class MaintenanceService(QObject):
             self._handle_homing_response(command, response)
         elif self._active_operation == "zero":
             self._handle_zero_response(command, response)
+        elif self._active_operation == "fault_clear":
+            self._handle_fault_clear_response(command, response)
         elif self._active_operation in ("latch", "latch_status"):
             self._handle_latch_response(command, response)
         elif self._active_operation == "manual_start":
@@ -523,6 +553,47 @@ class MaintenanceService(QObject):
             self._fail_homing(failure.message)
         elif self._active_operation == "zero":
             self._finish_zero(False, failure.message)
+        elif self._active_operation == "fault_clear":
+            self._finish_fault_clear(False, failure.message)
+
+    def _handle_fault_clear_response(
+        self,
+        command: FirmwareCommand,
+        response: MaintenanceResponse,
+    ) -> None:
+        if command != FirmwareCommand.FAULT_CLEAR:
+            self._finish_fault_clear(False, "Unexpected response to Clear Fault")
+            return
+        if response.fields.get("fault") != "0":
+            self._finish_fault_clear(False, "Firmware did not confirm fault=0")
+            return
+
+        cleared = response.fields.get("cleared") == "1"
+        message = (
+            "Fault cleared; refreshing firmware status."
+            if cleared
+            else "No active firmware fault; refreshing firmware status."
+        )
+        self._active_operation = None
+        self._operation_message = message
+        self.state.report_event(EventSeverity.INFO, message)
+        self._emit_snapshot()
+        self.run_system_check()
+
+    def _finish_fault_clear(self, success: bool, reason: str) -> None:
+        user_reasons = {
+            "upper_limit_still_active": "Cannot clear fault: upper limit still active",
+            "lower_limit_still_active": "Cannot clear fault: lower limit still active",
+            "angle_sensor_unavailable": "Cannot clear fault: angle sensor unavailable",
+            "motion_active": "Cannot clear fault while motion is active",
+            "homing_active": "Cannot clear fault while homing is active",
+            "recording_active": "Cannot clear fault while recording is active",
+        }
+        message = user_reasons.get(reason, f"Cannot clear fault: {reason}")
+        self._active_operation = None
+        self._operation_message = message
+        self.state.report_event(EventSeverity.INFO if success else EventSeverity.WARNING, message)
+        self._emit_snapshot()
 
     def _handle_latch_response(
         self,

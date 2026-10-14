@@ -298,6 +298,59 @@ class FirmwareManualMotionContractTests(unittest.TestCase):
         self.assertIn("HAL_I2C_IsDeviceReady", recover)
         self.assertIn("0x36U << 1", recover)
 
+    def test_fault_clear_command_validates_latched_condition_and_does_not_move_or_recalibrate(self) -> None:
+        maintenance = function_body("ProcessMaintenanceCommand")
+        clear_command = maintenance.split('if (strcmp(end, "fault_clear") == 0)', 1)[1].split(
+            'if (strncmp(end, "sine_start ", 11U) == 0)', 1
+        )[0]
+        for required_check in (
+            "g_homingActive != 0U",
+            "g_manualMotionDirection != 0U",
+            "g_run != 0U",
+            "g_sineRunning != 0U",
+            "g_parametricRunning != 0U",
+            "g_parametricTestRunning != 0U",
+            "g_parametricClosedLoopRunning != 0U",
+            "g_recording != 0U",
+            "previousFault == 1U && UpperLimitPressed() != 0U",
+            "upper_limit_still_active",
+            "previousFault == 2U && LowerLimitPressed() != 0U",
+            "lower_limit_still_active",
+            "previousFault == 3U && AS5600_ReadAngle(&angle) != HAL_OK",
+            "angle_sensor_unavailable",
+            "previousFault == 0U",
+            "cleared=0",
+            "g_closedLoopFault = 0U",
+            "g_closedLoopFaultPending = 0U",
+            "g_parametricClosedLoopAngleFailureCount = 0U",
+            "type=fault_clear ok=0 fault=%u error=%s",
+            "type=fault_clear ok=1 fault=0 cleared=1 previous_fault=%u",
+            "event: type=fault_cleared previous_fault=%u",
+        ):
+            self.assertIn(required_check, clear_command)
+        for forbidden_side_effect in (
+            "Home()",
+            "StepOne(",
+            "ClosedLoopActuatorKick()",
+            "ClosedLoopActuatorStop()",
+            "ServoLatchCommand(",
+            "g_homed =",
+            "g_travelSteps =",
+            "g_positionSteps =",
+            "g_stepsPerMm =",
+            "g_angleZeroRaw =",
+            "g_angleZeroValid =",
+            "g_servoLatchCommandedState =",
+        ):
+            self.assertNotIn(forbidden_side_effect, clear_command)
+
+        legacy_closed_loop = function_body("ProcessLine").split(
+            'if (strncmp(line, "parametric_closed_loop", 22) == 0', 1
+        )[1].split('if (strncmp(line, "scale ", 6) == 0', 1)[0]
+        self.assertIn("g_closedLoopFault != 0U", legacy_closed_loop)
+        self.assertNotIn("g_closedLoopFault = 0U", legacy_closed_loop)
+        self.assertNotIn("type=fault_cleared", legacy_closed_loop)
+
     def test_latch_firmware_interlocks_and_commanded_status_are_explicit(self) -> None:
         interlock = function_body("ServoLatchInterlockReason")
         for required_check in (
@@ -527,6 +580,56 @@ class FirmwareManualMotionContractTests(unittest.TestCase):
         self.assertIn("g_parametricClosedLoopRunning = 0U", stop)
         self.assertIn("ClosedLoopActuatorStop()", stop)
         self.assertIn("type=autores_stop ok=1 active=0 active_mode=%s", stop)
+
+    def test_fault_clear_is_correlated_condition_validated_and_non_motion_mutating(self) -> None:
+        maintenance = function_body("ProcessMaintenanceCommand")
+        fault_clear = maintenance.split('if (strcmp(end, "fault_clear") == 0)', 1)[1].split(
+            'if (strncmp(end, "sine_start ", 11U) == 0)', 1
+        )[0]
+        for required in (
+            "g_homingActive != 0U",
+            "g_manualMotionDirection != 0U",
+            "g_run != 0U",
+            "g_sineRunning != 0U",
+            "g_parametricRunning != 0U",
+            "g_parametricTestRunning != 0U",
+            "g_parametricClosedLoopRunning != 0U",
+            "g_recording != 0U",
+            "previousFault == 1U && UpperLimitPressed() != 0U",
+            "upper_limit_still_active",
+            "previousFault == 2U && LowerLimitPressed() != 0U",
+            "lower_limit_still_active",
+            "previousFault == 3U && AS5600_ReadAngle(&angle) != HAL_OK",
+            "angle_sensor_unavailable",
+            "previousFault == 0U",
+            "cleared=0",
+            "g_closedLoopFault = 0U",
+            "g_closedLoopFaultPending = 0U",
+            "event: type=fault_cleared previous_fault=%u",
+            "type=fault_clear ok=1 fault=0 cleared=1 previous_fault=%u",
+            "type=fault_clear ok=0 fault=%u error=%s",
+        ):
+            self.assertIn(required, fault_clear)
+        for forbidden_side_effect in (
+            "Home()",
+            "StepOne(",
+            "ClosedLoopActuatorKick()",
+            "ServoLatchCommand(",
+            "g_homed =",
+            "g_travelSteps =",
+            "g_positionSteps =",
+            "g_angleZeroRaw =",
+            "g_servoLatchCommandedState =",
+        ):
+            self.assertNotIn(forbidden_side_effect, fault_clear)
+        self.assertNotIn('"fault_clear"', function_body("Home"))
+
+        legacy_start = function_body("ProcessLine").split(
+            'if (strncmp(line, "parametric_closed_loop", 22) == 0', 1
+        )[1].split('if (strncmp(line, "scale ", 6) == 0', 1)[0]
+        self.assertIn("g_closedLoopFault != 0U", legacy_start)
+        self.assertNotIn("g_closedLoopFault = 0U", legacy_start)
+        self.assertNotIn("type=fault_cleared", legacy_start)
 
 
 if __name__ == "__main__":

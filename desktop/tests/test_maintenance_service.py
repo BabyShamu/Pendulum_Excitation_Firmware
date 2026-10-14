@@ -205,11 +205,67 @@ class MaintenanceFakeSerial:
                 f"zeroed={int(self.zeroed)} raw=2048 degrees=0.00"
                 f"{' error=as5600_unavailable' if not self.zeroed else ''}\r\n"
             )
+        elif command == "fault_clear":
+            previous_fault = self.fault_code
+            error = None
+            if self.manual_active:
+                error = "motion_active"
+            elif self.fault_code == 1 and self.upper_active:
+                error = "upper_limit_still_active"
+            elif self.fault_code == 2 and self.lower_active:
+                error = "lower_limit_still_active"
+            elif self.fault_code == 3 and not self.angle_available:
+                error = "angle_sensor_unavailable"
+            elif self.fault_code not in (0, 1, 2, 3):
+                error = "unknown_fault_code"
+            if error is not None:
+                response = (
+                    f"maintenance: id={request_id} type=fault_clear ok=0 "
+                    f"fault={self.fault_code} error={error}\r\n"
+                )
+            else:
+                if previous_fault != 0:
+                    self.fault_code = 0
+                    self._chunks.append(
+                        f"event: type=fault_cleared previous_fault={previous_fault}\r\n".encode("ascii")
+                    )
+                response = (
+                    f"maintenance: id={request_id} type=fault_clear ok=1 fault=0 "
+                    f"cleared={int(previous_fault != 0)}\r\n"
+                )
         elif command == "latch_status":
             response = (
                 f"maintenance: id={request_id} type=latch_status ok=1 state={self.latch_state} "
                 f"commanded={int(self.latch_state != 'unknown')}\r\n"
             )
+        elif command == "fault_clear":
+            previous_fault = self.fault_code
+            error = None
+            if self.manual_active:
+                error = "motion_active"
+            elif self.fault_code == 1 and self.upper_active:
+                error = "upper_limit_still_active"
+            elif self.fault_code == 2 and self.lower_active:
+                error = "lower_limit_still_active"
+            elif self.fault_code == 3 and not self.angle_available:
+                error = "angle_sensor_unavailable"
+            elif self.fault_code not in (0, 1, 2, 3):
+                error = "unknown_fault_code"
+            if error is not None:
+                response = (
+                    f"maintenance: id={request_id} type=fault_clear ok=0 "
+                    f"fault={self.fault_code} error={error}\r\n"
+                )
+            else:
+                if previous_fault != 0:
+                    self.fault_code = 0
+                    self._chunks.append(
+                        f"event: type=fault_cleared previous_fault={previous_fault}\r\n".encode("ascii")
+                    )
+                response = (
+                    f"maintenance: id={request_id} type=fault_clear ok=1 fault=0 "
+                    f"cleared={int(previous_fault != 0)}\r\n"
+                )
         elif command in ("latch_hold", "latch_open"):
             if self.reject_latch_commands:
                 response = (
@@ -647,7 +703,7 @@ class MaintenanceServiceTests(unittest.TestCase):
         self.assertEqual(controller.maintenance.snapshot.readiness, ReadinessState.SYSTEM_READY)
 
     def test_bit_fault_fails_and_is_logged(self) -> None:
-        controller, _device = self.create_connected_controller(fault_code=3)
+        controller, device = self.create_connected_controller(fault_code=3)
         events = []
         controller.state.event_added.connect(events.append)
 
@@ -658,6 +714,234 @@ class MaintenanceServiceTests(unittest.TestCase):
         self.assertEqual(snapshot.readiness, ReadinessState.FAULT)
         self.assertEqual(snapshot.checks[-1].state, CheckState.FAIL)
         self.assertTrue(any(event.severity.value == "Error" for event in events))
+        self.assertNotIn("fault_clear", [line.split("type=")[-1].split()[0] for line in device.maintenance_responses])
+
+    def test_fault_clear_ui_command_refreshes_status_and_reenables_home_after_check(self) -> None:
+        controller, device = self.create_connected_controller(fault_code=3, initially_homed=True)
+        window = MainWindow(controller)
+        self.addCleanup(window.close)
+        page = window.maintenance_page
+        self.assertTrue(self.wait_for(lambda: not controller.firmware_commands.is_busy))
+
+        self.assertEqual(controller.state.snapshot.hardware_status.fault, "Firmware fault 3")
+        self.assertTrue(page.clear_fault_button.isEnabled())
+        self.assertFalse(page.home_button.isEnabled())
+        with self.assertRaisesRegex(RuntimeError, "blocked by the firmware fault"):
+            controller.maintenance.start_homing()
+        home_count = device.home_motion_start_count
+        zeroed = device.zeroed
+
+        page.clear_fault_button.click()
+
+        self.assertTrue(
+            self.wait_for(
+                lambda: controller.maintenance.snapshot.bit_state == BitResultState.PASSED
+                and controller.maintenance.snapshot.readiness == ReadinessState.SYSTEM_READY
+                and controller.state.snapshot.hardware_status.fault_known
+                and controller.state.snapshot.hardware_status.fault is None
+                and not controller.firmware_commands.is_busy
+            )
+        )
+        self.assertTrue(any(b"fault_clear" in write for write in device.writes))
+        self.assertTrue(any("type=status" in response for response in device.maintenance_responses))
+        self.assertEqual(page.check_rows[CheckName.FAULT_STATE][0].text(), CheckState.PASS.value)
+        self.assertIn("Fault cleared", page.clear_fault_result_value.text())
+        self.assertTrue(page.clear_fault_button.isEnabled() is False)
+        self.assertEqual(device.home_motion_start_count, home_count)
+        self.assertEqual(device.zeroed, zeroed)
+
+        page.latch_state_value.setText(PendulumLatchState.OPEN.value)
+        device.latch_state = "open"
+        controller.maintenance.request_latch_status()
+        self.assertTrue(
+            self.wait_for(
+                lambda: controller.maintenance.snapshot.latch_state == PendulumLatchState.OPEN
+                and not controller.firmware_commands.is_busy
+            )
+        )
+        self.assertTrue(page.home_button.isEnabled())
+
+    def test_fault_clear_ui_shows_condition_specific_rejection(self) -> None:
+        controller, device = self.create_connected_controller(
+            fault_code=3,
+            angle_available=False,
+        )
+        window = MainWindow(controller)
+        self.addCleanup(window.close)
+        page = window.maintenance_page
+        self.assertTrue(self.wait_for(lambda: not controller.firmware_commands.is_busy))
+        self.assertTrue(page.clear_fault_button.isEnabled())
+
+        page.clear_fault_button.click()
+
+        self.assertTrue(
+            self.wait_for(
+                lambda: "Cannot clear fault: angle sensor unavailable"
+                in page.clear_fault_result_value.text()
+            )
+        )
+        self.assertEqual(device.fault_code, 3)
+        self.assertTrue(controller.state.snapshot.hardware_status.fault)
+
+    def test_fault_clear_ui_is_disabled_when_no_firmware_fault_is_reported(self) -> None:
+        controller, _device = self.create_connected_controller(fault_code=0)
+        window = MainWindow(controller)
+        self.addCleanup(window.close)
+        self.assertTrue(self.wait_for(lambda: not controller.firmware_commands.is_busy))
+
+        self.assertFalse(window.maintenance_page.clear_fault_button.isEnabled())
+
+    def test_fault_clear_rejects_faults_whose_condition_is_still_active(self) -> None:
+        blocked_cases = (
+            (1, True, False, "upper_limit_still_active"),
+            (2, False, True, "lower_limit_still_active"),
+            (3, False, False, "angle_sensor_unavailable"),
+        )
+        for fault_code, upper_active, lower_active, expected_error in blocked_cases:
+            with self.subTest(fault_code=fault_code):
+                controller, device = self.create_connected_controller(
+                    fault_code=fault_code,
+                    upper_active=upper_active,
+                    lower_active=lower_active,
+                    angle_available=fault_code != 3,
+                )
+                controller.maintenance.clear_fault()
+                self.assertTrue(
+                    self.wait_for(
+                        lambda: not controller.firmware_commands.is_busy
+                        and controller.maintenance.snapshot.operation is None
+                    )
+                )
+                response = FirmwareProtocolParser.parse_maintenance_response(
+                    device.maintenance_responses[-1]
+                )
+                self.assertEqual(response.response_type, "fault_clear")
+                self.assertFalse(response.ok)
+                self.assertEqual(response.fields["error"], expected_error)
+                self.assertEqual(device.fault_code, fault_code)
+                self.assertFalse(any("fault_cleared" in write.decode("ascii", errors="ignore")
+                                     for write in device.writes))
+
+    def test_fault_clear_is_correlated_safe_and_refreshes_system_check(self) -> None:
+        controller, device = self.create_connected_controller(
+            fault_code=1,
+            initially_homed=True,
+        )
+        device.latch_state = "open"
+        controller.maintenance.request_latch_status()
+        self.assertTrue(
+            self.wait_for(
+                lambda: controller.maintenance.snapshot.latch_state == PendulumLatchState.OPEN
+                and not controller.firmware_commands.is_busy
+            )
+        )
+        with self.assertRaisesRegex(RuntimeError, "blocked by the firmware fault"):
+            controller.maintenance.start_homing()
+
+        home_count = device.home_motion_start_count
+        angle_zero = device.zeroed
+        latch_state = device.latch_state
+        events = []
+        controller.state.event_added.connect(events.append)
+        controller.maintenance.clear_fault()
+
+        self.assertTrue(
+            self.wait_for(
+                lambda: controller.maintenance.snapshot.bit_state == BitResultState.PASSED
+                and controller.maintenance.snapshot.readiness == ReadinessState.SYSTEM_READY
+                and controller.state.snapshot.hardware_status.fault_known
+                and controller.state.snapshot.hardware_status.fault is None
+                and not controller.firmware_commands.is_busy
+            )
+        )
+        response = FirmwareProtocolParser.parse_maintenance_response(
+            next(
+                line for line in device.maintenance_responses
+                if "type=fault_clear" in line
+            )
+        )
+        self.assertTrue(response.ok)
+        self.assertEqual(response.fields["cleared"], "1")
+        self.assertEqual(response.fields["fault"], "0")
+        self.assertEqual(device.fault_code, 0)
+        self.assertEqual(device.home_motion_start_count, home_count)
+        self.assertEqual(device.zeroed, angle_zero)
+        self.assertEqual(device.latch_state, latch_state)
+        self.assertEqual(controller.state.snapshot.hardware_status.homed, True)
+        self.assertEqual(controller.state.snapshot.hardware_status.travel_span_steps, 1200)
+        self.assertEqual(controller.state.snapshot.hardware_status.position_steps, 0)
+        self.assertTrue(any("System check passed" in event.message for event in events))
+
+        controller.maintenance.start_homing()
+        self.assertTrue(
+            self.wait_for(
+                lambda: controller.state.snapshot.home_status == HomeStatus.HOMED
+                and not controller.firmware_commands.is_busy
+            )
+        )
+        self.assertEqual(device.home_motion_start_count, home_count + 1)
+
+    def test_fault_clear_succeeds_after_lower_limit_or_sensor_condition_recovers(self) -> None:
+        for fault_code in (2, 3):
+            with self.subTest(fault_code=fault_code):
+                controller, device = self.create_connected_controller(
+                    fault_code=fault_code,
+                    initially_homed=True,
+                    angle_available=True,
+                )
+                controller.maintenance.clear_fault()
+                self.assertTrue(
+                    self.wait_for(
+                        lambda: controller.maintenance.snapshot.bit_state == BitResultState.PASSED
+                        and controller.maintenance.snapshot.readiness == ReadinessState.SYSTEM_READY
+                        and not controller.firmware_commands.is_busy
+                    )
+                )
+                response = FirmwareProtocolParser.parse_maintenance_response(
+                    next(
+                        line for line in device.maintenance_responses
+                        if "type=fault_clear" in line
+                    )
+                )
+                self.assertTrue(response.ok)
+                self.assertEqual(response.fields["cleared"], "1")
+                self.assertEqual(device.fault_code, 0)
+
+    def test_fault_clear_with_no_active_fault_is_benign_and_runs_status_check(self) -> None:
+        controller, device = self.create_connected_controller(initially_homed=True)
+        events = []
+        controller.state.event_added.connect(events.append)
+
+        controller.maintenance.clear_fault()
+
+        self.assertTrue(
+            self.wait_for(
+                lambda: controller.maintenance.snapshot.bit_state == BitResultState.PASSED
+                and not controller.firmware_commands.is_busy
+            )
+        )
+        response = FirmwareProtocolParser.parse_maintenance_response(
+            next(line for line in device.maintenance_responses if "type=fault_clear" in line)
+        )
+        self.assertTrue(response.ok)
+        self.assertEqual(response.fields["cleared"], "0")
+        self.assertEqual(device.fault_code, 0)
+        self.assertFalse(any("fault_cleared" in event.message for event in events))
+
+    def test_fault_clear_is_blocked_while_motion_or_recording_is_active(self) -> None:
+        controller, device = self.create_connected_controller(fault_code=3)
+        for motion in (MotionState.RUNNING, MotionState.HOMING, MotionState.STOPPING):
+            with self.subTest(motion=motion):
+                controller.state.set_motion(motion)
+                with self.assertRaisesRegex(RuntimeError, "motion is active"):
+                    controller.maintenance.clear_fault()
+                self.assertFalse(any(b"fault_clear" in write for write in device.writes))
+
+        controller.state.set_motion(MotionState.FAULT)
+        controller.state.set_recording(RecordingState.RECORDING)
+        with self.assertRaisesRegex(RuntimeError, "recording is active"):
+            controller.maintenance.clear_fault()
+        self.assertFalse(any(b"fault_clear" in write for write in device.writes))
 
     def test_bit_as5600_failure_is_visible_and_logged(self) -> None:
         controller, device = self.create_connected_controller(angle_available=False)

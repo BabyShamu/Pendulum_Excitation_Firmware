@@ -137,10 +137,18 @@ class MaintenancePage(QWidget):
         )
         self.run_system_check_button.clicked.connect(self._run_system_check)
         bit_controls.addWidget(self.run_system_check_button)
+        self.clear_fault_button = QPushButton("Clear Fault")
+        self.clear_fault_button.setObjectName("clearFirmwareFaultButton")
+        self.clear_fault_button.clicked.connect(self._clear_fault)
+        bit_controls.addWidget(self.clear_fault_button)
         self.bit_timestamp_value = QLabel("No completed check")
         self.bit_timestamp_value.setObjectName("subtle")
         bit_controls.addWidget(self.bit_timestamp_value, 1)
         bit_layout.addLayout(bit_controls)
+        self.clear_fault_result_value = QLabel("")
+        self.clear_fault_result_value.setObjectName("subtle")
+        self.clear_fault_result_value.setWordWrap(True)
+        bit_layout.addWidget(self.clear_fault_result_value)
         layout.addWidget(bit_panel)
 
         home_panel = QFrame()
@@ -352,6 +360,13 @@ class MaintenancePage(QWidget):
         except (RuntimeError, ValueError) as error:
             self.home_progress_value.setText(str(error))
 
+    def _clear_fault(self) -> None:
+        self.clear_fault_result_value.setText("Waiting for firmware fault validation...")
+        try:
+            self.maintenance.clear_fault()
+        except (RuntimeError, ValueError) as error:
+            self.clear_fault_result_value.setText(str(error))
+
     def _start_homing(self) -> None:
         try:
             self.maintenance.start_homing()
@@ -425,6 +440,16 @@ class MaintenancePage(QWidget):
             and not blocking_fault
         )
         self.run_system_check_button.setEnabled(connected and not busy)
+        self.clear_fault_button.setEnabled(
+            connected
+            and blocking_fault
+            and not busy
+            and not recording_active
+            and not moving
+            and not self.maintenance.is_manual_motion_active
+            and snapshot.motion != MotionState.HOMING
+            and snapshot.hardware_status.active_motion_mode.strip().lower() == "idle"
+        )
         home_otherwise_enabled = (
             connected and not busy and not blocking_fault and not recording_active and not moving
         )
@@ -481,6 +506,10 @@ class MaintenancePage(QWidget):
         }[snapshot.readiness]
         self.readiness_detail.setText(detail)
         self.bit_result_value.setText(snapshot.bit_state.value)
+        if snapshot.operation == "fault_clear" or snapshot.operation_message.startswith(
+            ("Cannot clear fault:", "Fault cleared;", "No active firmware fault;")
+        ):
+            self.clear_fault_result_value.setText(snapshot.operation_message)
         for result in snapshot.checks:
             state_label, detail_label = self.check_rows[result.name]
             state_label.setText(result.state.value)

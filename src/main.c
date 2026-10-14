@@ -2221,6 +2221,7 @@ static void PrintHelp(void)
     UartPrint("  status          - print current settings\r\n");
     UartPrint("  switches        - show upper/lower switch states\r\n");
     UartPrint("  maint <id> <status|switches|angle|home|zero|manual_up|manual_down|manual_keepalive_up|manual_keepalive_down|manual_stop|latch_hold|latch_open|latch_status>\r\n");
+    UartPrint("  maint <id> fault_clear - validate and clear a latched closed-loop fault\r\n");
     UartPrint("  diag            - print low-level firmware diagnostics\r\n");
     UartPrint("  angle           - read AS5600 raw angle (0..4095)\r\n");
     UartPrint("  zero            - set current pendulum angle to 0 degrees\r\n");
@@ -2593,6 +2594,84 @@ static uint8_t ProcessMaintenanceCommand(char *arguments)
                      end,
                      ServoLatchStateName(g_servoLatchCommandedState),
                      (unsigned int)pulseUs);
+        }
+        UartPrint(msg);
+        return 1U;
+    }
+
+    if (strcmp(end, "fault_clear") == 0)
+    {
+        uint8_t previousFault = g_closedLoopFault;
+        const char *error = NULL;
+
+        if (g_homingActive != 0U)
+        {
+            error = "homing_active";
+        }
+        else if (g_manualMotionDirection != 0U || g_run != 0U || g_sineRunning != 0U ||
+                 g_parametricRunning != 0U || g_parametricTestRunning != 0U ||
+                 g_parametricClosedLoopRunning != 0U)
+        {
+            error = "motion_active";
+        }
+        else if (g_recording != 0U)
+        {
+            error = "recording_active";
+        }
+        else if (previousFault == 1U && UpperLimitPressed() != 0U)
+        {
+            error = "upper_limit_still_active";
+        }
+        else if (previousFault == 2U && LowerLimitPressed() != 0U)
+        {
+            error = "lower_limit_still_active";
+        }
+        else if (previousFault == 3U && AS5600_ReadAngle(&angle) != HAL_OK)
+        {
+            error = "angle_sensor_unavailable";
+        }
+        else if (previousFault > 3U)
+        {
+            error = "unknown_fault_code";
+        }
+
+        if (error != NULL)
+        {
+            snprintf(msg, sizeof(msg),
+                     "maintenance: id=%lu type=fault_clear ok=0 fault=%u error=%s\r\n",
+                     requestId,
+                     (unsigned int)g_closedLoopFault,
+                     error);
+        }
+        else if (previousFault == 0U)
+        {
+            snprintf(msg, sizeof(msg),
+                     "maintenance: id=%lu type=fault_clear ok=1 fault=0 cleared=0\r\n",
+                     requestId);
+        }
+        else
+        {
+            uint32_t primask = __get_PRIMASK();
+            char eventMsg[80];
+            __disable_irq();
+            g_closedLoopFault = 0U;
+            g_closedLoopFaultPending = 0U;
+            if (previousFault == 3U)
+            {
+                g_parametricClosedLoopAngleFailureCount = 0U;
+            }
+            if (primask == 0U)
+            {
+                __enable_irq();
+            }
+            snprintf(eventMsg, sizeof(eventMsg),
+                     "event: type=fault_cleared previous_fault=%u\r\n",
+                     (unsigned int)previousFault);
+            UartPrint(eventMsg);
+            snprintf(msg, sizeof(msg),
+                     "maintenance: id=%lu type=fault_clear ok=1 fault=0 cleared=1 previous_fault=%u\r\n",
+                     requestId,
+                     (unsigned int)previousFault);
         }
         UartPrint(msg);
         return 1U;
@@ -3279,6 +3358,11 @@ static void ProcessLine(char *line)
                 UartPrint("closed loop rejected: run home first\r\n");
                 return;
             }
+            if (g_closedLoopFault != 0U)
+            {
+                UartPrint("closed loop rejected: blocking fault; use maint <id> fault_clear\r\n");
+                return;
+            }
 
             g_sineRunning = 0U;
             g_parametricRunning = 0U;
@@ -3302,12 +3386,6 @@ static void ProcessLine(char *line)
             g_parametricClosedLoopStartMs = now;
             g_parametricClosedLoopNextSampleMs = now + PARAMETRIC_TEST_PERIOD_MS;
             g_parametricClosedLoopTargetSteps = g_positionSteps;
-            if (g_closedLoopFault != 0U)
-            {
-                UartPrint("event: type=fault_cleared\r\n");
-            }
-            g_closedLoopFault = 0U;
-            g_closedLoopFaultPending = 0U;
             g_closedLoopKickCount = 0U;
             g_closedLoopTimerArmCount = 0U;
             g_tim6IrqCount = 0U;

@@ -92,3 +92,11 @@ class FirmwareProtocolParserTests(unittest.TestCase):
         self.assertEqual(recovery.fields["sda_after_reinit"], "0")
         self.assertEqual(restored.name, "angle_sensor_restored")
         self.assertEqual(restored.fields["outage_ms"], "191")
+
+    def test_fault_cleared_event_preserves_previous_fault_code(self) -> None:
+        event = FirmwareProtocolParser.parse_device_event(
+            "event: type=fault_cleared previous_fault=3"
+        )
+
+        self.assertEqual(event.name, "fault_cleared")
+        self.assertEqual(event.fields["previous_fault"], "3")

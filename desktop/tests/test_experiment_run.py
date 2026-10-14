@@ -21,6 +21,7 @@ from pendulum_workbench.domain.models import (
     ConnectionState,
     DataSourceMode,
     EventSeverity,
+    HardwareStatus,
     HomeStatus,
     MotionState,
     RecordingState,
@@ -816,6 +817,20 @@ class ExperimentRunTests(unittest.TestCase):
                 and controller.state.snapshot.recording == RecordingState.INTERRUPTED
             )
         )
+
+    def test_autoresonance_start_remains_blocked_by_latched_firmware_fault(self) -> None:
+        directory = self.temporary_directory()
+        controller, _device, _repository = self.create_connected_controller(directory)
+        self.addCleanup(controller.shutdown)
+        self.prepare_ready_held_system(controller, _device)
+        controller.state.set_hardware_status(
+            HardwareStatus(fault="Firmware fault 3", fault_known=True)
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "System Check and Home|blocking firmware fault"):
+            controller.experiment_run.start(AutoResonanceDefinition(5.0, 0.0, 30.0))
+
+        self.assertFalse(controller.experiment_recorder.is_recording)
 
     def test_serial_disconnect_during_run_still_interrupts_transaction(self) -> None:
         directory = self.temporary_directory()
