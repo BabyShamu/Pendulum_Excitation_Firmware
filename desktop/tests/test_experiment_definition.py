@@ -4,6 +4,7 @@ from pendulum_workbench.domain.experiment_run import (
     AutoResonanceDefinition,
     ExperimentMode,
     ExperimentRunState,
+    PhaseTrackedSineDefinition,
     VerticalSineDefinition,
 )
 
@@ -107,6 +108,42 @@ class AutoResonanceDefinitionTests(unittest.TestCase):
                 0.0,
                 20.0,
                 mode=ExperimentMode.VERTICAL_SINUSOIDAL_EXCITATION,
+            ).validate()
+
+
+class PhaseTrackedSineDefinitionTests(unittest.TestCase):
+    def test_phase_tracked_mode_has_distinct_name_and_preserves_metadata(self) -> None:
+        definition = PhaseTrackedSineDefinition(5.0, -20.0, 12.0, label="Trace", notes="replay")
+
+        definition.validate()
+        self.assertEqual(definition.mode, ExperimentMode.PHASE_TRACKED_SINE_AUTO_RESONANCE)
+        self.assertEqual(
+            definition.final_name(17.31),
+            "Trace_PTAR_A5mm_Phim20deg_Thetap17.31deg_T12s",
+        )
+        manifest = definition.manifest_values(measured_initial_angle_deg=17.31)
+        self.assertEqual(manifest["experiment_mode"], "PHASE_TRACKED_SINE_AUTO_RESONANCE")
+        self.assertEqual(manifest["commanded_amplitude_mm"], 5.0)
+        self.assertEqual(manifest["commanded_phase_deg"], -20.0)
+        self.assertEqual(manifest["requested_duration_s"], 12.0)
+        self.assertNotIn("commanded_frequency_hz", manifest)
+
+    def test_rejects_wrong_mode_invalid_amplitude_phase_or_duration(self) -> None:
+        for values in (
+            (0.0, 0.0, 12.0),
+            (-1.0, 0.0, 12.0),
+            (5.0, float("nan"), 12.0),
+            (5.0, float("inf"), 12.0),
+            (5.0, 0.0, 0.0),
+        ):
+            with self.subTest(values=values), self.assertRaises(ValueError):
+                PhaseTrackedSineDefinition(*values).validate()
+        with self.assertRaisesRegex(ValueError, "requires Phase-Tracked"):
+            PhaseTrackedSineDefinition(
+                5.0,
+                0.0,
+                12.0,
+                mode=ExperimentMode.AUTO_RESONANCE_PARAMETRIC_CLOSED_LOOP,
             ).validate()
 
 

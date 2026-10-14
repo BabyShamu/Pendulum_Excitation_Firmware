@@ -360,11 +360,14 @@ class FirmwareManualMotionContractTests(unittest.TestCase):
             "g_sineRunning",
             "g_parametricRunning",
             "g_parametricTestRunning",
-            "g_parametricClosedLoopRunning",
+            "ClosedLoopActuatorIsActive()",
             "g_recording",
             "g_closedLoopFault",
         ):
             self.assertIn(required_check, interlock)
+        actuator_activity = function_body("ClosedLoopActuatorIsActive")
+        self.assertIn("g_parametricClosedLoopRunning", actuator_activity)
+        self.assertIn("g_phaseTrackedSineRunning", actuator_activity)
         handler = function_body("ProcessMaintenanceCommand")
         for protocol_term in ("latch_status", "latch_hold", "latch_open", "commanded=1"):
             self.assertIn(protocol_term, handler)
@@ -630,6 +633,68 @@ class FirmwareManualMotionContractTests(unittest.TestCase):
         self.assertIn("g_closedLoopFault != 0U", legacy_start)
         self.assertNotIn("g_closedLoopFault = 0U", legacy_start)
         self.assertNotIn("type=fault_cleared", legacy_start)
+
+    def test_phase_tracked_sine_reuses_phase_basis_without_mutating_existing_autores_controller(self) -> None:
+        phase_sine = function_body("UpdatePhaseTrackedSine")
+        for required in (
+            "atan2f(quadratureAgc, -directAgc)",
+            "hypotf(directAgc, quadratureAgc)",
+            "WrapRadiansToPi",
+            "measuredOmega",
+            "PHASE_TRACKED_OMEGA_FILTER_TAU_S",
+            "PHASE_TRACKED_PHASE_CORRECTION_GAIN",
+            "PHASE_TRACKED_MAX_PHASE_RATE_RAD_S",
+            "PHASE_TRACKED_MIN_VECTOR_MAGNITUDE",
+            "PHASE_TRACKED_MAX_UNCONFIDENT_MS",
+            "g_phaseTrackedSine.omega2xRadS * dt",
+            "g_phaseTrackedSine.trackedPhaseRad -",
+            "sinf(g_phaseTrackedSine.trackedPhaseRad -",
+            "g_phaseTrackedSine.amplitudeMm * normalizedSine",
+            "PHASE_TRACKED_START_RAMP_MS",
+            "g_parametricClosedLoopTargetSteps = targetSteps",
+            "CLOSED_LOOP_MAX_MM",
+            "CLOSED_LOOP_TRAVEL_MARGIN_MM",
+        ):
+            self.assertIn(required, phase_sine)
+        maintenance = function_body("ProcessMaintenanceCommand")
+        self.assertIn('strncmp(end, "phase_sine_start ", 17U)', maintenance)
+        self.assertIn('strcmp(end, "phase_sine_stop") == 0', maintenance)
+        phase_start = maintenance.split(
+            'if (strncmp(end, "phase_sine_start ", 17U) == 0)', 1
+        )[1].split('if (strcmp(end, "phase_sine_stop") == 0)', 1)[0]
+        self.assertIn("currentPositionMm = (float)g_positionSteps / g_stepsPerMm", phase_start)
+        self.assertIn("g_phaseTrackedSine.startPositionMm = currentPositionMm", phase_start)
+        self.assertIn("fabsf(currentPositionMm) > amplitudeMm", phase_start)
+        for diagnostic_field in (
+            "phase2_raw_rad",
+            "phase2_tracked_rad",
+            "omega_2x_rad_s",
+            "phase_magnitude",
+            "normalized_sine",
+            "target_mm",
+            "actual_mm",
+        ):
+            self.assertIn(diagnostic_field, phase_start)
+
+        existing_autores = function_body("UpdateParametricClosedLoop")
+        self.assertIn("g_parametricClosedLoopPhaseCos", existing_autores)
+        self.assertIn("g_parametricClosedLoopPhaseSin", existing_autores)
+        self.assertNotIn("g_phaseTrackedSine.", existing_autores)
+        self.assertNotIn("g_phaseTrackedSine", function_body("UpdateParametricTest"))
+
+        for setting in (
+            "#define PHASE_TRACKED_MIN_VECTOR_MAGNITUDE 0.05f",
+            "#define PHASE_TRACKED_MAX_PHASE_RATE_RAD_S 40.0f",
+            "#define PHASE_TRACKED_OMEGA_FILTER_TAU_S   0.05f",
+            "#define PHASE_TRACKED_PHASE_CORRECTION_GAIN 0.15f",
+            "#define PHASE_TRACKED_MAX_UNCONFIDENT_MS  250U",
+            "#define PHASE_TRACKED_START_RAMP_MS       250U",
+        ):
+            self.assertIn(setting, FIRMWARE_SOURCE)
+
+        self.assertRegex(FIRMWARE_SOURCE, r"#define CLOSED_LOOP_MAX_MM\s+7\.5f")
+        self.assertRegex(FIRMWARE_SOURCE, r"#define CLOSED_LOOP_TRAVEL_MARGIN_MM\s+2\.0f")
+        self.assertRegex(FIRMWARE_SOURCE, r"#define CLOSED_LOOP_MAX_STEP_HZ\s+6000U")
 
 
 if __name__ == "__main__":

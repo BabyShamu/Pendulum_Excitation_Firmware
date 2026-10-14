@@ -88,6 +88,18 @@
 #define CLOSED_LOOP_PHASE_DIR_SETUP      1U
 #define CLOSED_LOOP_PHASE_STEP_HIGH      2U
 #define CLOSED_LOOP_PHASE_INTERSTEP      3U
+#define PHASE_TRACKED_MIN_VECTOR_MAGNITUDE 0.05f
+#define PHASE_TRACKED_MAX_PHASE_RATE_RAD_S 40.0f
+#define PHASE_TRACKED_OMEGA_FILTER_TAU_S   0.05f
+#define PHASE_TRACKED_PHASE_CORRECTION_GAIN 0.15f
+#define PHASE_TRACKED_MAX_PHASE_CORRECTION_RAD 0.1f
+#define PHASE_TRACKED_MAX_UNCONFIDENT_MS  250U
+#define PHASE_TRACKED_START_RAMP_MS       250U
+#define PHASE_TRACKED_STATUS_ACQUIRING    0U
+#define PHASE_TRACKED_STATUS_MEASURED     1U
+#define PHASE_TRACKED_STATUS_PROPAGATED   2U
+#define PHASE_TRACKED_STATUS_LOW          3U
+#define PHASE_TRACKED_STATUS_FAULT        4U
 #define LIMIT_DEBOUNCE_MS                8U
 #define PARAMETRIC_ANGLE_TIME_CONST_S 0.05f
 #define PARAMETRIC_DC_BLOCK_TIME_CONST_S 2.0f
@@ -117,6 +129,38 @@ typedef struct
     AS5600LineState afterBusClear;
     AS5600LineState afterReinit;
 } AS5600RecoveryLineStates;
+
+typedef struct
+{
+    uint8_t filterValid;
+    uint8_t phaseValid;
+    uint8_t omegaValid;
+    uint8_t invalidSinceActive;
+    uint8_t status;
+    uint32_t startMs;
+    uint32_t nextSampleMs;
+    uint32_t lastUpdateMs;
+    uint32_t lastPhaseMeasurementMs;
+    uint32_t phaseAcquiredMs;
+    uint32_t invalidSinceMs;
+    uint32_t sampleCount;
+    uint32_t angleFailureCount;
+    float amplitudeMm;
+    float phaseOffsetRad;
+    float startPositionMm;
+    float dcEstimate;
+    float previousDcBlocked;
+    float quadratureFiltered;
+    float directAgcLogGain;
+    float quadratureAgcLogGain;
+    float previousRawPhaseRad;
+    float measuredUnwrappedPhaseRad;
+    float trackedPhaseRad;
+    float omega2xRadS;
+    float phaseMagnitude;
+    float normalizedSine;
+    float commandedTargetMm;
+} PhaseTrackedSineState;
 
 static void GPIO_Init(void);
 static void USART2_Init(void);
@@ -160,7 +204,10 @@ static uint8_t ServoLatchPwmInitialize(void);
 static uint8_t ServoLatchCommand(uint16_t pulseUs, uint8_t commandedState);
 static const char *ServoLatchStateName(uint8_t state);
 static const char *ServoLatchInterlockReason(void);
+static uint8_t ClosedLoopActuatorIsActive(void);
 static const char *ActiveModeName(void);
+static float WrapRadiansToPi(float angleRad);
+static void UpdatePhaseTrackedSine(void);
 static void ReturnToCenter(void);
 static void UpdateSine(void);
 static void UpdateParametric(void);
@@ -249,6 +296,7 @@ static float g_parametricTestQuadAgcLogGain = 0.0f;
 static float g_parametricTestRateLimitedRad = 0.0f;
 static uint32_t g_parametricTestSampleCount = 0U;
 static volatile uint8_t g_parametricClosedLoopRunning = 0U;
+static volatile uint8_t g_phaseTrackedSineRunning = 0U;
 static volatile uint8_t g_parametricClosedLoopExperimentMode = 0U;
 static volatile int32_t g_parametricClosedLoopTargetSteps = 0;
 static float g_parametricClosedLoopAmplitudeMm = 0.0f;
@@ -275,6 +323,7 @@ static float g_parametricClosedLoopQuadFiltered = 0.0f;
 static float g_parametricClosedLoopDirectAgcLogGain = 0.0f;
 static float g_parametricClosedLoopQuadAgcLogGain = 0.0f;
 static float g_parametricClosedLoopRateLimitedRad = 0.0f;
+static PhaseTrackedSineState g_phaseTrackedSine = {0};
 static uint8_t g_liveTelemetry = 0U;
 static uint8_t g_recording = 0U;
 static uint8_t g_suppressPromptOnce = 0U;
@@ -435,7 +484,7 @@ int main(void)
     while (1)
     {
         ReportClosedLoopFault();
-        if (g_parametricTestRunning == 0U && g_parametricClosedLoopRunning == 0U)
+        if (g_parametricTestRunning == 0U && ClosedLoopActuatorIsActive() == 0U)
         {
             ReportSwitchChanges();
         }
@@ -463,6 +512,10 @@ int main(void)
         if (g_manualMotionDirection != 0U)
         {
             UpdateManualMotion();
+        }
+        else if (g_phaseTrackedSineRunning != 0U)
+        {
+            UpdatePhaseTrackedSine();
         }
         else if (g_parametricClosedLoopRunning != 0U)
         {
@@ -1000,10 +1053,16 @@ static void ClosedLoopActuatorStop(void)
     }
 }
 
+static uint8_t ClosedLoopActuatorIsActive(void)
+{
+    return (g_parametricClosedLoopRunning != 0U || g_phaseTrackedSineRunning != 0U) ? 1U : 0U;
+}
+
 static void ClosedLoopActuatorFault(uint8_t fault)
 {
     g_parametricClosedLoopRunning = 0U;
     g_parametricClosedLoopExperimentMode = 0U;
+    g_phaseTrackedSineRunning = 0U;
     g_closedLoopFault = fault;
     g_closedLoopFaultPending = 1U;
     TIM6->CR1 &= ~TIM_CR1_CEN;
@@ -1019,7 +1078,7 @@ static void ClosedLoopActuatorOnTimer(void)
 
     g_closedLoopActuatorCallbackCount++;
 
-    if (g_parametricClosedLoopRunning == 0U)
+    if (ClosedLoopActuatorIsActive() == 0U)
     {
         ClosedLoopActuatorStop();
         return;
@@ -1086,7 +1145,7 @@ static void ClosedLoopActuatorKick(void)
 
     g_closedLoopKickCount++;
     __disable_irq();
-    if (g_parametricClosedLoopRunning != 0U &&
+    if (ClosedLoopActuatorIsActive() != 0U &&
         g_closedLoopActuatorPhase == CLOSED_LOOP_PHASE_IDLE)
     {
         g_closedLoopActuatorPhase = CLOSED_LOOP_PHASE_INTERSTEP;
@@ -1354,7 +1413,7 @@ static const char *ServoLatchInterlockReason(void)
         return "manual_motion_active";
     }
     if (g_run != 0U || g_sineRunning != 0U || g_parametricRunning != 0U ||
-        g_parametricTestRunning != 0U || g_parametricClosedLoopRunning != 0U)
+        g_parametricTestRunning != 0U || ClosedLoopActuatorIsActive() != 0U)
     {
         return "motion_active";
     }
@@ -1400,6 +1459,7 @@ static void ManualStepTimerOnTimer(void)
 static void Jog(uint8_t dir, uint32_t steps)
 {
     g_parametricClosedLoopRunning = 0U;
+    g_phaseTrackedSineRunning = 0U;
     ClosedLoopActuatorStop();
     g_parametricTestRunning = 0U;
     g_sineRunning = 0U;
@@ -1432,6 +1492,7 @@ static void Home(void)
     g_homed = 0U;
     g_homingActive = 1U;
     g_parametricClosedLoopRunning = 0U;
+    g_phaseTrackedSineRunning = 0U;
     ClosedLoopActuatorStop();
     g_parametricTestRunning = 0U;
     g_sineRunning = 0U;
@@ -2083,6 +2144,281 @@ static void UpdateParametricClosedLoop(void)
     UartPrint(msg);
 }
 
+static float WrapRadiansToPi(float angleRad)
+{
+    float wrapped = fmodf(angleRad + PI_F, 2.0f * PI_F);
+    if (wrapped < 0.0f)
+    {
+        wrapped += 2.0f * PI_F;
+    }
+    return wrapped - PI_F;
+}
+
+static void UpdatePhaseTrackedSine(void)
+{
+    uint16_t angle = 0U;
+    uint32_t now = HAL_GetTick();
+    uint32_t elapsedMs;
+    float dt;
+    float thetaRad = 0.0f;
+    float dcBlocked = 0.0f;
+    float directAgc;
+    float quadratureAgc;
+    float phaseRawRad = NAN;
+    float phaseErrorRad = 0.0f;
+    float phaseIncrement;
+    float measurementDt;
+    float measuredOmega;
+    float magnitude = 0.0f;
+    float normalizedSine = 0.0f;
+    float targetMm;
+    float motorTargetMm;
+    float ramp;
+    int32_t targetSteps;
+    int32_t allowedHalfTravelSteps;
+    int32_t travelMarginSteps;
+    int32_t actualSteps;
+    uint8_t angleValid;
+    char msg[360];
+
+    if ((int32_t)(now - g_phaseTrackedSine.nextSampleMs) < 0)
+    {
+        return;
+    }
+    do
+    {
+        g_phaseTrackedSine.nextSampleMs += PARAMETRIC_TEST_PERIOD_MS;
+    } while ((int32_t)(now - g_phaseTrackedSine.nextSampleMs) >= 0);
+
+    elapsedMs = now - g_phaseTrackedSine.lastUpdateMs;
+    g_phaseTrackedSine.lastUpdateMs = now;
+    dt = (elapsedMs == 0U)
+             ? ((float)PARAMETRIC_TEST_PERIOD_MS / 1000.0f)
+             : ((float)elapsedMs / 1000.0f);
+    angleValid = (AS5600_ReadAngle(&angle) == HAL_OK) ? 1U : 0U;
+
+    if (angleValid != 0U)
+    {
+        float thetaDeg = RelativeAngleDegrees(angle);
+        float thetaSq;
+
+        thetaRad = thetaDeg * (PI_F / 180.0f);
+        thetaSq = thetaRad * thetaRad;
+        if (g_phaseTrackedSine.filterValid == 0U)
+        {
+            g_phaseTrackedSine.dcEstimate = thetaSq;
+            dcBlocked = 0.0f;
+            g_phaseTrackedSine.previousDcBlocked = 0.0f;
+            g_phaseTrackedSine.quadratureFiltered = 0.0f;
+            g_phaseTrackedSine.filterValid = 1U;
+        }
+        else
+        {
+            float dcAlpha = dt / (dt + PARAMETRIC_DC_BLOCK_TIME_CONST_S);
+            g_phaseTrackedSine.dcEstimate += dcAlpha *
+                                             (thetaSq - g_phaseTrackedSine.dcEstimate);
+            dcBlocked = thetaSq - g_phaseTrackedSine.dcEstimate;
+            g_phaseTrackedSine.quadratureFiltered =
+                0.9048f * g_phaseTrackedSine.quadratureFiltered +
+                20.0f * dcBlocked -
+                20.0f * g_phaseTrackedSine.previousDcBlocked;
+            g_phaseTrackedSine.previousDcBlocked = dcBlocked;
+        }
+
+        directAgc = ParametricTestAgc(
+            dcBlocked,
+            &g_phaseTrackedSine.directAgcLogGain);
+        quadratureAgc = ParametricTestAgc(
+            g_phaseTrackedSine.quadratureFiltered,
+            &g_phaseTrackedSine.quadratureAgcLogGain);
+        magnitude = hypotf(directAgc, quadratureAgc);
+        g_phaseTrackedSine.phaseMagnitude = magnitude;
+
+        if (isfinite(magnitude) && magnitude >= PHASE_TRACKED_MIN_VECTOR_MAGNITUDE)
+        {
+            phaseRawRad = atan2f(quadratureAgc, -directAgc);
+            if (g_phaseTrackedSine.phaseValid == 0U)
+            {
+                g_phaseTrackedSine.phaseValid = 1U;
+                g_phaseTrackedSine.omegaValid = 0U;
+                g_phaseTrackedSine.previousRawPhaseRad = phaseRawRad;
+                g_phaseTrackedSine.measuredUnwrappedPhaseRad = phaseRawRad;
+                g_phaseTrackedSine.trackedPhaseRad = phaseRawRad;
+                g_phaseTrackedSine.lastPhaseMeasurementMs = now;
+                g_phaseTrackedSine.phaseAcquiredMs = now;
+                g_phaseTrackedSine.invalidSinceActive = 0U;
+                g_phaseTrackedSine.status = PHASE_TRACKED_STATUS_MEASURED;
+            }
+            else
+            {
+                measurementDt = (float)(now - g_phaseTrackedSine.lastPhaseMeasurementMs) /
+                                1000.0f;
+                phaseIncrement = WrapRadiansToPi(
+                    phaseRawRad - g_phaseTrackedSine.previousRawPhaseRad);
+                measuredOmega = (measurementDt > 0.0f)
+                                    ? phaseIncrement / measurementDt
+                                    : INFINITY;
+                if (measurementDt <= 0.0f ||
+                    !isfinite(measuredOmega) ||
+                    fabsf(measuredOmega) > PHASE_TRACKED_MAX_PHASE_RATE_RAD_S)
+                {
+                    if (g_phaseTrackedSine.invalidSinceActive == 0U)
+                    {
+                        g_phaseTrackedSine.invalidSinceMs = now;
+                        g_phaseTrackedSine.invalidSinceActive = 1U;
+                    }
+                    g_phaseTrackedSine.status = PHASE_TRACKED_STATUS_PROPAGATED;
+                }
+                else
+                {
+                    if (g_phaseTrackedSine.omegaValid == 0U)
+                    {
+                        g_phaseTrackedSine.omega2xRadS = measuredOmega;
+                        g_phaseTrackedSine.omegaValid = 1U;
+                    }
+                    else
+                    {
+                        float omegaAlpha = measurementDt /
+                            (measurementDt + PHASE_TRACKED_OMEGA_FILTER_TAU_S);
+                        g_phaseTrackedSine.omega2xRadS += omegaAlpha *
+                            (measuredOmega - g_phaseTrackedSine.omega2xRadS);
+                    }
+
+                    g_phaseTrackedSine.measuredUnwrappedPhaseRad += phaseIncrement;
+                    g_phaseTrackedSine.trackedPhaseRad +=
+                        g_phaseTrackedSine.omega2xRadS * dt;
+                    phaseErrorRad = WrapRadiansToPi(
+                        g_phaseTrackedSine.measuredUnwrappedPhaseRad -
+                        g_phaseTrackedSine.trackedPhaseRad);
+                    {
+                        float correction = PHASE_TRACKED_PHASE_CORRECTION_GAIN * phaseErrorRad;
+                        if (correction > PHASE_TRACKED_MAX_PHASE_CORRECTION_RAD)
+                        {
+                            correction = PHASE_TRACKED_MAX_PHASE_CORRECTION_RAD;
+                        }
+                        else if (correction < -PHASE_TRACKED_MAX_PHASE_CORRECTION_RAD)
+                        {
+                            correction = -PHASE_TRACKED_MAX_PHASE_CORRECTION_RAD;
+                        }
+                        g_phaseTrackedSine.trackedPhaseRad += correction;
+                    }
+                    g_phaseTrackedSine.previousRawPhaseRad = phaseRawRad;
+                    g_phaseTrackedSine.lastPhaseMeasurementMs = now;
+                    g_phaseTrackedSine.invalidSinceActive = 0U;
+                    g_phaseTrackedSine.status = PHASE_TRACKED_STATUS_MEASURED;
+                }
+            }
+        }
+        else
+        {
+            if (g_phaseTrackedSine.invalidSinceActive == 0U)
+            {
+                g_phaseTrackedSine.invalidSinceMs = now;
+                g_phaseTrackedSine.invalidSinceActive = 1U;
+            }
+            g_phaseTrackedSine.status = PHASE_TRACKED_STATUS_LOW;
+        }
+    }
+    else
+    {
+        g_phaseTrackedSine.angleFailureCount++;
+        if (g_phaseTrackedSine.invalidSinceActive == 0U)
+        {
+            g_phaseTrackedSine.invalidSinceMs = now;
+            g_phaseTrackedSine.invalidSinceActive = 1U;
+        }
+        g_phaseTrackedSine.phaseMagnitude = 0.0f;
+        g_phaseTrackedSine.status = PHASE_TRACKED_STATUS_PROPAGATED;
+    }
+
+    if (g_phaseTrackedSine.invalidSinceActive != 0U)
+    {
+        if (g_phaseTrackedSine.phaseValid != 0U && g_phaseTrackedSine.omegaValid != 0U)
+        {
+            g_phaseTrackedSine.trackedPhaseRad += g_phaseTrackedSine.omega2xRadS * dt;
+        }
+        if ((now - g_phaseTrackedSine.invalidSinceMs) > PHASE_TRACKED_MAX_UNCONFIDENT_MS)
+        {
+            g_phaseTrackedSine.status = PHASE_TRACKED_STATUS_FAULT;
+            ClosedLoopActuatorFault(3U);
+            return;
+        }
+    }
+
+    if (g_phaseTrackedSine.phaseValid != 0U)
+    {
+        float rampElapsedMs = (float)(now - g_phaseTrackedSine.phaseAcquiredMs);
+        normalizedSine = sinf(g_phaseTrackedSine.trackedPhaseRad -
+                              g_phaseTrackedSine.phaseOffsetRad);
+        ramp = rampElapsedMs / PHASE_TRACKED_START_RAMP_MS;
+        if (ramp > 1.0f)
+        {
+            ramp = 1.0f;
+        }
+        targetMm = (1.0f - ramp) * g_phaseTrackedSine.startPositionMm +
+                   ramp * g_phaseTrackedSine.amplitudeMm * normalizedSine;
+    }
+    else
+    {
+        targetMm = g_phaseTrackedSine.startPositionMm;
+    }
+    g_phaseTrackedSine.normalizedSine = normalizedSine;
+    g_phaseTrackedSine.commandedTargetMm = targetMm;
+
+    motorTargetMm = CLOSED_LOOP_COMMAND_SIGN * targetMm;
+    if (motorTargetMm > CLOSED_LOOP_MAX_MM)
+    {
+        motorTargetMm = CLOSED_LOOP_MAX_MM;
+    }
+    else if (motorTargetMm < -CLOSED_LOOP_MAX_MM)
+    {
+        motorTargetMm = -CLOSED_LOOP_MAX_MM;
+    }
+    targetSteps = (int32_t)lroundf(motorTargetMm * g_stepsPerMm);
+    travelMarginSteps = (int32_t)lroundf(CLOSED_LOOP_TRAVEL_MARGIN_MM * g_stepsPerMm);
+    allowedHalfTravelSteps = (int32_t)(g_travelSteps / 2U) - travelMarginSteps;
+    if (allowedHalfTravelSteps < 0)
+    {
+        allowedHalfTravelSteps = 0;
+    }
+    if (targetSteps > allowedHalfTravelSteps)
+    {
+        targetSteps = allowedHalfTravelSteps;
+    }
+    else if (targetSteps < -allowedHalfTravelSteps)
+    {
+        targetSteps = -allowedHalfTravelSteps;
+    }
+    g_parametricClosedLoopTargetSteps = targetSteps;
+    ClosedLoopActuatorKick();
+
+    if ((g_phaseTrackedSine.sampleCount++ % PARAMETRIC_TEST_TELEMETRY_DECIMATION) == 0U)
+    {
+        actualSteps = g_positionSteps;
+        snprintf(msg, sizeof(msg),
+                 "%.3f,%.2f,%s,%.6f,%.6f,%.6f,%.6f,%.6f,%.5f,%.4f,%.4f,%.4f,%ld,%ld,%ld\r\n",
+                 (double)(now - g_phaseTrackedSine.startMs) / 1000.0,
+                 angleValid != 0U ? (double)RelativeAngleDegrees(angle) : (double)NAN,
+                 g_phaseTrackedSine.status == PHASE_TRACKED_STATUS_MEASURED ? "measured" :
+                 g_phaseTrackedSine.status == PHASE_TRACKED_STATUS_PROPAGATED ? "propagated" :
+                 g_phaseTrackedSine.status == PHASE_TRACKED_STATUS_ACQUIRING ? "acquiring" :
+                 g_phaseTrackedSine.status == PHASE_TRACKED_STATUS_FAULT ? "fault" : "low",
+                 (double)phaseRawRad,
+                 (double)g_phaseTrackedSine.trackedPhaseRad,
+                 (double)g_phaseTrackedSine.omega2xRadS,
+                 (double)g_phaseTrackedSine.phaseMagnitude,
+                 (double)phaseErrorRad,
+                 (double)normalizedSine,
+                 (double)targetMm,
+                 (double)motorTargetMm,
+                 (double)((float)actualSteps / g_stepsPerMm),
+                 (long)targetSteps,
+                 (long)actualSteps,
+                 (long)(targetSteps - actualSteps));
+        UartPrint(msg);
+    }
+}
+
 static void ReportClosedLoopFault(void)
 {
     uint8_t fault;
@@ -2234,6 +2570,7 @@ static void PrintHelp(void)
     UartPrint("  sine <amp_mm> <hz> - start sinusoidal pivot motion after homing\r\n");
     UartPrint("  sine stop       - stop sine motion\r\n");
     UartPrint("  maint <id> autores_start <amp_mm> <phase_deg> | autores_stop - correlated parametric closed-loop control\r\n");
+    UartPrint("  maint <id> phase_sine_start <amp_mm> <phase_deg> | phase_sine_stop - phase-tracked sine control\r\n");
     UartPrint("  maint <id> sine_start <amp_mm> <hz> | sine_stop - correlated sine motion control\r\n");
     UartPrint("  parametric <amp_mm> <phi_deg> - drive pivot at 2x pendulum phase rate\r\n");
     UartPrint("  parametric stop - stop parametric drive\r\n");
@@ -2331,6 +2668,10 @@ static const char *ActiveModeName(void)
     if (g_parametricClosedLoopRunning != 0U)
     {
         return "parametric_closed_loop";
+    }
+    if (g_phaseTrackedSineRunning != 0U)
+    {
+        return "phase_tracked_sine";
     }
     if (g_sineRunning != 0U)
     {
@@ -2610,7 +2951,7 @@ static uint8_t ProcessMaintenanceCommand(char *arguments)
         }
         else if (g_manualMotionDirection != 0U || g_run != 0U || g_sineRunning != 0U ||
                  g_parametricRunning != 0U || g_parametricTestRunning != 0U ||
-                 g_parametricClosedLoopRunning != 0U)
+                 g_parametricClosedLoopRunning != 0U || g_phaseTrackedSineRunning != 0U)
         {
             error = "motion_active";
         }
@@ -2733,7 +3074,8 @@ static uint8_t ProcessMaintenanceCommand(char *arguments)
         else if (error == NULL && (g_homingActive != 0U || g_manualMotionDirection != 0U ||
                                    g_run != 0U || g_sineRunning != 0U ||
                                    g_parametricRunning != 0U || g_parametricTestRunning != 0U ||
-                                   g_parametricClosedLoopRunning != 0U || g_recording != 0U))
+                                   g_parametricClosedLoopRunning != 0U ||
+                                   g_phaseTrackedSineRunning != 0U || g_recording != 0U))
         {
             error = "motion_or_recording_active";
         }
@@ -2855,7 +3197,8 @@ static uint8_t ProcessMaintenanceCommand(char *arguments)
         else if (error == NULL && (g_homingActive != 0U || g_manualMotionDirection != 0U ||
                                    g_run != 0U || g_sineRunning != 0U ||
                                    g_parametricRunning != 0U || g_parametricTestRunning != 0U ||
-                                   g_parametricClosedLoopRunning != 0U))
+                                   g_parametricClosedLoopRunning != 0U ||
+                                   g_phaseTrackedSineRunning != 0U))
         {
             error = "motion_active";
         }
@@ -2931,6 +3274,143 @@ static uint8_t ProcessMaintenanceCommand(char *arguments)
         return 1U;
     }
 
+    if (strncmp(end, "phase_sine_start ", 17U) == 0)
+    {
+        char *amplitudeEnd;
+        char *phaseEnd;
+        char *arguments = end + 17U;
+        float amplitudeMm = strtof(arguments, &amplitudeEnd);
+        float phaseDeg;
+        float availableHalfTravelMm;
+        float currentPositionMm;
+        const char *error = NULL;
+
+        if (amplitudeEnd == arguments || (*amplitudeEnd != ' ' && *amplitudeEnd != '\t'))
+        {
+            error = "invalid_parameters";
+        }
+        else
+        {
+            while (*amplitudeEnd == ' ' || *amplitudeEnd == '\t')
+            {
+                amplitudeEnd++;
+            }
+            phaseDeg = strtof(amplitudeEnd, &phaseEnd);
+            if (phaseEnd == amplitudeEnd)
+            {
+                error = "invalid_parameters";
+            }
+            else
+            {
+                while (*phaseEnd == ' ' || *phaseEnd == '\t')
+                {
+                    phaseEnd++;
+                }
+                if (*phaseEnd != '\0')
+                {
+                    error = "invalid_parameters";
+                }
+            }
+        }
+
+        if (error == NULL && (!isfinite(amplitudeMm) || !isfinite(phaseDeg)))
+        {
+            error = "invalid_parameters";
+        }
+        else if (error == NULL && amplitudeMm <= 0.0f)
+        {
+            error = "invalid_amplitude";
+        }
+        else if (error == NULL && g_homed == 0U)
+        {
+            error = "home_required";
+        }
+        else if (error == NULL && g_servoLatchCommandedState != SERVO_LATCH_STATE_OPEN)
+        {
+            error = "latch_not_open";
+        }
+        else if (error == NULL && g_closedLoopFault != 0U)
+        {
+            error = "blocking_fault";
+        }
+        else if (error == NULL && (g_homingActive != 0U || g_manualMotionDirection != 0U ||
+                                   g_run != 0U || g_sineRunning != 0U ||
+                                   g_parametricRunning != 0U || g_parametricTestRunning != 0U ||
+                                   g_parametricClosedLoopRunning != 0U ||
+                                   g_phaseTrackedSineRunning != 0U))
+        {
+            error = "motion_active";
+        }
+        else if (error == NULL && amplitudeMm > CLOSED_LOOP_MAX_MM)
+        {
+            error = "amplitude_out_of_range";
+        }
+        else if (error == NULL && g_stepsPerMm <= 0.0f)
+        {
+            error = "travel_unavailable";
+        }
+        else if (error == NULL)
+        {
+            availableHalfTravelMm = ((float)g_travelSteps / (2.0f * g_stepsPerMm)) -
+                                    CLOSED_LOOP_TRAVEL_MARGIN_MM;
+            currentPositionMm = (float)g_positionSteps / g_stepsPerMm;
+            if (availableHalfTravelMm <= 0.0f || amplitudeMm > availableHalfTravelMm)
+            {
+                error = "amplitude_out_of_travel";
+            }
+            else if (fabsf(currentPositionMm) > amplitudeMm)
+            {
+                error = "initial_position_out_of_amplitude";
+            }
+        }
+
+        if (error != NULL)
+        {
+            snprintf(msg, sizeof(msg),
+                     "maintenance: id=%lu type=phase_sine_start ok=0 active=0 active_mode=%s error=%s\r\n",
+                     requestId,
+                     ActiveModeName(),
+                     error);
+        }
+        else
+        {
+            uint32_t now = HAL_GetTick();
+            ClosedLoopActuatorStop();
+            memset(&g_phaseTrackedSine, 0, sizeof(g_phaseTrackedSine));
+            g_phaseTrackedSine.amplitudeMm = amplitudeMm;
+            g_phaseTrackedSine.phaseOffsetRad = phaseDeg * (PI_F / 180.0f);
+            g_phaseTrackedSine.startPositionMm = currentPositionMm;
+            g_phaseTrackedSine.startMs = now;
+            g_phaseTrackedSine.nextSampleMs = now + PARAMETRIC_TEST_PERIOD_MS;
+            g_phaseTrackedSine.lastUpdateMs = now;
+            g_phaseTrackedSine.invalidSinceMs = now;
+            g_phaseTrackedSine.invalidSinceActive = 1U;
+            g_phaseTrackedSine.status = PHASE_TRACKED_STATUS_ACQUIRING;
+            g_parametricClosedLoopTargetSteps = g_positionSteps;
+            g_phaseTrackedSineRunning = 1U;
+            UartPrint("phase_sine_time_s,angle_measured_deg,angle_source,phase2_raw_rad,phase2_tracked_rad,omega_2x_rad_s,phase_magnitude,phase_error_rad,normalized_sine,target_mm,motor_target_mm,actual_mm,target_steps,actual_steps,step_error\r\n");
+            snprintf(msg, sizeof(msg),
+                     "maintenance: id=%lu type=phase_sine_start ok=1 active=1 active_mode=phase_tracked_sine amplitude_mm=%.6f phase_deg=%.6f\r\n",
+                     requestId,
+                     (double)amplitudeMm,
+                     (double)phaseDeg);
+        }
+        UartPrint(msg);
+        return 1U;
+    }
+
+    if (strcmp(end, "phase_sine_stop") == 0)
+    {
+        g_phaseTrackedSineRunning = 0U;
+        ClosedLoopActuatorStop();
+        snprintf(msg, sizeof(msg),
+                 "maintenance: id=%lu type=phase_sine_stop ok=1 active=0 active_mode=%s\r\n",
+                 requestId,
+                 ActiveModeName());
+        UartPrint(msg);
+        return 1U;
+    }
+
     if (strcmp(end, "manual_up") == 0 || strcmp(end, "manual_down") == 0)
     {
         uint8_t direction = (strcmp(end, "manual_up") == 0) ? 1U : 2U;
@@ -2945,7 +3425,8 @@ static uint8_t ProcessMaintenanceCommand(char *arguments)
         }
         else if (g_manualMotionDirection != 0U || g_run != 0U || g_sineRunning != 0U ||
                  g_parametricRunning != 0U || g_parametricTestRunning != 0U ||
-                 g_parametricClosedLoopRunning != 0U || g_recording != 0U)
+                 g_parametricClosedLoopRunning != 0U || g_phaseTrackedSineRunning != 0U ||
+                 g_recording != 0U)
         {
             error = "motion_or_recording_active";
         }
@@ -3177,7 +3658,7 @@ static void ProcessLine(char *line)
 
     // TEMPORARY UART/PARSER DEBUG
         if (FIRMWARE_DEBUG_RX != 0U &&
-            g_parametricTestRunning == 0U && g_parametricClosedLoopRunning == 0U)
+            g_parametricTestRunning == 0U && ClosedLoopActuatorIsActive() == 0U)
     {
         char debugMsg[200];
         size_t offset = 0U;
@@ -3284,6 +3765,7 @@ static void ProcessLine(char *line)
     {
         StopManualMotion("operator_stop");
         g_parametricClosedLoopRunning = 0U;
+        g_phaseTrackedSineRunning = 0U;
         ClosedLoopActuatorStop();
         g_sineRunning = 0U;
         g_parametricRunning = 0U;
@@ -3308,6 +3790,7 @@ static void ProcessLine(char *line)
         {
             uint32_t now = HAL_GetTick();
             g_parametricClosedLoopRunning = 0U;
+            g_phaseTrackedSineRunning = 0U;
             ClosedLoopActuatorStop();
             g_sineRunning = 0U;
             g_parametricRunning = 0U;
@@ -3365,6 +3848,7 @@ static void ProcessLine(char *line)
             }
 
             g_sineRunning = 0U;
+            g_phaseTrackedSineRunning = 0U;
             g_parametricRunning = 0U;
             g_parametricTestRunning = 0U;
             g_run = 0U;
@@ -3401,6 +3885,7 @@ static void ProcessLine(char *line)
         if (strcmp(argument, "0") == 0)
         {
             g_parametricClosedLoopRunning = 0U;
+            g_phaseTrackedSineRunning = 0U;
             ClosedLoopActuatorStop();
             g_suppressPromptOnce = 1U;
             return;
@@ -3467,6 +3952,7 @@ static void ProcessLine(char *line)
         if (strcmp(arguments, "stop") == 0)
         {
             g_parametricClosedLoopRunning = 0U;
+            g_phaseTrackedSineRunning = 0U;
             ClosedLoopActuatorStop();
             g_sineRunning = 0U;
             g_run = 0U;
@@ -3519,6 +4005,7 @@ static void ProcessLine(char *line)
         g_sineAmplitudeMm = amplitudeMm;
         g_sineFrequencyHz = frequency;
         g_parametricClosedLoopRunning = 0U;
+        g_phaseTrackedSineRunning = 0U;
         ClosedLoopActuatorStop();
         g_parametricTestRunning = 0U;
         g_positionSteps = 0;
@@ -3546,6 +4033,7 @@ static void ProcessLine(char *line)
         if (strcmp(arguments, "stop") == 0)
         {
             g_parametricClosedLoopRunning = 0U;
+            g_phaseTrackedSineRunning = 0U;
             ClosedLoopActuatorStop();
             g_parametricRunning = 0U;
             g_run = 0U;
@@ -3577,6 +4065,7 @@ static void ProcessLine(char *line)
         g_parametricAmplitudeMm = amplitudeMm;
         g_parametricPhiRad = phiDeg * PI_F / 180.0f;
         g_parametricClosedLoopRunning = 0U;
+        g_phaseTrackedSineRunning = 0U;
         ClosedLoopActuatorStop();
         g_parametricTestRunning = 0U;
         g_parametricFilterValid = 0U;
@@ -3602,6 +4091,7 @@ static void ProcessLine(char *line)
             return;
         }
         g_parametricClosedLoopRunning = 0U;
+        g_phaseTrackedSineRunning = 0U;
         ClosedLoopActuatorStop();
         g_parametricTestRunning = 0U;
         g_parametricRunning = 0U;
@@ -3615,6 +4105,7 @@ static void ProcessLine(char *line)
     {
         value = strtoul(line + 4, NULL, 10);
         g_parametricClosedLoopRunning = 0U;
+        g_phaseTrackedSineRunning = 0U;
         ClosedLoopActuatorStop();
         SetDirection((value != 0U) ? 1U : 0U);
         UartPrint("direction updated\r\n");
@@ -3696,7 +4187,7 @@ static void PollUart(void)
                 continue;
             }
 
-            if (g_parametricTestRunning == 0U && g_parametricClosedLoopRunning == 0U)
+            if (g_parametricTestRunning == 0U && ClosedLoopActuatorIsActive() == 0U)
             {
                 UartPrint("\r\n");
             }
@@ -3713,7 +4204,7 @@ static void PollUart(void)
                 g_suppressPromptOnce = 0U;
             }
             else if (g_recording == 0U && g_parametricTestRunning == 0U &&
-                     g_parametricClosedLoopRunning == 0U)
+                     ClosedLoopActuatorIsActive() == 0U)
             {
                 UartPrint("> ");
             }
@@ -3735,7 +4226,7 @@ static void PollUart(void)
         g_lastRxWasCr = 0U;
         g_rxBuf[g_rxIdx++] = (char)ch;
         if (g_recording == 0U && g_parametricTestRunning == 0U &&
-            g_parametricClosedLoopRunning == 0U)
+            ClosedLoopActuatorIsActive() == 0U)
         {
             char echo[2] = {(char)ch, '\0'};
             UartPrint(echo);

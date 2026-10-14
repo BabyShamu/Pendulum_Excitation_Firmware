@@ -14,6 +14,7 @@ from pendulum_workbench.domain.angle_prediction import AngleSource
 from pendulum_workbench.domain.experiment_run import (
     AutoResonanceDefinition,
     ExperimentRunState,
+    PhaseTrackedSineDefinition,
     VerticalSineDefinition,
 )
 from pendulum_workbench.domain.maintenance import BitResultState, PendulumLatchState, ReadinessState
@@ -70,6 +71,7 @@ class SineExperimentSerial:
         self.homed = initially_homed
         self.sine_active = False
         self.autores_active = False
+        self.phase_tracked_sine_active = False
         self.autores_amplitude_mm: float | None = None
         self.autores_phase_deg: float | None = None
         self.sine_amplitude_mm: float | None = None
@@ -91,6 +93,9 @@ class SineExperimentSerial:
                 self.latch_commands.append(command)
             if command == "status":
                 mode = (
+                    "phase_tracked_sine"
+                    if self.phase_tracked_sine_active
+                    else
                     "parametric_closed_loop"
                     if self.autores_active
                     else "sine"
@@ -196,6 +201,22 @@ class SineExperimentSerial:
                 self.autores_active = False
                 self._enqueue(
                     f"maintenance: id={request_id} type=autores_stop ok=1 active=0 active_mode=idle\r\n"
+                )
+            elif command == "phase_sine_start":
+                amplitude = float(fields[3])
+                phase = float(fields[4])
+                self.phase_tracked_sine_active = True
+                self.autores_amplitude_mm = amplitude
+                self.autores_phase_deg = phase
+                self._enqueue(
+                    f"maintenance: id={request_id} type=phase_sine_start ok=1 active=1 "
+                    f"active_mode=phase_tracked_sine amplitude_mm={amplitude:.6f} "
+                    f"phase_deg={phase:.6f}\r\n"
+                )
+            elif command == "phase_sine_stop":
+                self.phase_tracked_sine_active = False
+                self._enqueue(
+                    f"maintenance: id={request_id} type=phase_sine_stop ok=1 active=0 active_mode=idle\r\n"
                 )
         return len(data)
 
@@ -624,6 +645,50 @@ class ExperimentRunTests(unittest.TestCase):
         manifest = repository.load(repository.root / experiment_id).manifest
         self.assertEqual(manifest["completion_status"], "COMPLETED")
         self.assertEqual(manifest["experiment"]["completion_reason"], "duration_elapsed")
+
+    def test_phase_tracked_sine_uses_its_own_correlated_lifecycle_and_metadata(self) -> None:
+        directory = self.temporary_directory()
+        controller, device, repository = self.create_connected_controller(directory)
+        self.addCleanup(controller.shutdown)
+        self.prepare_ready_held_system(controller, device)
+        device.protocol_actions.clear()
+
+        definition = PhaseTrackedSineDefinition(5.0, 20.0, 0.15, label="phase run", notes="short replay")
+        experiment_id = controller.experiment_run.start(definition)
+        self.assertTrue(
+            self.wait_for(lambda: controller.experiment_run.snapshot.state == ExperimentRunState.RUNNING)
+        )
+        self.assertTrue(device.phase_tracked_sine_active)
+        self.assertFalse(device.autores_active)
+        self.assertFalse(device.sine_active)
+        self.assertEqual(device.autores_amplitude_mm, 5.0)
+        self.assertEqual(device.autores_phase_deg, 20.0)
+        self.assertEqual(
+            [
+                command
+                for command in device.protocol_actions
+                if command in ("latch_open", "phase_sine_start", "autores_start", "sine_start")
+            ],
+            ["latch_open", "phase_sine_start"],
+        )
+
+        self.assertTrue(
+            self.wait_for(
+                lambda: controller.experiment_run.snapshot.state == ExperimentRunState.COMPLETE
+                and controller.state.snapshot.recording == RecordingState.SAVED
+            )
+        )
+        self.assertFalse(device.phase_tracked_sine_active)
+        self.assertIn("phase_sine_stop", device.protocol_actions)
+        self.assertNotIn("autores_stop", device.protocol_actions)
+        manifest = repository.load(repository.root / experiment_id).manifest
+        self.assertEqual(
+            manifest["experiment"]["experiment_mode"],
+            "PHASE_TRACKED_SINE_AUTO_RESONANCE",
+        )
+        self.assertEqual(manifest["experiment"]["commanded_amplitude_mm"], 5.0)
+        self.assertEqual(manifest["experiment"]["commanded_phase_deg"], 20.0)
+        self.assertEqual(manifest["experiment"]["requested_duration_s"], 0.15)
 
     def test_typed_autoresonance_commands_validate_and_correlate_parameters(self) -> None:
         directory = self.temporary_directory()
@@ -1178,7 +1243,7 @@ class ExperimentRunTests(unittest.TestCase):
         window = MainWindow(controller)
         page = window.experiment_page
 
-        self.assertEqual(page.experiment_mode_selector.count(), 2)
+        self.assertEqual(page.experiment_mode_selector.count(), 3)
         self.assertEqual(page.experiment_mode_selector.currentText(), "Vertical Sinusoidal Excitation")
         self.assertTrue(all(hasattr(page, name) for name in (
             "amplitude_input",
@@ -1259,6 +1324,44 @@ class ExperimentRunTests(unittest.TestCase):
         self.assertEqual(page.amplitude_input.text(), "10.0")
         self.assertEqual(page.phase_input.text(), "0.0")
         self.assertFalse(page.primary_run_button.isEnabled())
+
+    def test_phase_tracked_sine_mode_has_no_frequency_and_uses_phase_defaults(self) -> None:
+        directory = self.temporary_directory()
+        controller, device, _repository = self.create_connected_controller(directory)
+        self.addCleanup(controller.shutdown)
+        self.prepare_ready_held_system(controller, device)
+        window = MainWindow(controller)
+        self.addCleanup(window.close)
+        page = window.experiment_page
+
+        page.amplitude_input.setText("4.0")
+        page.frequency_input.setText("1.7")
+        page.duration_input.setText("12")
+        page.experiment_mode_selector.setCurrentIndex(2)
+
+        self.assertEqual(
+            page.experiment_mode_selector.currentText(),
+            "Phase-Tracked Sinusoidal Auto-Resonance",
+        )
+        self.assertEqual(page.amplitude_input.text(), "10.0")
+        self.assertEqual(page.phase_input.text(), "0.0")
+        self.assertEqual(page.duration_input.text(), "12")
+        self.assertTrue(page.frequency_input.isHidden())
+        self.assertFalse(page.phase_input.isHidden())
+        self.assertFalse(page.primary_run_button.isEnabled())
+        self.assertIn("7.5 mm", page.run_error_value.text())
+
+        page.amplitude_input.setText("5.0")
+        page.phase_input.setText("25")
+        definition = page._definition_from_fields()
+        self.assertIsInstance(definition, PhaseTrackedSineDefinition)
+        self.assertEqual(definition.phase_deg, 25.0)
+        self.assertTrue(page.primary_run_button.isEnabled())
+
+        page.experiment_mode_selector.setCurrentIndex(0)
+        self.assertEqual(page.amplitude_input.text(), "4.0")
+        self.assertEqual(page.frequency_input.text(), "1.7")
+        self.assertTrue(page.phase_input.isHidden())
 
     def test_experiment_page_accepts_zero_amplitude_baseline(self) -> None:
         directory = self.temporary_directory()

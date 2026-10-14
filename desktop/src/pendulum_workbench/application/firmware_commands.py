@@ -31,6 +31,8 @@ class FirmwareCommand(str, Enum):
     SINE_STOP = "sine_stop"
     AUTO_RESONANCE_START = "autores_start"
     AUTO_RESONANCE_STOP = "autores_stop"
+    PHASE_TRACKED_SINE_START = "phase_sine_start"
+    PHASE_TRACKED_SINE_STOP = "phase_sine_stop"
 
 
 @dataclass(frozen=True, slots=True)
@@ -148,6 +150,27 @@ class FirmwareCommandService(QObject):
     def stop_parametric_closed_loop(self) -> int:
         return self._request(
             FirmwareCommand.AUTO_RESONANCE_STOP,
+            timeout_ms=self._AUTO_RESONANCE_STOP_TIMEOUT_MS,
+        )
+
+    def start_phase_tracked_sine(self, amplitude_mm: float, phase_deg: float) -> int:
+        if not math.isfinite(amplitude_mm) or amplitude_mm <= 0.0:
+            raise ValueError("pivot amplitude must be finite and greater than zero")
+        if not math.isfinite(phase_deg):
+            raise ValueError("phase must be finite")
+        if amplitude_mm > FIRMWARE_MAX_CLOSED_LOOP_AMPLITUDE_MM:
+            raise ValueError(
+                "pivot amplitude exceeds the existing firmware closed-loop bound of "
+                f"{FIRMWARE_MAX_CLOSED_LOOP_AMPLITUDE_MM:g} mm"
+            )
+        return self._request(
+            FirmwareCommand.PHASE_TRACKED_SINE_START,
+            arguments=f"{amplitude_mm:.9g} {phase_deg:.9g}",
+        )
+
+    def stop_phase_tracked_sine(self) -> int:
+        return self._request(
+            FirmwareCommand.PHASE_TRACKED_SINE_STOP,
             timeout_ms=self._AUTO_RESONANCE_STOP_TIMEOUT_MS,
         )
 

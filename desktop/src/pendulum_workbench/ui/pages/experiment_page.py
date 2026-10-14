@@ -35,6 +35,7 @@ from pendulum_workbench.domain.experiment_run import (
     ExperimentDefinition,
     ExperimentMode,
     ExperimentRunState,
+    PhaseTrackedSineDefinition,
     VerticalSineDefinition,
 )
 from pendulum_workbench.domain.maintenance import PendulumLatchState
@@ -109,6 +110,7 @@ class ExperimentPage(QWidget):
         self.experiment_mode_selector = QComboBox()
         self.experiment_mode_selector.addItem("Vertical Sinusoidal Excitation")
         self.experiment_mode_selector.addItem("Auto-Resonance / Parametric Closed Loop")
+        self.experiment_mode_selector.addItem("Phase-Tracked Sinusoidal Auto-Resonance")
         self.experiment_mode_selector.setMinimumHeight(38)
         mode_row.addWidget(mode_label)
         mode_row.addWidget(self.experiment_mode_selector, 1)
@@ -427,14 +429,19 @@ class ExperimentPage(QWidget):
         self.current_experiment_path.setToolTip(message)
 
     def _definition_from_fields(self) -> ExperimentDefinition:
-        if self.experiment_mode_selector.currentIndex() == 1:
+        if self.experiment_mode_selector.currentIndex() in (1, 2):
             try:
                 amplitude = float(self.amplitude_input.text().strip())
                 phase = float(self.phase_input.text().strip())
                 duration = float(self.duration_input.text().strip())
             except ValueError as error:
                 raise ValueError("Enter numeric amplitude, phase, and duration values") from error
-            definition = AutoResonanceDefinition(
+            definition_type = (
+                AutoResonanceDefinition
+                if self.experiment_mode_selector.currentIndex() == 1
+                else PhaseTrackedSineDefinition
+            )
+            definition = definition_type(
                 amplitude,
                 phase,
                 duration,
@@ -464,8 +471,12 @@ class ExperimentPage(QWidget):
             self._vertical_amplitude_text = self.amplitude_input.text()
             self._vertical_frequency_text = self.frequency_input.text()
 
-        if index == 1:
-            self._active_experiment_mode = ExperimentMode.AUTO_RESONANCE_PARAMETRIC_CLOSED_LOOP
+        if index in (1, 2):
+            self._active_experiment_mode = (
+                ExperimentMode.AUTO_RESONANCE_PARAMETRIC_CLOSED_LOOP
+                if index == 1
+                else ExperimentMode.PHASE_TRACKED_SINE_AUTO_RESONANCE
+            )
             self.amplitude_input.setText("10.0")
             self.phase_input.setText("0.0")
             self.frequency_label.hide()
