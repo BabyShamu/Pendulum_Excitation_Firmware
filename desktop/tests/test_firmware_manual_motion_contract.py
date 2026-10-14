@@ -221,6 +221,9 @@ class FirmwareManualMotionContractTests(unittest.TestCase):
             "type=sine_start ok=1 active=1",
         ):
             self.assertIn(required_check, sine_start)
+        self.assertIn("amplitudeMm < 0.0f", sine_start)
+        self.assertIn("amplitudeMm > 0.0f", sine_start)
+        self.assertNotIn("amplitudeMm <= 0.0f", sine_start)
 
         sine_stop = maintenance.split('if (strcmp(end, "sine_stop") == 0)', 1)[1].split(
             'if (strcmp(end, "manual_up") == 0', 1
@@ -235,6 +238,10 @@ class FirmwareManualMotionContractTests(unittest.TestCase):
         self.assertIn("g_servoLatchCommandedState != SERVO_LATCH_STATE_OPEN", legacy_sine_start)
 
         sine_update = function_body("UpdateSine")
+        self.assertIn("g_positionSteps = 0;", sine_start)
+        self.assertIn("g_sineAmplitudeMm * sinf(phase)", sine_update)
+        self.assertIn("lroundf(targetMm * g_stepsPerMm)", sine_update)
+        self.assertIn("while (g_positionSteps != targetSteps)", sine_update)
         self.assertIn("StepOne(speedHz, 1U, 1U) == 0U", sine_update)
         self.assertIn("event: type=sine_motion_stopped reason=limit", sine_update)
 

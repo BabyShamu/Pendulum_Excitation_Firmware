@@ -268,6 +268,15 @@ class WorkbenchController(QObject):
             self.state.set_home_status(HomeStatus.HOMING_FAILED)
         elif normalized.startswith("homing:"):
             self.state.set_home_status(HomeStatus.HOMING)
+        if (
+            normalized.startswith("angle sensor unavailable")
+            and self.experiment_run.is_open_loop_vertical_sine_running
+        ):
+            self.state.report_event(
+                EventSeverity.WARNING,
+                "AS5600 communication degraded during open-loop Vertical Sine; missing angle samples are retained while the run continues.",
+            )
+            return
         meaningful_prefixes = (
             "homing failed:",
             "homing calibration:",
@@ -305,11 +314,21 @@ class WorkbenchController(QObject):
             message = f"Manual pivot motion started {direction}."
             severity = EventSeverity.WARNING
         elif event.name == "angle_sensor_unavailable":
-            severity = EventSeverity.ERROR
-            message = "AS5600 angle sensor communication is unavailable; BIT will fail until a fresh check passes."
+            if self.experiment_run.is_open_loop_vertical_sine_running:
+                severity = EventSeverity.WARNING
+                message = (
+                    "AS5600 communication degraded during open-loop Vertical Sine; "
+                    "missing angle samples are retained while the run continues."
+                )
+            else:
+                severity = EventSeverity.ERROR
+                message = "AS5600 angle sensor communication is unavailable; BIT will fail until a fresh check passes."
         elif event.name == "angle_sensor_restored":
             severity = EventSeverity.INFO
-            message = "AS5600 communication restored; rerun System Check to validate the sensor."
+            if self.experiment_run.is_open_loop_vertical_sine_running:
+                message = "AS5600 communication restored during open-loop Vertical Sine."
+            else:
+                message = "AS5600 communication restored; rerun System Check to validate the sensor."
         elif event.name == "manual_motion_stopped":
             direction = fields.get("direction", "unknown")
             reason = fields.get("reason", "unknown")

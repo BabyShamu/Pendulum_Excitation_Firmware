@@ -1,8 +1,10 @@
+import base64
 import json
 import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from PySide6.QtWidgets import QApplication
 
@@ -12,6 +14,7 @@ from pendulum_workbench.domain.maintenance import BitResultState, PendulumLatchS
 from pendulum_workbench.domain.models import (
     ConnectionState,
     DataSourceMode,
+    EventSeverity,
     HomeStatus,
     MotionState,
     RecordingState,
@@ -195,6 +198,14 @@ class SineExperimentSerial:
         self.sine_active = False
         self._enqueue("event: type=sine_motion_stopped reason=limit\r\n")
 
+    def report_angle_sensor_unavailable(self) -> None:
+        self.angle_available = False
+        self._enqueue("event: type=angle_sensor_unavailable failures=3 hal_error=2\r\n")
+
+    def report_angle_sensor_restored(self) -> None:
+        self.angle_available = True
+        self._enqueue("event: type=angle_sensor_restored\r\n")
+
     def _enqueue(self, text: str) -> None:
         if "type=latch_open" in text:
             self.recording_state_when_open_commanded = self._controller.state.snapshot.recording
@@ -326,6 +337,30 @@ class ExperimentRunTests(unittest.TestCase):
         self.assertFalse(controller.experiment_recorder.is_recording)
         self.assertEqual(device.latch_state, "hold")
 
+    def test_as5600_loss_at_initial_angle_capture_still_faults_before_latch_open(self) -> None:
+        directory = self.temporary_directory()
+        controller, device, _repository = self.create_connected_controller(directory)
+        self.addCleanup(controller.shutdown)
+        self.prepare_ready_held_system(controller, device)
+        device.protocol_actions.clear()
+        current_angle = controller.experiment_run._current_valid_angle
+
+        with patch.object(
+            controller.experiment_run,
+            "_current_valid_angle",
+            side_effect=[current_angle(), RuntimeError("AS5600 became unavailable")],
+        ):
+            controller.experiment_run.start(VerticalSineDefinition(5.0, 1.8, 30.0))
+            self.assertTrue(
+                self.wait_for(
+                    lambda: controller.experiment_run.snapshot.state == ExperimentRunState.FAULT
+                    and controller.state.snapshot.recording == RecordingState.INTERRUPTED
+                )
+            )
+
+        self.assertNotIn("latch_open", device.protocol_actions)
+        self.assertNotIn("sine_start", device.protocol_actions)
+
     def test_unknown_and_open_latch_block_run_without_automatic_hold(self) -> None:
         directory = self.temporary_directory()
         controller, device, _repository = self.create_connected_controller(
@@ -448,28 +483,143 @@ class ExperimentRunTests(unittest.TestCase):
         self.assertFalse(controller.experiment_recorder.is_recording)
         self.assertEqual(device.latch_state, "hold")
 
-    def test_as5600_loss_during_run_stops_and_marks_run_faulted(self) -> None:
+    def test_zero_amplitude_run_enters_running_and_completes_by_duration(self) -> None:
         directory = self.temporary_directory()
         controller, device, repository = self.create_connected_controller(directory)
         self.addCleanup(controller.shutdown)
         self.prepare_ready_held_system(controller, device)
-        experiment_id = controller.experiment_run.start(VerticalSineDefinition(5.0, 1.8, 30.0))
+
+        experiment_id = controller.experiment_run.start(VerticalSineDefinition(0.0, 1.8, 0.25))
+
+        self.assertTrue(
+            self.wait_for(lambda: controller.experiment_run.snapshot.state == ExperimentRunState.RUNNING)
+        )
+        self.assertTrue(device.sine_active)
+        self.assertEqual(device.sine_amplitude_mm, 0.0)
+        self.assertEqual(device.sine_frequency_hz, 1.8)
+        self.assertEqual(controller.state.snapshot.recording, RecordingState.RECORDING)
+        self.assertTrue(
+            self.wait_for(
+                lambda: controller.experiment_run.snapshot.state == ExperimentRunState.COMPLETE
+                and controller.state.snapshot.recording == RecordingState.SAVED
+            )
+        )
+        self.assertFalse(device.sine_active)
+        manifest = repository.load(repository.root / experiment_id).manifest
+        self.assertEqual(manifest["completion_status"], "COMPLETED")
+        self.assertEqual(manifest["experiment"]["commanded_amplitude_mm"], 0.0)
+        self.assertEqual(manifest["experiment"]["commanded_frequency_hz"], 1.8)
+
+    def test_zero_amplitude_run_can_be_stopped_by_operator(self) -> None:
+        directory = self.temporary_directory()
+        controller, device, repository = self.create_connected_controller(directory)
+        self.addCleanup(controller.shutdown)
+        self.prepare_ready_held_system(controller, device)
+        experiment_id = controller.experiment_run.start(VerticalSineDefinition(0.0, 1.8, 30.0))
         self.assertTrue(
             self.wait_for(lambda: controller.experiment_run.snapshot.state == ExperimentRunState.RUNNING)
         )
 
-        device.angle_available = False
+        controller.experiment_run.stop()
 
         self.assertTrue(
             self.wait_for(
-                lambda: controller.experiment_run.snapshot.state == ExperimentRunState.FAULT
+                lambda: controller.experiment_run.snapshot.state == ExperimentRunState.OPERATOR_STOPPED
                 and controller.state.snapshot.recording == RecordingState.INTERRUPTED
             )
         )
         self.assertFalse(device.sine_active)
         manifest = repository.load(repository.root / experiment_id).manifest
         self.assertEqual(manifest["completion_status"], "INTERRUPTED")
-        self.assertTrue(manifest["experiment"]["completion_reason"].startswith("safety_event:"))
+        self.assertEqual(manifest["experiment"]["completion_reason"], "operator_stop")
+
+    def test_serial_disconnect_during_run_still_interrupts_transaction(self) -> None:
+        directory = self.temporary_directory()
+        controller, device, _repository = self.create_connected_controller(directory)
+        self.addCleanup(controller.shutdown)
+        self.prepare_ready_held_system(controller, device)
+        controller.experiment_run.start(VerticalSineDefinition(5.0, 1.8, 30.0))
+        self.assertTrue(
+            self.wait_for(lambda: controller.experiment_run.snapshot.state == ExperimentRunState.RUNNING)
+        )
+
+        controller.state.set_connection(ConnectionState.DISCONNECTED)
+
+        self.assertTrue(
+            self.wait_for(
+                lambda: controller.experiment_run.snapshot.state == ExperimentRunState.INTERRUPTED
+                and controller.state.snapshot.recording == RecordingState.INTERRUPTED
+            )
+        )
+
+    def test_as5600_loss_and_recovery_during_vertical_sine_run_are_logged_without_stopping(self) -> None:
+        directory = self.temporary_directory()
+        controller, device, repository = self.create_connected_controller(directory)
+        self.addCleanup(controller.shutdown)
+        self.prepare_ready_held_system(controller, device)
+        event_log = []
+        controller.state.event_added.connect(event_log.append)
+        experiment_id = controller.experiment_run.start(VerticalSineDefinition(5.0, 1.8, 0.45))
+        self.assertTrue(
+            self.wait_for(lambda: controller.experiment_run.snapshot.state == ExperimentRunState.RUNNING)
+        )
+
+        device.report_angle_sensor_unavailable()
+
+        self.assertTrue(
+            self.wait_for(
+                lambda: controller.state.snapshot.latest_sample is not None
+                and controller.state.snapshot.latest_sample.angle_deg is None
+                and any(
+                    event.severity == EventSeverity.WARNING
+                    and "AS5600 communication degraded" in event.message
+                    for event in event_log
+                )
+            )
+        )
+        self.assertEqual(controller.experiment_run.snapshot.state, ExperimentRunState.RUNNING)
+        self.assertEqual(controller.state.snapshot.recording, RecordingState.RECORDING)
+        self.assertTrue(device.sine_active)
+
+        device.report_angle_sensor_restored()
+        self.assertTrue(
+            self.wait_for(
+                lambda: controller.state.snapshot.latest_sample is not None
+                and controller.state.snapshot.latest_sample.angle_deg is not None
+                and any(
+                    event.severity == EventSeverity.INFO
+                    and "AS5600 communication restored during open-loop Vertical Sine" in event.message
+                    for event in event_log
+                )
+            )
+        )
+        self.assertEqual(controller.experiment_run.snapshot.state, ExperimentRunState.RUNNING)
+        self.assertTrue(device.sine_active)
+        self.assertTrue(
+            self.wait_for(
+                lambda: controller.experiment_run.snapshot.state == ExperimentRunState.COMPLETE
+                and controller.state.snapshot.recording == RecordingState.SAVED
+            )
+        )
+        self.assertFalse(device.sine_active)
+        manifest = repository.load(repository.root / experiment_id).manifest
+        self.assertEqual(manifest["completion_status"], "COMPLETED")
+        raw_capture_path = Path(controller.state.snapshot.raw_capture_path)
+        controller.disconnect_real()
+        self.assertTrue(
+            self.wait_for(
+                lambda: device.closed
+                and controller.state.snapshot.connection == ConnectionState.DISCONNECTED
+            )
+        )
+        raw_capture = raw_capture_path.read_text(encoding="utf-8")
+        raw_payloads = "\n".join(
+            base64.b64decode(json.loads(line)["raw_bytes_base64"]).decode("ascii")
+            for line in raw_capture.splitlines()
+        )
+        self.assertIn("event: type=angle_sensor_unavailable", raw_payloads)
+        self.assertIn("event: type=angle_sensor_restored", raw_payloads)
+        self.assertIn("angle_deg=NaN", raw_payloads)
 
     def test_open_failure_preserves_recording_and_never_starts_sine(self) -> None:
         directory = self.temporary_directory()
@@ -679,6 +829,23 @@ class ExperimentRunTests(unittest.TestCase):
         )
         self.assertEqual(page.primary_run_button.text(), "RUN EXPERIMENT")
         window.close()
+
+    def test_experiment_page_accepts_zero_amplitude_baseline(self) -> None:
+        directory = self.temporary_directory()
+        controller, _device, _repository = self.create_connected_controller(directory)
+        self.addCleanup(controller.shutdown)
+        self.prepare_ready_held_system(controller, _device)
+        window = MainWindow(controller)
+        self.addCleanup(window.close)
+        page = window.experiment_page
+
+        page.amplitude_input.setText("0")
+        page.frequency_input.setText("1.8")
+        page.duration_input.setText("3")
+
+        self.assertTrue(page.primary_run_button.isEnabled())
+        self.assertIn("Stationary pivot baseline", page.run_name_preview.text())
+        self.assertNotIn("pivot amplitude must", page.run_error_value.text())
 
     def test_experiment_setup_inputs_have_readable_minimum_heights(self) -> None:
         directory = self.temporary_directory()

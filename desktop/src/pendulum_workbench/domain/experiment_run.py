@@ -54,7 +54,9 @@ class VerticalSineDefinition:
         for name, value in values:
             if not math.isfinite(value):
                 raise ValueError(f"{name} must be finite")
-            if value <= 0.0:
+            if name == "pivot amplitude" and value < 0.0:
+                raise ValueError("pivot amplitude must be non-negative")
+            if name != "pivot amplitude" and value <= 0.0:
                 raise ValueError(f"{name} must be greater than zero")
 
     def partial_name(self) -> str:

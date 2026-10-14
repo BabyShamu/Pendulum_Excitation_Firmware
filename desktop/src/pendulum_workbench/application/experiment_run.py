@@ -14,6 +14,7 @@ from pendulum_workbench.application.firmware_commands import (
 from pendulum_workbench.application.maintenance_service import MaintenanceService
 from pendulum_workbench.application.state import ApplicationStateModel
 from pendulum_workbench.domain.experiment_run import (
+    ExperimentMode,
     ExperimentRunSnapshot,
     ExperimentRunState,
     VerticalSineDefinition,
@@ -88,6 +89,16 @@ class ExperimentRunService(QObject):
             ExperimentRunState.PREPARING,
             ExperimentRunState.RUNNING,
             ExperimentRunState.STOPPING,
+        )
+
+    @property
+    def is_open_loop_vertical_sine_running(self) -> bool:
+        definition = self._snapshot.definition
+        return (
+            self._phase == "running"
+            and self._snapshot.state == ExperimentRunState.RUNNING
+            and definition is not None
+            and definition.mode == ExperimentMode.VERTICAL_SINUSOIDAL_EXCITATION
         )
 
     @property
@@ -555,11 +566,18 @@ class ExperimentRunService(QObject):
                 f"sine_motion_stopped:{event.fields.get('reason', 'unknown')}",
                 final_state=ExperimentRunState.INTERRUPTED,
             )
-        elif event.name in ("fault_appeared", "angle_sensor_unavailable"):
+        elif event.name == "angle_sensor_unavailable":
+            if not self.is_open_loop_vertical_sine_running:
+                self._handle_safety_interruption(f"safety_event:{event.name}")
+        elif event.name == "fault_appeared":
             self._handle_safety_interruption(f"safety_event:{event.name}")
 
     def _on_device_message(self, message: str) -> None:
-        if self.is_active and message.strip().lower() == "angle sensor unavailable":
+        if (
+            self.is_active
+            and message.strip().lower() == "angle sensor unavailable"
+            and not self.is_open_loop_vertical_sine_running
+        ):
             self._handle_safety_interruption("safety_event:angle_sensor_unavailable")
 
     def _handle_safety_interruption(

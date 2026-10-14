@@ -15,8 +15,17 @@ class VerticalSineDefinitionTests(unittest.TestCase):
         self.assertFalse(hasattr(definition, "target_initial_angle_deg"))
         self.assertEqual(ExperimentRunState.READY.value, "READY")
 
-    def test_rejects_nonfinite_or_nonpositive_setup_values(self) -> None:
-        for values in ((0.0, 1.8, 30.0), (5.0, 0.0, 30.0), (5.0, 1.8, 0.0)):
+    def test_zero_amplitude_is_a_valid_stationary_baseline(self) -> None:
+        definition = VerticalSineDefinition(0.0, 1.8, 30.0)
+
+        definition.validate()
+        self.assertEqual(
+            definition.final_name(18.2),
+            "VS_A0mm_F1.8Hz_Thetap18.2deg_T30s",
+        )
+
+    def test_rejects_negative_amplitude_and_nonpositive_frequency_or_duration(self) -> None:
+        for values in ((-0.1, 1.8, 30.0), (5.0, 0.0, 30.0), (5.0, 1.8, 0.0)):
             with self.subTest(values=values), self.assertRaises(ValueError):
                 VerticalSineDefinition(*values).validate()
         with self.assertRaisesRegex(ValueError, "finite"):

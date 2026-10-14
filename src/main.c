@@ -2436,8 +2436,9 @@ static uint8_t ProcessMaintenanceCommand(char *arguments)
             error = "motion_or_recording_active";
         }
         else if (error == NULL &&
-                 (amplitudeMm <= 0.0f ||
-                  amplitudeMm >= ((float)g_travelSteps / (2.0f * g_stepsPerMm))))
+                 (amplitudeMm < 0.0f ||
+                  (amplitudeMm > 0.0f &&
+                   amplitudeMm >= ((float)g_travelSteps / (2.0f * g_stepsPerMm)))))
         {
             error = "amplitude_out_of_travel";
         }

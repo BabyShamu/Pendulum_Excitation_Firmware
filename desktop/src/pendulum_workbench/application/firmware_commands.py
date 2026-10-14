@@ -108,8 +108,8 @@ class FirmwareCommandService(QObject):
         return self._request(FirmwareCommand.LATCH_STATUS)
 
     def start_vertical_sine(self, amplitude_mm: float, frequency_hz: float) -> int:
-        if not math.isfinite(amplitude_mm) or amplitude_mm <= 0.0:
-            raise ValueError("pivot amplitude must be finite and greater than zero")
+        if not math.isfinite(amplitude_mm) or amplitude_mm < 0.0:
+            raise ValueError("pivot amplitude must be finite and non-negative")
         if not math.isfinite(frequency_hz) or frequency_hz <= 0.0:
             raise ValueError("excitation frequency must be finite and greater than zero")
         arguments = f"{amplitude_mm:.9g} {frequency_hz:.9g}"

@@ -500,8 +500,9 @@ class ExperimentPage(QWidget):
         except ValueError:
             self.run_name_preview.setText("Enter setup values; final name will include the measured initial angle.")
             return
+        baseline_hint = "Stationary pivot baseline. " if definition.amplitude_mm == 0.0 else ""
         self.run_name_preview.setText(
-            f"Run name preview: {definition.partial_name()} (initial angle added at start)"
+            f"{baseline_hint}Run name preview: {definition.partial_name()} (initial angle added at start)"
         )
 
     def _update_run_snapshot(self, snapshot) -> None:
