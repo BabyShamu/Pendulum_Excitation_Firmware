@@ -125,6 +125,18 @@ class StructuredEventSerial(FakeSerial):
         ]
 
 
+class ControllerDiagnosticSerial(FakeSerial):
+    def __init__(self, port: str, baud_rate: int, **kwargs: object) -> None:
+        super().__init__(port, baud_rate, **kwargs)
+        self._chunks = [
+            b"time_s,theta_deg,controller_mm,motor_target_mm,actual_mm,target_steps,actual_steps,step_error\r\n"
+            b"0.005,2.5,1.2,-1.2,0.0,50,0,50\r\n"
+            b"phase_sine_time_s,angle_measured_deg,angle_source,phase2_raw_rad,phase2_tracked_rad,omega_2x_rad_s,phase_magnitude,phase_error_rad,normalized_sine,target_mm,motor_target_mm,actual_mm,target_steps,actual_steps,step_error\r\n"
+            b"0.010,NaN,acquiring,nan,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0,0,0\r\n"
+            b"telemetry sample_index=100 time_s=1.0 angle_deg=2.5 position_mm=0.0\r\n",
+        ]
+
+
 class StartupLatchProtocolSerial(FakeSerial):
     def __init__(self, port: str, baud_rate: int, **kwargs: object) -> None:
         super().__init__(port, baud_rate, **kwargs)
@@ -199,6 +211,32 @@ class SerialWorkerTests(unittest.TestCase):
 
         self.assertEqual(available[0].device, "COM7")
         self.assertEqual(available[0].description, "USB Serial Device")
+
+    def test_controller_diagnostics_are_separate_from_authoritative_telemetry(self) -> None:
+        temporary_directory = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary_directory.cleanup)
+        client = SerialTelemetryClient(
+            capture_root=Path(temporary_directory.name),
+            serial_factory=ControllerDiagnosticSerial,
+            startup_delay_s=0.0,
+        )
+        samples = []
+        diagnostics = []
+        malformed = []
+        client.telemetry_received.connect(samples.append)
+        client.controller_diagnostic_received.connect(diagnostics.append)
+        client.malformed_line_received.connect(malformed.append)
+        client.connect_to_port("COM_DIAGNOSTICS")
+
+        self.assertTrue(
+            self.wait_for(lambda: len(samples) == 1 and len(diagnostics) == 2)
+        )
+        self.assertEqual(samples[0].device_sample_index, 100)
+        self.assertEqual(diagnostics[0].diagnostic_fields["target_steps"], "50")
+        self.assertEqual(diagnostics[1].diagnostic_fields["angle_source"], "acquiring")
+        self.assertEqual(malformed, [])
+        client.disconnect()
+        self.assertTrue(self.wait_for(lambda: not client.is_running))
 
     def test_device_sample_gap_is_reported_without_generating_routine_events(self) -> None:
         temporary_directory = tempfile.TemporaryDirectory()

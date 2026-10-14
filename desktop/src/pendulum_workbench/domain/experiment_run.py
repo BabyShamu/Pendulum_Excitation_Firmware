@@ -8,7 +8,8 @@ from pendulum_workbench.domain.angle_prediction import AngleSource
 
 class ExperimentMode(str, Enum):
     VERTICAL_SINUSOIDAL_EXCITATION = "Vertical Sinusoidal Excitation"
-    AUTO_RESONANCE_PARAMETRIC_CLOSED_LOOP = "Auto-Resonance / Parametric Closed Loop"
+    AUTO_RESONANCE_PARAMETRIC = "Auto-Resonance"
+    AUTO_RESONANCE_PARAMETRIC_CLOSED_LOOP = "Auto-Resonance"
     PHASE_TRACKED_SINE_AUTO_RESONANCE = "Phase-Tracked Sinusoidal Auto-Resonance"
 
 
@@ -133,10 +134,10 @@ class AutoResonanceDefinition:
     duration_s: float
     label: str = ""
     notes: str = ""
-    mode: ExperimentMode = ExperimentMode.AUTO_RESONANCE_PARAMETRIC_CLOSED_LOOP
+    mode: ExperimentMode = ExperimentMode.AUTO_RESONANCE_PARAMETRIC
 
     def validate(self) -> None:
-        if self.mode != ExperimentMode.AUTO_RESONANCE_PARAMETRIC_CLOSED_LOOP:
+        if self.mode != ExperimentMode.AUTO_RESONANCE_PARAMETRIC:
             raise ValueError("AutoResonanceDefinition requires Auto-Resonance mode")
         for name, value in (
             ("pivot amplitude", self.amplitude_mm),

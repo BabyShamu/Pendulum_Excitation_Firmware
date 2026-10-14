@@ -109,7 +109,7 @@ class ExperimentPage(QWidget):
         mode_label.setObjectName("sectionTitle")
         self.experiment_mode_selector = QComboBox()
         self.experiment_mode_selector.addItem("Vertical Sinusoidal Excitation")
-        self.experiment_mode_selector.addItem("Auto-Resonance / Parametric Closed Loop")
+        self.experiment_mode_selector.addItem("Auto-Resonance")
         self.experiment_mode_selector.addItem("Phase-Tracked Sinusoidal Auto-Resonance")
         self.experiment_mode_selector.setMinimumHeight(38)
         mode_row.addWidget(mode_label)
@@ -472,13 +472,14 @@ class ExperimentPage(QWidget):
             self._vertical_frequency_text = self.frequency_input.text()
 
         if index in (1, 2):
-            self._active_experiment_mode = (
-                ExperimentMode.AUTO_RESONANCE_PARAMETRIC_CLOSED_LOOP
-                if index == 1
-                else ExperimentMode.PHASE_TRACKED_SINE_AUTO_RESONANCE
-            )
-            self.amplitude_input.setText("10.0")
-            self.phase_input.setText("0.0")
+            if index == 1:
+                self._active_experiment_mode = ExperimentMode.AUTO_RESONANCE_PARAMETRIC
+                self.amplitude_input.setText("7.5")
+                self.phase_input.setText("22.5")
+            else:
+                self._active_experiment_mode = ExperimentMode.PHASE_TRACKED_SINE_AUTO_RESONANCE
+                self.amplitude_input.setText("10.0")
+                self.phase_input.setText("0.0")
             self.frequency_label.hide()
             self.frequency_input.hide()
             self.phase_label.show()

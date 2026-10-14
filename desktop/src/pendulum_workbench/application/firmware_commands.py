@@ -29,6 +29,8 @@ class FirmwareCommand(str, Enum):
     FAULT_CLEAR = "fault_clear"
     SINE_START = "sine_start"
     SINE_STOP = "sine_stop"
+    PARAMETRIC_START = "parametric_start"
+    PARAMETRIC_STOP = "parametric_stop"
     AUTO_RESONANCE_START = "autores_start"
     AUTO_RESONANCE_STOP = "autores_stop"
     PHASE_TRACKED_SINE_START = "phase_sine_start"
@@ -134,6 +136,19 @@ class FirmwareCommandService(QObject):
             timeout_ms=self._SINE_STOP_TIMEOUT_MS,
         )
 
+    def start_parametric(self, amplitude_mm: float, phase_deg: float) -> int:
+        if not math.isfinite(amplitude_mm) or amplitude_mm <= 0.0:
+            raise ValueError("pivot amplitude must be finite and greater than zero")
+        if not math.isfinite(phase_deg):
+            raise ValueError("phase must be finite")
+        return self._request(
+            FirmwareCommand.PARAMETRIC_START,
+            arguments=f"{amplitude_mm:.9g} {phase_deg:.9g}",
+        )
+
+    def stop_parametric(self) -> int:
+        return self._request(FirmwareCommand.PARAMETRIC_STOP)
+
     def start_parametric_closed_loop(self, amplitude_mm: float, phase_deg: float) -> int:
         if not math.isfinite(amplitude_mm) or amplitude_mm <= 0.0:
             raise ValueError("pivot amplitude must be finite and greater than zero")
@@ -211,6 +226,9 @@ class FirmwareCommandService(QObject):
     def _on_command_written(self, request_id: str) -> None:
         if self._active_request_id is None or request_id != str(self._active_request_id):
             return
+        if not self._waiting_for_write:
+            return
+        self.serial_client.clear_write_receipt(request_id)
         if not self._is_routine_success(self._active_command):
             self.state.report_event(
                 EventSeverity.INFO,
@@ -220,6 +238,7 @@ class FirmwareCommandService(QObject):
         self._timer.start(self._response_timeout_ms)
 
     def _on_response(self, response: MaintenanceResponse) -> None:
+        self.serial_client.clear_maintenance_response(response.request_id)
         if self._active_request_id != response.request_id:
             return
         if self._active_command is None or response.response_type != self._active_command.value:
@@ -235,6 +254,7 @@ class FirmwareCommandService(QObject):
             return
 
         command = self._active_command
+        self.serial_client.clear_write_receipt(str(response.request_id))
         self._clear_active()
         if not self._is_routine_success(command):
             self.state.report_event(
@@ -245,6 +265,18 @@ class FirmwareCommandService(QObject):
 
     def _on_timeout(self) -> None:
         if self._active_command is None:
+            return
+        if self._active_request_id is not None:
+            response = self.serial_client.take_maintenance_response(self._active_request_id)
+            if response is not None:
+                self._on_response(response)
+                return
+        if (
+            self._waiting_for_write
+            and self._active_request_id is not None
+            and self.serial_client.command_was_written(str(self._active_request_id))
+        ):
+            self._on_command_written(str(self._active_request_id))
             return
         phase = "response" if not self._waiting_for_write else "dispatch"
         self._fail(f"Timed out waiting for maintenance command {phase}: {self._active_command.value}.")

@@ -1,5 +1,6 @@
 import math
 import re
+import csv
 from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
@@ -10,6 +11,7 @@ from pendulum_workbench.domain.models import HardwareStatus, TelemetrySample
 class ParsedLineKind(str, Enum):
     TELEMETRY = "telemetry"
     HARDWARE_STATUS = "hardware_status"
+    CONTROLLER_DIAGNOSTIC = "controller_diagnostic"
     DEVICE_MESSAGE = "device_message"
     MALFORMED = "malformed"
 
@@ -21,12 +23,27 @@ class ParsedLine:
     hardware_status: HardwareStatus | None = None
     message: str = ""
     device_sample_index: int | None = None
+    diagnostic_fields: dict[str, str] | None = None
+    diagnostic_schema: tuple[str, ...] | None = None
 
 
 class TelemetryParser:
     _field_pattern = re.compile(r"([A-Za-z_]+)=([^\s]+)")
     _recording_header = "time_sec,position_mm,angle_deg"
     _device_recording_header = "sample_index,time_s,angle_deg,position_mm"
+    _autores_diagnostic_header = (
+        "time_s", "theta_deg", "controller_mm", "motor_target_mm", "actual_mm",
+        "target_steps", "actual_steps", "step_error",
+    )
+    _phase_sine_diagnostic_header = (
+        "phase_sine_time_s", "angle_measured_deg", "angle_source", "phase2_raw_rad",
+        "phase2_tracked_rad", "omega_2x_rad_s", "phase_magnitude", "phase_error_rad",
+        "normalized_sine", "target_mm", "motor_target_mm", "actual_mm", "target_steps",
+        "actual_steps", "step_error",
+    )
+
+    def __init__(self) -> None:
+        self._controller_diagnostic_schema: tuple[str, ...] | None = None
 
     def parse_line(
         self,
@@ -48,7 +65,21 @@ class TelemetryParser:
             return ParsedLine(ParsedLineKind.DEVICE_MESSAGE, message=text)
 
         if self._recording_header in text or text.startswith(self._device_recording_header):
+            self._controller_diagnostic_schema = None
             return ParsedLine(ParsedLineKind.DEVICE_MESSAGE, message="Telemetry CSV header")
+
+        fields = next(csv.reader([text]), [])
+        normalized_header = tuple(field.strip() for field in fields)
+        if normalized_header in (
+            self._autores_diagnostic_header,
+            self._phase_sine_diagnostic_header,
+        ):
+            self._controller_diagnostic_schema = normalized_header
+            return ParsedLine(
+                ParsedLineKind.DEVICE_MESSAGE,
+                message="Controller diagnostic CSV header",
+                diagnostic_schema=normalized_header,
+            )
 
         status_offset = text.find("status:")
         if status_offset >= 0:
@@ -58,6 +89,7 @@ class TelemetryParser:
             return self._parse_switches(text[len("switches:"):], received_at)
 
         if text.startswith("live "):
+            self._controller_diagnostic_schema = None
             return self._parse_live(
                 text,
                 sample_index=sample_index,
@@ -67,6 +99,7 @@ class TelemetryParser:
             )
 
         if text.startswith("telemetry "):
+            self._controller_diagnostic_schema = None
             return self._parse_device_telemetry(
                 text,
                 elapsed_s=elapsed_s,
@@ -75,6 +108,8 @@ class TelemetryParser:
             )
 
         if "," in text:
+            if self._controller_diagnostic_schema is not None:
+                return self._parse_controller_diagnostic(text)
             return self._parse_csv_sample(
                 text,
                 sample_index=sample_index,
@@ -83,7 +118,50 @@ class TelemetryParser:
                 rx_line_index=rx_line_index,
             )
 
+        self._controller_diagnostic_schema = None
         return ParsedLine(ParsedLineKind.DEVICE_MESSAGE, message=text)
+
+    def _parse_controller_diagnostic(self, text: str) -> ParsedLine:
+        schema = self._controller_diagnostic_schema
+        fields = next(csv.reader([text]), [])
+        if schema is None or len(fields) != len(schema):
+            return ParsedLine(
+                ParsedLineKind.MALFORMED,
+                message=f"Invalid controller diagnostic field count ({len(fields)}): {text}",
+            )
+        values = dict(zip(schema, (field.strip() for field in fields)))
+        numeric_fields = (
+            self._phase_sine_diagnostic_header
+            if schema == self._phase_sine_diagnostic_header
+            else self._autores_diagnostic_header
+        )
+        for name in numeric_fields:
+            if name == "angle_source":
+                continue
+            value = values[name]
+            if name in ("angle_measured_deg", "phase2_raw_rad") and value.lower() in (
+                "nan", "na", "unavailable"
+            ):
+                continue
+            try:
+                number = float(value)
+            except ValueError:
+                return ParsedLine(
+                    ParsedLineKind.MALFORMED,
+                    message=f"Invalid controller diagnostic value for {name}: {text}",
+                )
+            if not math.isfinite(number):
+                if name in ("angle_measured_deg", "phase2_raw_rad") and math.isnan(number):
+                    continue
+                return ParsedLine(
+                    ParsedLineKind.MALFORMED,
+                    message=f"Non-finite controller diagnostic value for {name}: {text}",
+                )
+        return ParsedLine(
+            ParsedLineKind.CONTROLLER_DIAGNOSTIC,
+            diagnostic_fields=values,
+            diagnostic_schema=schema,
+        )
 
     def _parse_device_telemetry(
         self,

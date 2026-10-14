@@ -86,6 +86,52 @@ class TelemetryParserTests(unittest.TestCase):
         self.assertEqual(result.telemetry.position_mm, 1.5)
         self.assertEqual(result.telemetry.angle_deg, -3.25)
 
+    def test_parses_known_controller_diagnostic_header_and_rows_separately(self) -> None:
+        header = "time_s,theta_deg,controller_mm,motor_target_mm,actual_mm,target_steps,actual_steps,step_error"
+        self.assertEqual(self.parse(header).kind, ParsedLineKind.DEVICE_MESSAGE)
+        result = self.parse("0.005,2.5,1.2,-1.2,0.0,50,0,50")
+
+        self.assertEqual(result.kind, ParsedLineKind.CONTROLLER_DIAGNOSTIC)
+        self.assertIsNone(result.telemetry)
+        self.assertEqual(result.diagnostic_fields["target_steps"], "50")
+        self.assertEqual(result.diagnostic_schema[0], "time_s")
+
+    def test_parses_phase_tracked_diagnostics_and_allows_missing_angle(self) -> None:
+        header = (
+            "phase_sine_time_s,angle_measured_deg,angle_source,phase2_raw_rad,"
+            "phase2_tracked_rad,omega_2x_rad_s,phase_magnitude,phase_error_rad,"
+            "normalized_sine,target_mm,motor_target_mm,actual_mm,target_steps,actual_steps,step_error"
+        )
+        self.assertEqual(self.parse(header).kind, ParsedLineKind.DEVICE_MESSAGE)
+        result = self.parse("0.005,NaN,propagated,nan,1.2,2.0,0.04,0.0,0.93,2.0,-2.0,0.0,-80,0,-80")
+
+        self.assertEqual(result.kind, ParsedLineKind.CONTROLLER_DIAGNOSTIC)
+        self.assertEqual(result.diagnostic_fields["angle_source"], "propagated")
+        self.assertEqual(result.diagnostic_fields["phase2_tracked_rad"], "1.2")
+
+    def test_normal_telemetry_resumes_after_controller_diagnostic_stream(self) -> None:
+        self.parse("time_s,theta_deg,controller_mm,motor_target_mm,actual_mm,target_steps,actual_steps,step_error")
+        self.assertEqual(self.parse("0.005,2.5,1.2,-1.2,0.0,50,0,50").kind,
+                         ParsedLineKind.CONTROLLER_DIAGNOSTIC)
+        result = self.parse("telemetry sample_index=12 time_s=1.2 angle_deg=2.5 position_mm=0.0")
+
+        self.assertEqual(result.kind, ParsedLineKind.TELEMETRY)
+        self.assertEqual(result.telemetry.sample_index, 12)
+
+    def test_genuinely_malformed_diagnostic_row_remains_malformed(self) -> None:
+        self.parse("time_s,theta_deg,controller_mm,motor_target_mm,actual_mm,target_steps,actual_steps,step_error")
+
+        self.assertEqual(self.parse("0.005,2.5,not-a-number,-1.2,0.0,50,0,50").kind,
+                         ParsedLineKind.MALFORMED)
+
+    def test_parses_indexed_four_column_csv_telemetry(self) -> None:
+        self.parse("sample_index,time_s,angle_deg,position_mm")
+        result = self.parse("12,1.200,2.500,0.750")
+
+        self.assertEqual(result.kind, ParsedLineKind.TELEMETRY)
+        self.assertEqual(result.telemetry.device_sample_index, 12)
+        self.assertEqual(result.telemetry.position_mm, 0.75)
+
     def test_parses_status_line_embedded_after_sensor_status(self) -> None:
         result = self.parse(
             "angle=201/4095 status: run=0 homed=1 sine=0 parametric=1 "

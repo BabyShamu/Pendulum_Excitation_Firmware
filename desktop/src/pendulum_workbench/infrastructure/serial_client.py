@@ -125,6 +125,10 @@ class SerialWorker(QThread):
         self._serial_factory = serial_factory or serial.Serial
         self._startup_delay_s = startup_delay_s
         self._command_queue: queue.Queue[tuple[str, str]] = queue.Queue()
+        self._write_receipt_lock = threading.Lock()
+        self._last_written_request_id: str | None = None
+        self._response_receipt_lock = threading.Lock()
+        self._maintenance_response_receipts: dict[int, MaintenanceResponse] = {}
         self._manual_heartbeat_lock = threading.Lock()
         self._manual_heartbeat_direction: str | None = None
         self._manual_heartbeat_revision = 0
@@ -133,6 +137,27 @@ class SerialWorker(QThread):
         if not command or "\r" in command or "\n" in command:
             raise ValueError("serial command must be a single non-empty line")
         self._command_queue.put((request_id, command))
+
+    def command_was_written(self, request_id: str) -> bool:
+        with self._write_receipt_lock:
+            return self._last_written_request_id == request_id
+
+    def clear_write_receipt(self, request_id: str) -> None:
+        with self._write_receipt_lock:
+            if self._last_written_request_id == request_id:
+                self._last_written_request_id = None
+
+    def take_maintenance_response(self, request_id: int) -> MaintenanceResponse | None:
+        with self._response_receipt_lock:
+            return self._maintenance_response_receipts.pop(request_id, None)
+
+    def has_maintenance_response(self, request_id: int) -> bool:
+        with self._response_receipt_lock:
+            return request_id in self._maintenance_response_receipts
+
+    def clear_maintenance_response(self, request_id: int) -> None:
+        with self._response_receipt_lock:
+            self._maintenance_response_receipts.pop(request_id, None)
 
     def set_manual_heartbeat(self, direction: str | None) -> None:
         if direction not in (None, "up", "down"):
@@ -178,6 +203,8 @@ class SerialWorker(QThread):
                         payload = f"{command}\r\n".encode("ascii")
                         if connection.write(payload) != len(payload):
                             raise IOError("serial command was only partially written")
+                        with self._write_receipt_lock:
+                            self._last_written_request_id = request_id
                         self.command_written.emit(request_id)
 
                 now = time.monotonic()
@@ -235,6 +262,16 @@ class SerialWorker(QThread):
                 received_at,
                 partial=line.partial,
             )
+            response_text = line.payload.decode("ascii", errors="replace")
+            if response_text.startswith("> "):
+                response_text = response_text[2:].lstrip()
+            response = FirmwareProtocolParser.parse_maintenance_response(response_text)
+            if response is not None:
+                with self._response_receipt_lock:
+                    self._maintenance_response_receipts[response.request_id] = response
+                    if len(self._maintenance_response_receipts) > 32:
+                        oldest_id = next(iter(self._maintenance_response_receipts))
+                        self._maintenance_response_receipts.pop(oldest_id, None)
             self.line_received.emit(
                 ReceivedSerialLine(
                     payload=line.payload,
@@ -262,6 +299,7 @@ class SerialTelemetryClient(QObject):
     maintenance_response_received = Signal(object)
     device_event_received = Signal(object)
     diagnostic_received = Signal(str)
+    controller_diagnostic_received = Signal(object)
 
     def __init__(
         self,
@@ -333,6 +371,28 @@ class SerialTelemetryClient(QObject):
         if worker is None or not worker.isRunning():
             raise RuntimeError("STM32 serial connection is not running")
         worker.enqueue_command(request_id, command)
+
+    def command_was_written(self, request_id: str) -> bool:
+        worker = self._worker
+        return worker is not None and worker.command_was_written(request_id)
+
+    def clear_write_receipt(self, request_id: str) -> None:
+        worker = self._worker
+        if worker is not None:
+            worker.clear_write_receipt(request_id)
+
+    def take_maintenance_response(self, request_id: int) -> MaintenanceResponse | None:
+        worker = self._worker
+        return worker.take_maintenance_response(request_id) if worker is not None else None
+
+    def has_maintenance_response(self, request_id: int) -> bool:
+        worker = self._worker
+        return worker is not None and worker.has_maintenance_response(request_id)
+
+    def clear_maintenance_response(self, request_id: int) -> None:
+        worker = self._worker
+        if worker is not None:
+            worker.clear_maintenance_response(request_id)
 
     def set_manual_heartbeat(self, direction: str | None) -> None:
         worker = self._worker
@@ -429,6 +489,9 @@ class SerialTelemetryClient(QObject):
             self.telemetry_received.emit(result.telemetry)
         elif result.kind == ParsedLineKind.HARDWARE_STATUS and result.hardware_status is not None:
             self.hardware_status_received.emit(result.hardware_status)
+        elif result.kind == ParsedLineKind.CONTROLLER_DIAGNOSTIC:
+            self.controller_diagnostic_received.emit(result)
+            self.diagnostic_received.emit(text)
         elif result.kind == ParsedLineKind.MALFORMED:
             self.malformed_line_received.emit(result.message)
         elif result.message:

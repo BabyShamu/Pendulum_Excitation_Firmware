@@ -1,3 +1,4 @@
+import math
 import re
 import unittest
 from pathlib import Path
@@ -317,7 +318,12 @@ class FirmwareManualMotionContractTests(unittest.TestCase):
             "previousFault == 2U && LowerLimitPressed() != 0U",
             "lower_limit_still_active",
             "previousFault == 3U && AS5600_ReadAngle(&angle) != HAL_OK",
+            "previousFault == 4U",
+            "g_angleZeroValid == 0U || AS5600_ReadAngle(&angle) != HAL_OK",
+            "fabsf(RelativeAngleDegrees(angle)) >= PENDULUM_ANGLE_LIMIT_DEG",
+            "pendulum_angle_limit_active",
             "angle_sensor_unavailable",
+            "previousFault > 4U",
             "previousFault == 0U",
             "cleared=0",
             "g_closedLoopFault = 0U",
@@ -339,10 +345,10 @@ class FirmwareManualMotionContractTests(unittest.TestCase):
             "g_positionSteps =",
             "g_stepsPerMm =",
             "g_angleZeroRaw =",
-            "g_angleZeroValid =",
             "g_servoLatchCommandedState =",
         ):
             self.assertNotIn(forbidden_side_effect, clear_command)
+        self.assertNotRegex(clear_command, r"\bg_angleZeroValid\s*=(?!=)")
 
         legacy_closed_loop = function_body("ProcessLine").split(
             'if (strncmp(line, "parametric_closed_loop", 22) == 0', 1
@@ -735,6 +741,177 @@ class FirmwareManualMotionContractTests(unittest.TestCase):
         self.assertRegex(FIRMWARE_SOURCE, r"#define CLOSED_LOOP_MAX_MM\s+7\.5f")
         self.assertRegex(FIRMWARE_SOURCE, r"#define CLOSED_LOOP_TRAVEL_MARGIN_MM\s+2\.0f")
         self.assertRegex(FIRMWARE_SOURCE, r"#define CLOSED_LOOP_MAX_STEP_HZ\s+6000U")
+
+    def test_putty_and_desktop_parametric_share_exact_proven_controller_initialization(self) -> None:
+        initializer = function_body("StartParametricController")
+        for initialized_state in (
+            "g_parametricClosedLoopRunning = 0U",
+            "g_parametricClosedLoopExperimentMode = 0U",
+            "g_parametricClosedLoopExperimentMode = 0U",
+            "g_phaseTrackedSineRunning = 0U",
+            "ClosedLoopActuatorStop()",
+            "g_parametricTestRunning = 0U",
+            "g_sineRunning = 0U",
+            "g_run = 0U",
+            "g_parametricAmplitudeMm = amplitudeMm",
+            "g_parametricPhiRad = phaseDeg * PI_F / 180.0f",
+            "g_parametricFilterValid = 0U",
+            "g_parametricLastUpdateMs = 0U",
+            "g_parametricThetaSqDc = 0.0f",
+            "g_parametricPrevAcSignal = 0.0f",
+            "g_parametricCosPeak = 0.0f",
+            "g_parametricSinPeak = 0.0f",
+            "g_parametricCommandedMm = (float)g_positionSteps / g_stepsPerMm",
+            "g_parametricRunning = 1U",
+        ):
+            self.assertIn(initialized_state, initializer)
+
+        console = function_body("ProcessLine").split(
+            'if (strncmp(line, "parametric", 10) == 0', 1
+        )[1].split('if (strncmp(line, "run ", 4) == 0', 1)[0]
+        maintenance = function_body("ProcessMaintenanceCommand").split(
+            'if (strncmp(end, "parametric_start ", 17U) == 0)', 1
+        )[1].split('if (strcmp(end, "parametric_stop") == 0)', 1)[0]
+        self.assertIn("StartParametricController(amplitudeMm, phiDeg)", console)
+        self.assertIn("StartParametricController(amplitudeMm, phaseDeg)", maintenance)
+        self.assertNotIn("g_parametricClosedLoopAmplitudeMm = amplitudeMm", maintenance)
+
+        main_loop = function_body("main")
+        self.assertIn("else if (g_parametricRunning != 0U)\n        {\n            UpdateParametric();", main_loop)
+        self.assertNotIn("UpdateParametricClosedLoop()", initializer)
+        self.assertAlmostEqual(22.5 * math.pi / 180.0, math.pi / 8.0)
+
+        stop_helper = function_body("StopParametricController")
+        self.assertIn("g_parametricRunning = 0U", stop_helper)
+        self.assertIn("ReturnToCenter()", stop_helper)
+        self.assertIn("StopParametricController(1U)", console)
+        self.assertIn("StopParametricController(0U)", function_body("ProcessMaintenanceCommand"))
+
+    def test_global_pendulum_angle_limit_stops_every_motion_path_and_clears_only_by_fresh_safe_sample(self) -> None:
+        safety = function_body("PendulumAngleSafetyPoll")
+        for required in (
+            "g_angleZeroValid == 0U",
+            "AS5600_ReadAngle(&angle) != HAL_OK",
+            "RelativeAngleDegrees(angle)",
+            "fabsf(angleDeg) >= PENDULUM_ANGLE_LIMIT_DEG",
+            "PendulumAngleLimitTrip(angleDeg)",
+        ):
+            self.assertIn(required, safety)
+
+        sensor_read = function_body("AS5600_ReadAngle")
+        self.assertIn("if (status == HAL_OK)", sensor_read)
+        self.assertIn("g_angleZeroValid != 0U && g_closedLoopFault == 0U", sensor_read)
+        self.assertIn("PendulumAngleLimitTrip(angleDeg)", sensor_read)
+        self.assertLess(sensor_read.index("if (status == HAL_OK)"), sensor_read.index("PendulumAngleLimitTrip(angleDeg)"))
+
+        trip = function_body("PendulumAngleLimitTrip")
+        for stopped_state in (
+            "g_closedLoopFault = 4U",
+            "g_run = 0U",
+            "g_sineRunning = 0U",
+            "g_parametricRunning = 0U",
+            "g_parametricTestRunning = 0U",
+            "g_parametricClosedLoopRunning = 0U",
+            "g_phaseTrackedSineRunning = 0U",
+            "g_manualMotionDirection = 0U",
+            "g_homingActive = 0U",
+            "ManualStepTimerStop()",
+            "ClosedLoopActuatorStop()",
+        ):
+            self.assertIn(stopped_state, trip)
+        self.assertIn("g_manualStepPulseHigh != 0U", trip)
+        self.assertIn("g_closedLoopActuatorPhase == CLOSED_LOOP_PHASE_STEP_HIGH", trip)
+        self.assertIn("g_positionSteps += (g_dir == DIR_UP) ? 1 : -1", trip)
+        self.assertIn("if (g_closedLoopFault != 0U)", trip)
+        self.assertNotIn("ReturnToCenter()", trip)
+        self.assertNotIn("ServoLatchCommand(", trip)
+        self.assertIn(
+            "event: type=fault_appeared code=pendulum_angle_limit angle_deg=%.2f",
+            function_body("ReportClosedLoopFault"),
+        )
+        self.assertIn("PendulumAngleSafetyPoll();", function_body("main"))
+        self.assertIn("PendulumAngleSafetyPoll() == 0U", function_body("StepOne"))
+        self.assertIn("g_pendulumAngleSafetyAvailable == 0U", function_body("ManualMotionSafetyStopReason"))
+        self.assertIn("g_closedLoopFault != 0U || g_pendulumAngleSafetyAvailable == 0U", function_body("ClosedLoopActuatorOnTimer"))
+        self.assertIn("ManualMotionSafetyStopReason()", function_body("ManualStepTimerOnTimer"))
+        self.assertIn("code=angle_sensor", function_body("ReportClosedLoopFault"))
+
+        maintenance = function_body("ProcessMaintenanceCommand")
+        for command, terminator in (
+            ('if (strncmp(end, "sine_start ", 11U) == 0)', 'if (strcmp(end, "sine_stop") == 0)'),
+            ('if (strncmp(end, "autores_start ", 14U) == 0)', 'if (strncmp(end, "parametric_start ", 17U) == 0)'),
+            ('if (strncmp(end, "parametric_start ", 17U) == 0)', 'if (strcmp(end, "parametric_stop") == 0)'),
+            ('if (strncmp(end, "phase_sine_start ", 17U) == 0)', 'if (strcmp(end, "phase_sine_stop") == 0)'),
+        ):
+            block = maintenance.split(command, 1)[1].split(terminator, 1)[0]
+            self.assertIn("PendulumAngleSafetyPoll() == 0U", block)
+            self.assertIn('"blocking_fault"', block)
+
+        manual_start = maintenance.split(
+            'if (strcmp(end, "manual_up") == 0', 1
+        )[1].split('if (strcmp(end, "manual_keepalive_up") == 0', 1)[0]
+        self.assertIn("PendulumAngleSafetyPoll() == 0U", manual_start)
+        self.assertIn('"blocking_fault"', manual_start)
+
+        home_command = maintenance.split('if (strcmp(end, "home") == 0)', 1)[1].split(
+            'if (strcmp(end, "zero") == 0)', 1
+        )[0]
+        self.assertIn("g_closedLoopFault != 0U", home_command)
+        self.assertIn("if (g_closedLoopFault != 0U || PendulumAngleSafetyPoll() == 0U)", function_body("Home"))
+        self.assertIn("if (g_closedLoopFault != 0U || PendulumAngleSafetyPoll() == 0U)", function_body("Jog"))
+        self.assertIn("g_closedLoopFault == 0U", function_body("SetAngleZero"))
+        self.assertIn("g_closedLoopFault != 0U", function_body("ProcessLine").split(
+            'if (strcmp(line, "zero") == 0)', 1
+        )[1].split('if (strncmp(line, "live ", 5) == 0)', 1)[0])
+
+        process_line = function_body("ProcessLine")
+        legacy_starts = (
+            process_line.split('if (strncmp(line, "sine", 4) == 0', 1)[1].split(
+                'if (strncmp(line, "parametric", 10) == 0', 1
+            )[0],
+            process_line.split('if (strncmp(line, "parametric", 10) == 0', 1)[1].split(
+                'if (strncmp(line, "run ", 4) == 0', 1
+            )[0],
+            process_line.split('if (strncmp(line, "run ", 4) == 0', 1)[1].split(
+                'if (strncmp(line, "dir ", 4) == 0', 1
+            )[0],
+            process_line.split('if (strncmp(line, "parametric_closed_loop", 22) == 0', 1)[1].split(
+                'if (strncmp(line, "scale ", 6) == 0', 1
+            )[0],
+        )
+        self.assertIn("PendulumAngleSafetyPoll() == 0U", legacy_starts[0])
+        self.assertIn("PendulumAngleSafetyPoll() == 0U", legacy_starts[1])
+        self.assertIn("PendulumAngleSafetyPoll() == 0U", legacy_starts[2])
+        self.assertIn("PendulumAngleSafetyPoll() == 0U", legacy_starts[3])
+
+        angle_limit_clear = function_body("ProcessMaintenanceCommand").split(
+            'if (strcmp(end, "fault_clear") == 0)', 1
+        )[1].split('if (strncmp(end, "sine_start ", 11U) == 0)', 1)[0]
+        self.assertIn("previousFault == 4U", angle_limit_clear)
+        self.assertIn("AS5600_ReadAngle(&angle) != HAL_OK", angle_limit_clear)
+        self.assertIn("fabsf(RelativeAngleDegrees(angle)) >= PENDULUM_ANGLE_LIMIT_DEG", angle_limit_clear)
+        self.assertNotIn("Home()", angle_limit_clear)
+        self.assertNotIn("ReturnToCenter()", angle_limit_clear)
+        self.assertNotIn("ServoLatchCommand(", angle_limit_clear)
+        self.assertIn(
+            "AS5600_ReadAngle(&angle) == HAL_OK && g_closedLoopFault == 0U",
+            function_body("SetAngleZero"),
+        )
+
+        def relative_angle(raw: int) -> float:
+            difference = raw
+            if difference > 2047:
+                difference -= 4096
+            elif difference < -2048:
+                difference += 4096
+            return difference * 360.0 / 4096.0
+
+        self.assertAlmostEqual(relative_angle(1023), 89.912109375)
+        self.assertEqual(relative_angle(1024), 90.0)
+        self.assertGreater(relative_angle(1025), 90.0)
+        self.assertAlmostEqual(relative_angle(3073), -89.912109375)
+        self.assertEqual(relative_angle(3072), -90.0)
+        self.assertLess(relative_angle(3071), -90.0)
 
 
 if __name__ == "__main__":

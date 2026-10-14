@@ -83,7 +83,7 @@ class AutoResonanceDefinitionTests(unittest.TestCase):
             "Trial_AR_A6mm_Phim12.5deg_Thetap18.2deg_T20s",
         )
         manifest = definition.manifest_values(measured_initial_angle_deg=18.2)
-        self.assertEqual(manifest["experiment_mode"], "AUTO_RESONANCE_PARAMETRIC_CLOSED_LOOP")
+        self.assertEqual(manifest["experiment_mode"], "AUTO_RESONANCE_PARAMETRIC")
         self.assertEqual(manifest["commanded_amplitude_mm"], 6.0)
         self.assertEqual(manifest["commanded_phase_deg"], -12.5)
         self.assertEqual(manifest["requested_duration_s"], 20.0)
