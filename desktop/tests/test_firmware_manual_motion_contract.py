@@ -637,8 +637,8 @@ class FirmwareManualMotionContractTests(unittest.TestCase):
     def test_phase_tracked_sine_reuses_phase_basis_without_mutating_existing_autores_controller(self) -> None:
         phase_sine = function_body("UpdatePhaseTrackedSine")
         for required in (
-            "atan2f(quadratureAgc, -directAgc)",
-            "hypotf(directAgc, quadratureAgc)",
+            "atan2f(g_phaseTrackedSine.quadratureFiltered, -dcBlocked)",
+            "hypotf(dcBlocked, g_phaseTrackedSine.quadratureFiltered)",
             "WrapRadiansToPi",
             "measuredOmega",
             "PHASE_TRACKED_OMEGA_FILTER_TAU_S",
@@ -654,8 +654,40 @@ class FirmwareManualMotionContractTests(unittest.TestCase):
             "g_parametricClosedLoopTargetSteps = targetSteps",
             "CLOSED_LOOP_MAX_MM",
             "CLOSED_LOOP_TRAVEL_MARGIN_MM",
+            "g_phaseTrackedSine.phaseHistoryValid",
+            "PHASE_TRACKED_ACQUISITION_SAMPLES",
+            "g_phaseTrackedSine.acquisitionCount",
+            "g_phaseTrackedSine.phaseAcquiredMs = now",
         ):
             self.assertIn(required, phase_sine)
+        self.assertNotIn("ParametricTestAgc(", phase_sine)
+        first_vector = phase_sine.split(
+            "if (g_phaseTrackedSine.phaseHistoryValid == 0U)", 1
+        )[1].split("else", 1)[0]
+        self.assertIn("g_phaseTrackedSine.acquisitionCount = 1U", first_vector)
+        self.assertNotIn("g_phaseTrackedSine.phaseValid = 1U", first_vector)
+        self.assertNotIn("g_phaseTrackedSine.omegaValid = 1U", first_vector)
+        self.assertIn(
+            "g_phaseTrackedSine.acquisitionCount = 0U;\n                        g_phaseTrackedSine.omegaValid = 0U;",
+            phase_sine,
+        )
+
+        rate_rejection = phase_sine.split(
+            "fabsf(measuredOmega) > PHASE_TRACKED_MAX_PHASE_RATE_RAD_S)", 1
+        )[1].split("\n                }\n                else", 1)[0]
+        for history_update in (
+            "previousRawPhaseRad =",
+            "lastPhaseMeasurementMs =",
+            "measuredUnwrappedPhaseRad +=",
+            "trackedPhaseRad =",
+        ):
+            self.assertNotIn(history_update, rate_rejection)
+
+        locked_loss_timer = phase_sine.split(
+            "if (g_phaseTrackedSine.phaseValid != 0U &&\n        g_phaseTrackedSine.invalidSinceActive != 0U)",
+            1,
+        )
+        self.assertEqual(len(locked_loss_timer), 2)
         maintenance = function_body("ProcessMaintenanceCommand")
         self.assertIn('strncmp(end, "phase_sine_start ", 17U)', maintenance)
         self.assertIn('strcmp(end, "phase_sine_stop") == 0', maintenance)
@@ -663,8 +695,14 @@ class FirmwareManualMotionContractTests(unittest.TestCase):
             'if (strncmp(end, "phase_sine_start ", 17U) == 0)', 1
         )[1].split('if (strcmp(end, "phase_sine_stop") == 0)', 1)[0]
         self.assertIn("currentPositionMm = (float)g_positionSteps / g_stepsPerMm", phase_start)
-        self.assertIn("g_phaseTrackedSine.startPositionMm = currentPositionMm", phase_start)
+        self.assertIn(
+            "g_phaseTrackedSine.startPositionMm =\n                CLOSED_LOOP_COMMAND_SIGN * currentPositionMm",
+            phase_start,
+        )
         self.assertIn("fabsf(currentPositionMm) > amplitudeMm", phase_start)
+        self.assertIn("g_phaseTrackedSine.status = PHASE_TRACKED_STATUS_ACQUIRING", phase_start)
+        self.assertIn("g_phaseTrackedSine.invalidSinceActive = 0U", phase_start)
+        self.assertNotIn("g_phaseTrackedSine.invalidSinceMs = now", phase_start)
         for diagnostic_field in (
             "phase2_raw_rad",
             "phase2_tracked_rad",
@@ -679,11 +717,13 @@ class FirmwareManualMotionContractTests(unittest.TestCase):
         existing_autores = function_body("UpdateParametricClosedLoop")
         self.assertIn("g_parametricClosedLoopPhaseCos", existing_autores)
         self.assertIn("g_parametricClosedLoopPhaseSin", existing_autores)
+        self.assertIn("ParametricTestAgc(", existing_autores)
         self.assertNotIn("g_phaseTrackedSine.", existing_autores)
         self.assertNotIn("g_phaseTrackedSine", function_body("UpdateParametricTest"))
 
         for setting in (
             "#define PHASE_TRACKED_MIN_VECTOR_MAGNITUDE 0.05f",
+            "#define PHASE_TRACKED_ACQUISITION_SAMPLES 3U",
             "#define PHASE_TRACKED_MAX_PHASE_RATE_RAD_S 40.0f",
             "#define PHASE_TRACKED_OMEGA_FILTER_TAU_S   0.05f",
             "#define PHASE_TRACKED_PHASE_CORRECTION_GAIN 0.15f",

@@ -11,6 +11,7 @@ PHASE_TRACKED_PHASE_CORRECTION_GAIN = 0.15
 PHASE_TRACKED_MAX_PHASE_CORRECTION_RAD = 0.1
 PHASE_TRACKED_MAX_UNCONFIDENT_MS = 250.0
 PHASE_TRACKED_START_RAMP_MS = 250.0
+PHASE_TRACKED_ACQUISITION_SAMPLES = 3
 
 
 class PhaseConfidence(str, Enum):
@@ -29,6 +30,8 @@ class PhaseTrackerSample:
     omega_2x_rad_s: float | None
     phase_magnitude: float
     phase_error_rad: float | None = None
+    acquisition_samples: int = 0
+    locked: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -51,6 +54,7 @@ class PhaseTracker:
         phase_correction_gain: float = PHASE_TRACKED_PHASE_CORRECTION_GAIN,
         max_phase_correction_rad: float = PHASE_TRACKED_MAX_PHASE_CORRECTION_RAD,
         max_unconfident_ms: float = PHASE_TRACKED_MAX_UNCONFIDENT_MS,
+        acquisition_samples: int = PHASE_TRACKED_ACQUISITION_SAMPLES,
     ) -> None:
         values = (
             min_vector_magnitude,
@@ -72,6 +76,8 @@ class PhaseTracker:
             raise ValueError("phase filter/correction settings are invalid")
         if max_unconfident_ms <= 0.0:
             raise ValueError("unconfident timeout must be positive")
+        if acquisition_samples < 3:
+            raise ValueError("phase acquisition requires at least three samples")
 
         self.min_vector_magnitude = min_vector_magnitude
         self.max_phase_rate_rad_s = max_phase_rate_rad_s
@@ -79,18 +85,22 @@ class PhaseTracker:
         self.phase_correction_gain = phase_correction_gain
         self.max_phase_correction_rad = max_phase_correction_rad
         self.max_unconfident_ms = max_unconfident_ms
+        self.acquisition_samples = acquisition_samples
         self.reset()
 
     def reset(self, time_s: float | None = None) -> None:
         self.phase_initialized = False
+        self.locked = False
+        self.acquisition_count = 0
         self.previous_phase_raw_rad: float | None = None
         self.measured_phase_unwrapped_rad: float | None = None
         self.phase_tracked_rad: float | None = None
         self.omega_2x_rad_s: float | None = None
         self.previous_measurement_time_s: float | None = None
         self.previous_update_time_s = time_s
-        self.unconfident_since_s: float | None = None
+        self.loss_since_s: float | None = None
         self.phase_magnitude = 0.0
+        self.faulted = False
 
     def update(
         self,
@@ -113,15 +123,18 @@ class PhaseTracker:
         )
         self.previous_update_time_s = time_s
 
+        if self.faulted:
+            return self._result(PhaseConfidence.FAULT, None, self.phase_magnitude)
+
         if direct is None or quadrature is None:
-            return self._propagate_unconfident(time_s, dt, None, 0.0)
+            return self._handle_unconfident(time_s, dt, None, 0.0)
         if not math.isfinite(direct) or not math.isfinite(quadrature):
-            return self._propagate_unconfident(time_s, dt, None, 0.0)
+            return self._handle_unconfident(time_s, dt, None, 0.0)
 
         magnitude = math.hypot(direct, quadrature)
         self.phase_magnitude = magnitude
         if magnitude < self.min_vector_magnitude:
-            return self._propagate_unconfident(time_s, dt, None, magnitude)
+            return self._handle_unconfident(time_s, dt, None, magnitude)
 
         # Existing convention: direct ~= -cos(phase2), quadrature ~= sin(phase2).
         phase_raw = math.atan2(quadrature, -direct)
@@ -129,22 +142,21 @@ class PhaseTracker:
             self.phase_initialized = True
             self.previous_phase_raw_rad = phase_raw
             self.measured_phase_unwrapped_rad = phase_raw
-            self.phase_tracked_rad = phase_raw
             self.previous_measurement_time_s = time_s
-            self.unconfident_since_s = None
-            return self._result(PhaseConfidence.MEASURED, phase_raw, magnitude)
+            self.acquisition_count = 1
+            return self._result(PhaseConfidence.ACQUIRING, phase_raw, magnitude)
 
         previous_raw = self.previous_phase_raw_rad
         previous_measurement_time = self.previous_measurement_time_s
         if previous_raw is None or previous_measurement_time is None:
-            return self._propagate_unconfident(time_s, dt, phase_raw, magnitude)
+            return self._handle_unconfident(time_s, dt, phase_raw, magnitude)
         measurement_dt = time_s - previous_measurement_time
         if measurement_dt <= 0.0:
-            return self._propagate_unconfident(time_s, dt, phase_raw, magnitude)
+            return self._handle_unconfident(time_s, dt, phase_raw, magnitude)
         phase_increment = self.wrap_to_pi(phase_raw - previous_raw)
         measured_omega = phase_increment / measurement_dt
         if abs(measured_omega) > self.max_phase_rate_rad_s:
-            return self._propagate_unconfident(time_s, dt, phase_raw, magnitude)
+            return self._handle_unconfident(time_s, dt, phase_raw, magnitude)
 
         if self.omega_2x_rad_s is None:
             self.omega_2x_rad_s = measured_omega
@@ -152,11 +164,24 @@ class PhaseTracker:
             alpha = measurement_dt / (measurement_dt + self.omega_filter_tau_s)
             self.omega_2x_rad_s += alpha * (measured_omega - self.omega_2x_rad_s)
 
-        if self.phase_tracked_rad is None or self.measured_phase_unwrapped_rad is None:
-            self.phase_tracked_rad = phase_raw
-            self.measured_phase_unwrapped_rad = phase_raw
+        if self.measured_phase_unwrapped_rad is None:
+            return self._handle_unconfident(time_s, dt, phase_raw, magnitude)
+        self.measured_phase_unwrapped_rad += phase_increment
+        self.acquisition_count += 1
+        self.previous_phase_raw_rad = phase_raw
+        self.previous_measurement_time_s = time_s
+
+        if not self.locked:
+            if self.acquisition_count >= self.acquisition_samples and self.omega_2x_rad_s is not None:
+                self.phase_tracked_rad = self.measured_phase_unwrapped_rad
+                self.locked = True
+                self.loss_since_s = None
+                return self._result(PhaseConfidence.MEASURED, phase_raw, magnitude)
+            return self._result(PhaseConfidence.ACQUIRING, phase_raw, magnitude)
+
+        if self.phase_tracked_rad is None:
+            self.phase_tracked_rad = self.measured_phase_unwrapped_rad
         else:
-            self.measured_phase_unwrapped_rad += phase_increment
             self.phase_tracked_rad += (self.omega_2x_rad_s or 0.0) * dt
             phase_error = self.wrap_to_pi(
                 self.measured_phase_unwrapped_rad - self.phase_tracked_rad
@@ -168,30 +193,31 @@ class PhaseTracker:
             )
             self.phase_tracked_rad += correction
 
-        self.previous_phase_raw_rad = phase_raw
-        self.previous_measurement_time_s = time_s
-        self.unconfident_since_s = None
+        self.loss_since_s = None
         return self._result(PhaseConfidence.MEASURED, phase_raw, magnitude)
 
-    def _propagate_unconfident(
+    def _handle_unconfident(
         self,
         time_s: float,
         dt: float,
         phase_raw: float | None,
         magnitude: float,
     ) -> PhaseTrackerSample:
-        if self.unconfident_since_s is None:
-            self.unconfident_since_s = time_s
+        if not self.locked:
+            self.acquisition_count = 0
+            self.omega_2x_rad_s = None
+            self.phase_magnitude = magnitude
+            return self._result(PhaseConfidence.ACQUIRING, phase_raw, magnitude)
+
+        if self.loss_since_s is None:
+            self.loss_since_s = time_s
         if self.phase_tracked_rad is not None and self.omega_2x_rad_s is not None:
             self.phase_tracked_rad += self.omega_2x_rad_s * dt
-        age_ms = (time_s - self.unconfident_since_s) * 1000.0
-        status = (
-            PhaseConfidence.FAULT
-            if age_ms > self.max_unconfident_ms
-            else PhaseConfidence.PROPAGATED
-            if self.phase_tracked_rad is not None and self.omega_2x_rad_s is not None
-            else PhaseConfidence.ACQUIRING
-        )
+        age_ms = (time_s - self.loss_since_s) * 1000.0
+        status = PhaseConfidence.PROPAGATED
+        if age_ms > self.max_unconfident_ms:
+            status = PhaseConfidence.FAULT
+            self.faulted = True
         self.phase_magnitude = magnitude
         return self._result(status, phase_raw, magnitude)
 
@@ -213,6 +239,8 @@ class PhaseTracker:
             omega_2x_rad_s=self.omega_2x_rad_s,
             phase_magnitude=magnitude,
             phase_error_rad=phase_error,
+            acquisition_samples=self.acquisition_count,
+            locked=self.locked,
         )
 
     @staticmethod

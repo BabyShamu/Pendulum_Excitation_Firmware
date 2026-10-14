@@ -88,7 +88,9 @@
 #define CLOSED_LOOP_PHASE_DIR_SETUP      1U
 #define CLOSED_LOOP_PHASE_STEP_HIGH      2U
 #define CLOSED_LOOP_PHASE_INTERSTEP      3U
+/* Replay q10: 0.126 sustained; quiet-trace q25: 0.051. Not hardware-validated. */
 #define PHASE_TRACKED_MIN_VECTOR_MAGNITUDE 0.05f
+#define PHASE_TRACKED_ACQUISITION_SAMPLES 3U
 #define PHASE_TRACKED_MAX_PHASE_RATE_RAD_S 40.0f
 #define PHASE_TRACKED_OMEGA_FILTER_TAU_S   0.05f
 #define PHASE_TRACKED_PHASE_CORRECTION_GAIN 0.15f
@@ -133,10 +135,12 @@ typedef struct
 typedef struct
 {
     uint8_t filterValid;
+    uint8_t phaseHistoryValid;
     uint8_t phaseValid;
     uint8_t omegaValid;
     uint8_t invalidSinceActive;
     uint8_t status;
+    uint8_t acquisitionCount;
     uint32_t startMs;
     uint32_t nextSampleMs;
     uint32_t lastUpdateMs;
@@ -151,8 +155,6 @@ typedef struct
     float dcEstimate;
     float previousDcBlocked;
     float quadratureFiltered;
-    float directAgcLogGain;
-    float quadratureAgcLogGain;
     float previousRawPhaseRad;
     float measuredUnwrappedPhaseRad;
     float trackedPhaseRad;
@@ -2162,8 +2164,6 @@ static void UpdatePhaseTrackedSine(void)
     float dt;
     float thetaRad = 0.0f;
     float dcBlocked = 0.0f;
-    float directAgc;
-    float quadratureAgc;
     float phaseRawRad = NAN;
     float phaseErrorRad = 0.0f;
     float phaseIncrement;
@@ -2225,29 +2225,20 @@ static void UpdatePhaseTrackedSine(void)
             g_phaseTrackedSine.previousDcBlocked = dcBlocked;
         }
 
-        directAgc = ParametricTestAgc(
-            dcBlocked,
-            &g_phaseTrackedSine.directAgcLogGain);
-        quadratureAgc = ParametricTestAgc(
-            g_phaseTrackedSine.quadratureFiltered,
-            &g_phaseTrackedSine.quadratureAgcLogGain);
-        magnitude = hypotf(directAgc, quadratureAgc);
+        magnitude = hypotf(dcBlocked, g_phaseTrackedSine.quadratureFiltered);
         g_phaseTrackedSine.phaseMagnitude = magnitude;
 
         if (isfinite(magnitude) && magnitude >= PHASE_TRACKED_MIN_VECTOR_MAGNITUDE)
         {
-            phaseRawRad = atan2f(quadratureAgc, -directAgc);
-            if (g_phaseTrackedSine.phaseValid == 0U)
+            phaseRawRad = atan2f(g_phaseTrackedSine.quadratureFiltered, -dcBlocked);
+            if (g_phaseTrackedSine.phaseHistoryValid == 0U)
             {
-                g_phaseTrackedSine.phaseValid = 1U;
-                g_phaseTrackedSine.omegaValid = 0U;
+                g_phaseTrackedSine.phaseHistoryValid = 1U;
                 g_phaseTrackedSine.previousRawPhaseRad = phaseRawRad;
                 g_phaseTrackedSine.measuredUnwrappedPhaseRad = phaseRawRad;
-                g_phaseTrackedSine.trackedPhaseRad = phaseRawRad;
                 g_phaseTrackedSine.lastPhaseMeasurementMs = now;
-                g_phaseTrackedSine.phaseAcquiredMs = now;
-                g_phaseTrackedSine.invalidSinceActive = 0U;
-                g_phaseTrackedSine.status = PHASE_TRACKED_STATUS_MEASURED;
+                g_phaseTrackedSine.acquisitionCount = 1U;
+                g_phaseTrackedSine.status = PHASE_TRACKED_STATUS_ACQUIRING;
             }
             else
             {
@@ -2262,12 +2253,21 @@ static void UpdatePhaseTrackedSine(void)
                     !isfinite(measuredOmega) ||
                     fabsf(measuredOmega) > PHASE_TRACKED_MAX_PHASE_RATE_RAD_S)
                 {
-                    if (g_phaseTrackedSine.invalidSinceActive == 0U)
+                    if (g_phaseTrackedSine.phaseValid != 0U &&
+                        g_phaseTrackedSine.invalidSinceActive == 0U)
                     {
                         g_phaseTrackedSine.invalidSinceMs = now;
                         g_phaseTrackedSine.invalidSinceActive = 1U;
                     }
-                    g_phaseTrackedSine.status = PHASE_TRACKED_STATUS_PROPAGATED;
+                    g_phaseTrackedSine.status =
+                        (g_phaseTrackedSine.phaseValid != 0U)
+                            ? PHASE_TRACKED_STATUS_PROPAGATED
+                            : PHASE_TRACKED_STATUS_ACQUIRING;
+                    if (g_phaseTrackedSine.phaseValid == 0U)
+                    {
+                        g_phaseTrackedSine.acquisitionCount = 0U;
+                        g_phaseTrackedSine.omegaValid = 0U;
+                    }
                 }
                 else
                 {
@@ -2285,53 +2285,98 @@ static void UpdatePhaseTrackedSine(void)
                     }
 
                     g_phaseTrackedSine.measuredUnwrappedPhaseRad += phaseIncrement;
-                    g_phaseTrackedSine.trackedPhaseRad +=
-                        g_phaseTrackedSine.omega2xRadS * dt;
-                    phaseErrorRad = WrapRadiansToPi(
-                        g_phaseTrackedSine.measuredUnwrappedPhaseRad -
-                        g_phaseTrackedSine.trackedPhaseRad);
-                    {
-                        float correction = PHASE_TRACKED_PHASE_CORRECTION_GAIN * phaseErrorRad;
-                        if (correction > PHASE_TRACKED_MAX_PHASE_CORRECTION_RAD)
-                        {
-                            correction = PHASE_TRACKED_MAX_PHASE_CORRECTION_RAD;
-                        }
-                        else if (correction < -PHASE_TRACKED_MAX_PHASE_CORRECTION_RAD)
-                        {
-                            correction = -PHASE_TRACKED_MAX_PHASE_CORRECTION_RAD;
-                        }
-                        g_phaseTrackedSine.trackedPhaseRad += correction;
-                    }
                     g_phaseTrackedSine.previousRawPhaseRad = phaseRawRad;
                     g_phaseTrackedSine.lastPhaseMeasurementMs = now;
-                    g_phaseTrackedSine.invalidSinceActive = 0U;
-                    g_phaseTrackedSine.status = PHASE_TRACKED_STATUS_MEASURED;
+                    if (g_phaseTrackedSine.acquisitionCount < 255U)
+                    {
+                        g_phaseTrackedSine.acquisitionCount++;
+                    }
+
+                    if (g_phaseTrackedSine.phaseValid == 0U)
+                    {
+                        if (g_phaseTrackedSine.acquisitionCount >=
+                                PHASE_TRACKED_ACQUISITION_SAMPLES &&
+                            g_phaseTrackedSine.omegaValid != 0U)
+                        {
+                            g_phaseTrackedSine.phaseValid = 1U;
+                            g_phaseTrackedSine.trackedPhaseRad =
+                                g_phaseTrackedSine.measuredUnwrappedPhaseRad;
+                            g_phaseTrackedSine.phaseAcquiredMs = now;
+                            g_phaseTrackedSine.invalidSinceActive = 0U;
+                            g_phaseTrackedSine.status = PHASE_TRACKED_STATUS_MEASURED;
+                        }
+                        else
+                        {
+                            g_phaseTrackedSine.status = PHASE_TRACKED_STATUS_ACQUIRING;
+                        }
+                    }
+                    else
+                    {
+                        g_phaseTrackedSine.trackedPhaseRad +=
+                            g_phaseTrackedSine.omega2xRadS * dt;
+                        phaseErrorRad = WrapRadiansToPi(
+                            g_phaseTrackedSine.measuredUnwrappedPhaseRad -
+                            g_phaseTrackedSine.trackedPhaseRad);
+                        {
+                            float correction = PHASE_TRACKED_PHASE_CORRECTION_GAIN * phaseErrorRad;
+                            if (correction > PHASE_TRACKED_MAX_PHASE_CORRECTION_RAD)
+                            {
+                                correction = PHASE_TRACKED_MAX_PHASE_CORRECTION_RAD;
+                            }
+                            else if (correction < -PHASE_TRACKED_MAX_PHASE_CORRECTION_RAD)
+                            {
+                                correction = -PHASE_TRACKED_MAX_PHASE_CORRECTION_RAD;
+                            }
+                            g_phaseTrackedSine.trackedPhaseRad += correction;
+                        }
+                        g_phaseTrackedSine.invalidSinceActive = 0U;
+                        g_phaseTrackedSine.status = PHASE_TRACKED_STATUS_MEASURED;
+                    }
                 }
             }
         }
         else
         {
-            if (g_phaseTrackedSine.invalidSinceActive == 0U)
+            if (g_phaseTrackedSine.phaseValid != 0U &&
+                g_phaseTrackedSine.invalidSinceActive == 0U)
             {
                 g_phaseTrackedSine.invalidSinceMs = now;
                 g_phaseTrackedSine.invalidSinceActive = 1U;
             }
-            g_phaseTrackedSine.status = PHASE_TRACKED_STATUS_LOW;
+            g_phaseTrackedSine.status =
+                (g_phaseTrackedSine.phaseValid != 0U)
+                    ? PHASE_TRACKED_STATUS_PROPAGATED
+                    : PHASE_TRACKED_STATUS_ACQUIRING;
+            if (g_phaseTrackedSine.phaseValid == 0U)
+            {
+                g_phaseTrackedSine.acquisitionCount = 0U;
+                g_phaseTrackedSine.omegaValid = 0U;
+            }
         }
     }
     else
     {
         g_phaseTrackedSine.angleFailureCount++;
-        if (g_phaseTrackedSine.invalidSinceActive == 0U)
+        if (g_phaseTrackedSine.phaseValid != 0U &&
+            g_phaseTrackedSine.invalidSinceActive == 0U)
         {
             g_phaseTrackedSine.invalidSinceMs = now;
             g_phaseTrackedSine.invalidSinceActive = 1U;
         }
         g_phaseTrackedSine.phaseMagnitude = 0.0f;
-        g_phaseTrackedSine.status = PHASE_TRACKED_STATUS_PROPAGATED;
+        g_phaseTrackedSine.status =
+            (g_phaseTrackedSine.phaseValid != 0U)
+                ? PHASE_TRACKED_STATUS_PROPAGATED
+                : PHASE_TRACKED_STATUS_ACQUIRING;
+        if (g_phaseTrackedSine.phaseValid == 0U)
+        {
+            g_phaseTrackedSine.acquisitionCount = 0U;
+            g_phaseTrackedSine.omegaValid = 0U;
+        }
     }
 
-    if (g_phaseTrackedSine.invalidSinceActive != 0U)
+    if (g_phaseTrackedSine.phaseValid != 0U &&
+        g_phaseTrackedSine.invalidSinceActive != 0U)
     {
         if (g_phaseTrackedSine.phaseValid != 0U && g_phaseTrackedSine.omegaValid != 0U)
         {
@@ -3379,12 +3424,12 @@ static uint8_t ProcessMaintenanceCommand(char *arguments)
             memset(&g_phaseTrackedSine, 0, sizeof(g_phaseTrackedSine));
             g_phaseTrackedSine.amplitudeMm = amplitudeMm;
             g_phaseTrackedSine.phaseOffsetRad = phaseDeg * (PI_F / 180.0f);
-            g_phaseTrackedSine.startPositionMm = currentPositionMm;
+            g_phaseTrackedSine.startPositionMm =
+                CLOSED_LOOP_COMMAND_SIGN * currentPositionMm;
             g_phaseTrackedSine.startMs = now;
             g_phaseTrackedSine.nextSampleMs = now + PARAMETRIC_TEST_PERIOD_MS;
             g_phaseTrackedSine.lastUpdateMs = now;
-            g_phaseTrackedSine.invalidSinceMs = now;
-            g_phaseTrackedSine.invalidSinceActive = 1U;
+            g_phaseTrackedSine.invalidSinceActive = 0U;
             g_phaseTrackedSine.status = PHASE_TRACKED_STATUS_ACQUIRING;
             g_parametricClosedLoopTargetSteps = g_positionSteps;
             g_phaseTrackedSineRunning = 1U;
