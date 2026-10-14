@@ -104,6 +104,20 @@
 #define MAX_SINE_FREQUENCY_HZ 10.0f
 #define PI_F                3.14159265358979323846f
 
+typedef struct
+{
+    uint8_t sda;
+    uint8_t scl;
+} AS5600LineState;
+
+typedef struct
+{
+    AS5600LineState before;
+    AS5600LineState afterPulses;
+    AS5600LineState afterBusClear;
+    AS5600LineState afterReinit;
+} AS5600RecoveryLineStates;
+
 static void GPIO_Init(void);
 static void USART2_Init(void);
 static void I2C1_Init(void);
@@ -126,6 +140,11 @@ static uint8_t WaitForDebouncedLimit(uint8_t upperLimit);
 static HAL_StatusTypeDef AS5600_ReadAngle(uint16_t *angle);
 static HAL_StatusTypeDef AS5600_ReadAngleOnce(uint16_t *angle);
 static uint8_t AS5600_RecoverI2c(void);
+static void AS5600_RecordHalFailure(HAL_StatusTypeDef status, uint32_t error);
+static void AS5600_RecordReadFailure(HAL_StatusTypeDef status, uint32_t error);
+static const char *AS5600_HalErrorName(uint32_t error);
+static void AS5600_SampleLineStates(AS5600LineState *lines);
+static void AS5600_ReportRecovery(uint8_t success);
 static uint8_t AS5600_StartupProbe(void);
 static void AS5600_ReportUnavailable(void);
 static void AS5600_ReportRestored(void);
@@ -266,6 +285,16 @@ static uint8_t g_angleSensorConsecutiveFailures = 0U;
 static uint32_t g_lastI2cRecoveryMs = 0U;
 static uint32_t g_i2cRecoveryCount = 0U;
 static uint32_t g_lastI2cError = HAL_I2C_ERROR_NONE;
+static HAL_StatusTypeDef g_as5600LastHalStatus = HAL_OK;
+static uint32_t g_as5600LastHalError = HAL_I2C_ERROR_NONE;
+static uint32_t g_as5600LastFailureUptimeMs = 0U;
+static uint32_t g_as5600TotalReadFailures = 0U;
+static uint32_t g_as5600RecoverySuccessCount = 0U;
+static uint32_t g_as5600RecoveryFailureCount = 0U;
+static uint32_t g_as5600LongestFailureStreak = 0U;
+static uint32_t g_as5600OutageStartMs = 0U;
+static uint8_t g_as5600LastRecoveryAttempted = 0U;
+static AS5600RecoveryLineStates g_as5600RecoveryLineStates = {0};
 static uint16_t g_angleZeroRaw = 0U;
 static uint8_t g_angleZeroValid = 0U;
 static uint8_t g_switchStatusValid = 0U;
@@ -568,7 +597,9 @@ static HAL_StatusTypeDef AS5600_ReadAngle(uint16_t *angle)
 {
     HAL_StatusTypeDef status = AS5600_ReadAngleOnce(angle);
     uint32_t now;
+    uint8_t recoveryAttempted = 0U;
 
+    g_as5600LastRecoveryAttempted = 0U;
     if (status == HAL_OK)
     {
         g_angleSensorConsecutiveFailures = 0U;
@@ -580,24 +611,39 @@ static HAL_StatusTypeDef AS5600_ReadAngle(uint16_t *angle)
     {
         g_angleSensorConsecutiveFailures++;
     }
+    if ((uint32_t)g_angleSensorConsecutiveFailures > g_as5600LongestFailureStreak)
+    {
+        g_as5600LongestFailureStreak = (uint32_t)g_angleSensorConsecutiveFailures;
+    }
     if (g_angleSensorConsecutiveFailures < AS5600_READ_FAILURE_RECOVERY_THRESHOLD)
     {
         return HAL_ERROR;
     }
 
-    AS5600_ReportUnavailable();
     now = HAL_GetTick();
     if (g_i2cRecoveryCount == 0U ||
         (now - g_lastI2cRecoveryMs) >= AS5600_RECOVERY_RETRY_INTERVAL_MS)
     {
         g_lastI2cRecoveryMs = now;
         g_i2cRecoveryCount++;
-        if (AS5600_RecoverI2c() != 0U && AS5600_ReadAngleOnce(angle) == HAL_OK)
+        recoveryAttempted = 1U;
+        g_as5600LastRecoveryAttempted = 1U;
+    }
+
+    AS5600_ReportUnavailable();
+    if (recoveryAttempted != 0U)
+    {
+        uint8_t recoverySucceeded = AS5600_RecoverI2c();
+        if (recoverySucceeded != 0U && AS5600_ReadAngleOnce(angle) == HAL_OK)
         {
+            g_as5600RecoverySuccessCount++;
+            AS5600_ReportRecovery(1U);
             g_angleSensorConsecutiveFailures = 0U;
             AS5600_ReportRestored();
             return HAL_OK;
         }
+        g_as5600RecoveryFailureCount++;
+        AS5600_ReportRecovery(0U);
     }
     return HAL_ERROR;
 }
@@ -609,14 +655,14 @@ static HAL_StatusTypeDef AS5600_ReadAngleOnce(uint16_t *angle)
 
     if (g_i2cReady == 0U)
     {
-        g_lastI2cError = HAL_I2C_GetError(&hi2c1);
+        AS5600_RecordReadFailure(HAL_ERROR, HAL_I2C_GetError(&hi2c1));
         return HAL_ERROR;
     }
 
     if (HAL_GPIO_ReadPin(GPIOB, GPIO_PIN_8) == GPIO_PIN_RESET ||
         HAL_GPIO_ReadPin(GPIOB, GPIO_PIN_9) == GPIO_PIN_RESET)
     {
-        g_lastI2cError = HAL_I2C_ERROR_TIMEOUT;
+        AS5600_RecordReadFailure(HAL_ERROR, HAL_I2C_ERROR_TIMEOUT);
         return HAL_ERROR;
     }
 
@@ -624,7 +670,7 @@ static HAL_StatusTypeDef AS5600_ReadAngleOnce(uint16_t *angle)
                               data, sizeof(data), 3U);
     if (status != HAL_OK)
     {
-        g_lastI2cError = HAL_I2C_GetError(&hi2c1);
+        AS5600_RecordReadFailure(status, HAL_I2C_GetError(&hi2c1));
         return status;
     }
 
@@ -632,14 +678,74 @@ static HAL_StatusTypeDef AS5600_ReadAngleOnce(uint16_t *angle)
     return HAL_OK;
 }
 
+static void AS5600_RecordHalFailure(HAL_StatusTypeDef status, uint32_t error)
+{
+    g_as5600LastHalStatus = status;
+    g_as5600LastHalError = error;
+    g_as5600LastFailureUptimeMs = HAL_GetTick();
+    g_lastI2cError = error;
+}
+
+static void AS5600_RecordReadFailure(HAL_StatusTypeDef status, uint32_t error)
+{
+    g_as5600TotalReadFailures++;
+    AS5600_RecordHalFailure(status, error);
+}
+
+static const char *AS5600_HalErrorName(uint32_t error)
+{
+    switch (error)
+    {
+        case HAL_I2C_ERROR_NONE:
+            return "NONE";
+        case HAL_I2C_ERROR_BERR:
+            return "BERR";
+        case HAL_I2C_ERROR_ARLO:
+            return "ARLO";
+        case HAL_I2C_ERROR_AF:
+            return "AF_NACK";
+        case HAL_I2C_ERROR_OVR:
+            return "OVR";
+        case HAL_I2C_ERROR_DMA:
+            return "DMA";
+        case HAL_I2C_ERROR_TIMEOUT:
+            return "TIMEOUT";
+        case HAL_I2C_ERROR_SIZE:
+            return "SIZE";
+        case HAL_I2C_ERROR_DMA_PARAM:
+            return "DMA_PARAM";
+        default:
+        {
+            const uint32_t knownErrors = HAL_I2C_ERROR_BERR | HAL_I2C_ERROR_ARLO |
+                                         HAL_I2C_ERROR_AF | HAL_I2C_ERROR_OVR |
+                                         HAL_I2C_ERROR_DMA | HAL_I2C_ERROR_TIMEOUT |
+                                         HAL_I2C_ERROR_SIZE | HAL_I2C_ERROR_DMA_PARAM;
+            return ((error & ~knownErrors) == 0U) ? "MULTIPLE" : "UNKNOWN";
+        }
+    }
+}
+
+static void AS5600_SampleLineStates(AS5600LineState *lines)
+{
+    // I2C1 uses D14/PB9 for SDA and D15/PB8 for SCL.
+    lines->sda = (HAL_GPIO_ReadPin(GPIOB, GPIO_PIN_9) == GPIO_PIN_SET) ? 1U : 0U;
+    lines->scl = (HAL_GPIO_ReadPin(GPIOB, GPIO_PIN_8) == GPIO_PIN_SET) ? 1U : 0U;
+}
+
 static uint8_t AS5600_RecoverI2c(void)
 {
     GPIO_InitTypeDef gpio = {0};
     uint8_t busReleased;
+    HAL_StatusTypeDef status;
 
+    AS5600_SampleLineStates(&g_as5600RecoveryLineStates.before);
     if (g_i2cReady != 0U)
     {
-        (void)HAL_I2C_DeInit(&hi2c1);
+        status = HAL_I2C_DeInit(&hi2c1);
+        if (status != HAL_OK)
+        {
+            AS5600_RecordHalFailure(status, HAL_I2C_GetError(&hi2c1));
+        }
     }
     g_i2cReady = 0U;
     __HAL_RCC_I2C1_FORCE_RESET();
@@ -668,6 +774,7 @@ static uint8_t AS5600_RecoverI2c(void)
         HAL_Delay(1U);
     }
 
+    AS5600_SampleLineStates(&g_as5600RecoveryLineStates.afterPulses);
     busReleased = (HAL_GPIO_ReadPin(GPIOB, GPIO_PIN_8) == GPIO_PIN_SET &&
                    HAL_GPIO_ReadPin(GPIOB, GPIO_PIN_9) == GPIO_PIN_SET) ? 1U : 0U;
     if (busReleased != 0U)
@@ -683,6 +790,7 @@ static uint8_t AS5600_RecoverI2c(void)
         busReleased = (HAL_GPIO_ReadPin(GPIOB, GPIO_PIN_8) == GPIO_PIN_SET &&
                        HAL_GPIO_ReadPin(GPIOB, GPIO_PIN_9) == GPIO_PIN_SET) ? 1U : 0U;
     }
+    AS5600_SampleLineStates(&g_as5600RecoveryLineStates.afterBusClear);
 
     gpio.Pin = GPIO_PIN_8 | GPIO_PIN_9;
     gpio.Mode = GPIO_MODE_AF_OD;
@@ -694,14 +802,16 @@ static uint8_t AS5600_RecoverI2c(void)
     __HAL_RCC_I2C1_FORCE_RESET();
     __HAL_RCC_I2C1_RELEASE_RESET();
     I2C1_Init();
+    AS5600_SampleLineStates(&g_as5600RecoveryLineStates.afterReinit);
     if (g_i2cReady == 0U || busReleased == 0U)
     {
         return 0U;
     }
 
-    if (HAL_I2C_IsDeviceReady(&hi2c1, 0x36U << 1, 2U, 10U) != HAL_OK)
+    status = HAL_I2C_IsDeviceReady(&hi2c1, 0x36U << 1, 2U, 10U);
+    if (status != HAL_OK)
     {
-        g_lastI2cError = HAL_I2C_GetError(&hi2c1);
+        AS5600_RecordHalFailure(status, HAL_I2C_GetError(&hi2c1));
         return 0U;
     }
     return 1U;
@@ -727,28 +837,92 @@ static uint8_t AS5600_StartupProbe(void)
 
 static void AS5600_ReportUnavailable(void)
 {
-    char message[128];
+    char message[512];
+    AS5600LineState lines;
 
     if (g_angleSensorUnavailable != 0U)
     {
         return;
     }
     g_angleSensorUnavailable = 1U;
+    g_as5600OutageStartMs = HAL_GetTick();
+    AS5600_SampleLineStates(&lines);
     snprintf(message, sizeof(message),
-             "event: type=angle_sensor_unavailable failures=%u hal_error=0x%08lX\r\n",
+             "event: type=angle_sensor_unavailable failures=%u total_failures=%lu "
+             "hal_status=%u hal_error=0x%08lX hal_error_name=%s recovery_attempted=%u "
+             "recovery_count=%lu recovery_successes=%lu recovery_failures=%lu "
+             "sda=%u scl=%u sda_pin=PB9 scl_pin=PB8 uptime_ms=%lu\r\n",
              (unsigned int)g_angleSensorConsecutiveFailures,
-             (unsigned long)g_lastI2cError);
+             (unsigned long)g_as5600TotalReadFailures,
+             (unsigned int)g_as5600LastHalStatus,
+             (unsigned long)g_as5600LastHalError,
+             AS5600_HalErrorName(g_as5600LastHalError),
+             (unsigned int)g_as5600LastRecoveryAttempted,
+             (unsigned long)g_i2cRecoveryCount,
+             (unsigned long)g_as5600RecoverySuccessCount,
+             (unsigned long)g_as5600RecoveryFailureCount,
+             (unsigned int)lines.sda,
+             (unsigned int)lines.scl,
+             (unsigned long)g_as5600OutageStartMs);
+    UartPrint(message);
+}
+
+static void AS5600_ReportRecovery(uint8_t success)
+{
+    char message[768];
+    const char *result = (success != 0U) ? "success" : "failed";
+    AS5600RecoveryLineStates *lines = &g_as5600RecoveryLineStates;
+
+    snprintf(message, sizeof(message),
+             "event: type=angle_sensor_recovery attempt=%lu result=%s "
+             "hal_status=%u hal_error=0x%08lX hal_error_name=%s "
+             "sda_pin=PB9 scl_pin=PB8 "
+             "sda_before=%u scl_before=%u "
+             "sda_after_pulses=%u scl_after_pulses=%u "
+             "sda_after_bus_clear=%u scl_after_bus_clear=%u "
+             "sda_after_reinit=%u scl_after_reinit=%u "
+             "uptime_ms=%lu\r\n",
+             (unsigned long)g_i2cRecoveryCount,
+             result,
+             (unsigned int)g_as5600LastHalStatus,
+             (unsigned long)g_as5600LastHalError,
+             AS5600_HalErrorName(g_as5600LastHalError),
+             (unsigned int)lines->before.sda,
+             (unsigned int)lines->before.scl,
+             (unsigned int)lines->afterPulses.sda,
+             (unsigned int)lines->afterPulses.scl,
+             (unsigned int)lines->afterBusClear.sda,
+             (unsigned int)lines->afterBusClear.scl,
+             (unsigned int)lines->afterReinit.sda,
+             (unsigned int)lines->afterReinit.scl,
+             (unsigned long)HAL_GetTick());
     UartPrint(message);
 }
 
 static void AS5600_ReportRestored(void)
 {
+    char message[384];
+    uint32_t now;
+
     if (g_angleSensorUnavailable == 0U)
     {
         return;
     }
     g_angleSensorUnavailable = 0U;
-    UartPrint("event: type=angle_sensor_restored\r\n");
+    now = HAL_GetTick();
+    snprintf(message, sizeof(message),
+             "event: type=angle_sensor_restored outage_ms=%lu recovery_count=%lu "
+             "recovery_successes=%lu recovery_failures=%lu hal_status=%u "
+             "hal_error=0x%08lX hal_error_name=%s uptime_ms=%lu\r\n",
+             (unsigned long)(now - g_as5600OutageStartMs),
+             (unsigned long)g_i2cRecoveryCount,
+             (unsigned long)g_as5600RecoverySuccessCount,
+             (unsigned long)g_as5600RecoveryFailureCount,
+             (unsigned int)g_as5600LastHalStatus,
+             (unsigned long)g_as5600LastHalError,
+             AS5600_HalErrorName(g_as5600LastHalError),
+             (unsigned long)now);
+    UartPrint(message);
 }
 
 static void SetDirection(uint8_t dir)
@@ -2073,6 +2247,9 @@ static void PrintStatus(void)
 static void PrintDiagnostics(void)
 {
     char timerMsg[300];
+    char as5600Msg[640];
+    AS5600LineState lines;
+    AS5600_SampleLineStates(&lines);
     snprintf(
         timerMsg,
         sizeof(timerMsg),
@@ -2092,6 +2269,32 @@ static void PrintDiagnostics(void)
         (unsigned long)TIM6->PSC,
         (unsigned long)TIM6->ARR);
     UartPrint(timerMsg);
+
+    snprintf(
+        as5600Msg,
+        sizeof(as5600Msg),
+        "diag: as5600_available=%s consecutive_failures=%u total_failures=%lu "
+        "recovery_attempts=%lu recovery_successes=%lu recovery_failures=%lu "
+        "longest_failure_streak=%lu last_recovery_attempted=%u "
+        "last_hal_status=%u last_hal_error=0x%08lX last_hal_error_name=%s "
+        "last_failure_uptime_ms=%lu sda=%u scl=%u sda_pin=PB9 scl_pin=PB8 "
+        "uptime_ms=%lu\r\n",
+        (g_i2cReady != 0U && g_angleSensorUnavailable == 0U) ? "yes" : "no",
+        (unsigned int)g_angleSensorConsecutiveFailures,
+        (unsigned long)g_as5600TotalReadFailures,
+        (unsigned long)g_i2cRecoveryCount,
+        (unsigned long)g_as5600RecoverySuccessCount,
+        (unsigned long)g_as5600RecoveryFailureCount,
+        (unsigned long)g_as5600LongestFailureStreak,
+        (unsigned int)g_as5600LastRecoveryAttempted,
+        (unsigned int)g_as5600LastHalStatus,
+        (unsigned long)g_as5600LastHalError,
+        AS5600_HalErrorName(g_as5600LastHalError),
+        (unsigned long)g_as5600LastFailureUptimeMs,
+        (unsigned int)lines.sda,
+        (unsigned int)lines.scl,
+        (unsigned long)HAL_GetTick());
+    UartPrint(as5600Msg);
 }
 
 static const char *ActiveModeName(void)
@@ -3355,6 +3558,8 @@ static void GPIO_Init(void)
 
 static void I2C1_Init(void)
 {
+    HAL_StatusTypeDef status;
+
     __HAL_RCC_I2C1_CLK_ENABLE();
 
     hi2c1.Instance = I2C1;
@@ -3367,7 +3572,12 @@ static void I2C1_Init(void)
     hi2c1.Init.GeneralCallMode = I2C_GENERALCALL_DISABLE;
     hi2c1.Init.NoStretchMode = I2C_NOSTRETCH_DISABLE;
 
-    g_i2cReady = (HAL_I2C_Init(&hi2c1) == HAL_OK) ? 1U : 0U;
+    status = HAL_I2C_Init(&hi2c1);
+    g_i2cReady = (status == HAL_OK) ? 1U : 0U;
+    if (status != HAL_OK)
+    {
+        AS5600_RecordHalFailure(status, HAL_I2C_GetError(&hi2c1));
+    }
 }
 
 static void USART2_Init(void)

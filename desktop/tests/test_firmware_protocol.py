@@ -65,3 +65,30 @@ class FirmwareProtocolParserTests(unittest.TestCase):
         self.assertEqual(diagnostic.text, "tim6_irq=18 phase=idle")
         self.assertIsNone(FirmwareProtocolParser.parse_device_event("diag: tim6_irq=18"))
         self.assertIsNone(FirmwareProtocolParser.parse_diagnostic("event: type=fault_cleared"))
+
+    def test_as5600_diagnostic_event_fields_remain_parseable(self) -> None:
+        unavailable = FirmwareProtocolParser.parse_device_event(
+            "event: type=angle_sensor_unavailable failures=3 hal_status=1 "
+            "hal_error=0x00000004 hal_error_name=AF_NACK recovery_attempted=1 "
+            "sda=1 scl=0 sda_pin=PB9 scl_pin=PB8 uptime_ms=183421"
+        )
+        recovery = FirmwareProtocolParser.parse_device_event(
+            "event: type=angle_sensor_recovery attempt=4 result=failed "
+            "hal_error=0x00000020 hal_error_name=TIMEOUT sda_before=1 "
+            "sda_after_pulses=1 sda_after_reinit=0 uptime_ms=183612"
+        )
+        restored = FirmwareProtocolParser.parse_device_event(
+            "event: type=angle_sensor_restored outage_ms=191 recovery_count=4 "
+            "hal_error=0x00000000 hal_error_name=NONE uptime_ms=183803"
+        )
+
+        self.assertEqual(unavailable.name, "angle_sensor_unavailable")
+        self.assertEqual(unavailable.fields["hal_error"], "0x00000004")
+        self.assertEqual(unavailable.fields["hal_error_name"], "AF_NACK")
+        self.assertEqual(unavailable.fields["sda_pin"], "PB9")
+        self.assertEqual(unavailable.fields["scl_pin"], "PB8")
+        self.assertEqual(recovery.name, "angle_sensor_recovery")
+        self.assertEqual(recovery.fields["result"], "failed")
+        self.assertEqual(recovery.fields["sda_after_reinit"], "0")
+        self.assertEqual(restored.name, "angle_sensor_restored")
+        self.assertEqual(restored.fields["outage_ms"], "191")

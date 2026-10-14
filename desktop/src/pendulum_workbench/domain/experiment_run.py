@@ -3,6 +3,8 @@ import re
 from dataclasses import dataclass
 from enum import Enum
 
+from pendulum_workbench.domain.angle_prediction import AngleSource
+
 
 class ExperimentMode(str, Enum):
     VERTICAL_SINUSOIDAL_EXCITATION = "Vertical Sinusoidal Excitation"
@@ -31,6 +33,12 @@ class ExperimentRunSnapshot:
     elapsed_s: float = 0.0
     actual_elapsed_duration_s: float | None = None
     sample_count: int = 0
+    angle_source: AngleSource = AngleSource.UNAVAILABLE
+    predicted_angle_deg: float | None = None
+    prediction_age_ms: float | None = None
+    omega_est_deg_s: float | None = None
+    prediction_recovery_error_deg: float | None = None
+    prediction_outage_duration_ms: float | None = None
     recording_state: str = "Off"
     completion_reason: str = ""
     error_message: str = ""

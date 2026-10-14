@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (
 )
 
 from pendulum_workbench.application.controller import WorkbenchController
+from pendulum_workbench.domain.angle_prediction import AngleSource
 from pendulum_workbench.domain.models import (
     ApplicationSnapshot,
     ConnectionState,
@@ -157,6 +158,9 @@ class ExperimentPage(QWidget):
         live_values.addWidget(self.run_angle_value, 1)
         live_values.addWidget(self.run_position_value, 1)
         run_status_layout.addLayout(live_values)
+        self.angle_source_value = QLabel("Angle source: UNAVAILABLE")
+        self.angle_source_value.setObjectName("subtle")
+        run_status_layout.addWidget(self.angle_source_value)
         elapsed_row = QHBoxLayout()
         self.run_elapsed_value = QLabel("Elapsed: 0.0 s")
         self.run_elapsed_value.setObjectName("subtle")
@@ -531,6 +535,10 @@ class ExperimentPage(QWidget):
             else f"{snapshot.actual_elapsed_duration_s:.3f} s"
         )
         self.run_completion_reason_value.setText(snapshot.completion_reason or "-")
+        source = snapshot.angle_source.value.upper()
+        if snapshot.angle_source == AngleSource.PREDICTED and snapshot.prediction_age_ms is not None:
+            source += f" ({snapshot.prediction_age_ms:.0f} ms)"
+        self.angle_source_value.setText(f"Angle source: {source}")
         self.run_error_value.setText(snapshot.error_message)
         if snapshot.directory:
             self.current_experiment_path.setText(snapshot.directory)

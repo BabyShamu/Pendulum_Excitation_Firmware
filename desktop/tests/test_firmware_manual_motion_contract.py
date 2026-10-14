@@ -153,6 +153,151 @@ class FirmwareManualMotionContractTests(unittest.TestCase):
         self.assertNotIn("TIM6->", function_body("ServoLatchPwmInitialize"))
         self.assertNotIn("TIM7->", function_body("ServoLatchPwmInitialize"))
 
+    def test_as5600_read_failures_preserve_hal_status_error_and_failure_totals(self) -> None:
+        read_once = function_body("AS5600_ReadAngleOnce")
+        record_failure = function_body("AS5600_RecordReadFailure")
+        record_hal_failure = function_body("AS5600_RecordHalFailure")
+        read_angle = function_body("AS5600_ReadAngle")
+
+        self.assertEqual(read_once.count("AS5600_RecordReadFailure("), 3)
+        self.assertIn("HAL_I2C_GetError(&hi2c1)", read_once)
+        self.assertIn("HAL_I2C_ERROR_TIMEOUT", read_once)
+        self.assertIn("g_as5600LastHalStatus = status", record_hal_failure)
+        self.assertIn("g_as5600LastHalError = error", record_hal_failure)
+        self.assertIn("g_as5600LastFailureUptimeMs = HAL_GetTick()", record_hal_failure)
+        self.assertIn("g_as5600TotalReadFailures++", record_failure)
+        self.assertIn("g_angleSensorConsecutiveFailures++", read_angle)
+        self.assertIn("g_as5600LongestFailureStreak", read_angle)
+        self.assertIn("g_i2cRecoveryCount++", read_angle)
+        self.assertIn("g_as5600RecoverySuccessCount++", read_angle)
+        self.assertIn("g_as5600RecoveryFailureCount++", read_angle)
+
+    def test_as5600_hal_error_classification_preserves_raw_categories(self) -> None:
+        classify = function_body("AS5600_HalErrorName")
+        for raw_error, readable_name in (
+            ("HAL_I2C_ERROR_NONE", '"NONE"'),
+            ("HAL_I2C_ERROR_BERR", '"BERR"'),
+            ("HAL_I2C_ERROR_ARLO", '"ARLO"'),
+            ("HAL_I2C_ERROR_AF", '"AF_NACK"'),
+            ("HAL_I2C_ERROR_OVR", '"OVR"'),
+            ("HAL_I2C_ERROR_DMA", '"DMA"'),
+            ("HAL_I2C_ERROR_TIMEOUT", '"TIMEOUT"'),
+            ("HAL_I2C_ERROR_SIZE", '"SIZE"'),
+            ("HAL_I2C_ERROR_DMA_PARAM", '"DMA_PARAM"'),
+        ):
+            self.assertIn(raw_error, classify)
+            self.assertIn(readable_name, classify)
+        self.assertIn('"MULTIPLE"', classify)
+        self.assertIn('"UNKNOWN"', classify)
+
+    def test_as5600_failure_recovery_restored_events_and_diagnostics_are_structured(self) -> None:
+        unavailable = function_body("AS5600_ReportUnavailable")
+        recovery_event = function_body("AS5600_ReportRecovery")
+        restored = function_body("AS5600_ReportRestored")
+        diagnostics = function_body("PrintDiagnostics")
+
+        for field in (
+            "type=angle_sensor_unavailable",
+            "failures=%u",
+            "total_failures=%lu",
+            "hal_status=%u",
+            "hal_error=0x%08lX",
+            "hal_error_name=%s",
+            "recovery_attempted=%u",
+            "recovery_count=%lu",
+            "sda=%u scl=%u",
+            "uptime_ms=%lu",
+        ):
+            self.assertIn(field, unavailable)
+        self.assertNotIn("configured_sda", unavailable)
+        self.assertNotIn("PB7", unavailable)
+        self.assertNotIn("PB6", unavailable)
+        for field in (
+            "type=angle_sensor_recovery",
+            "attempt=%lu",
+            "result=%s",
+            "sda_before=%u",
+            "sda_after_pulses=%u",
+            "sda_after_bus_clear=%u",
+            "sda_after_reinit=%u",
+            "sda_pin=PB9 scl_pin=PB8",
+            "uptime_ms=%lu",
+        ):
+            self.assertIn(field, recovery_event)
+        self.assertIn('"success"', recovery_event)
+        self.assertIn('"failed"', recovery_event)
+        self.assertNotIn("configured_sda", recovery_event)
+        self.assertNotIn("PB7", recovery_event)
+        self.assertNotIn("PB6", recovery_event)
+        self.assertIn("type=angle_sensor_restored", restored)
+        self.assertIn("outage_ms=%lu", restored)
+        for field in (
+            "as5600_available=%s",
+            "consecutive_failures=%u",
+            "total_failures=%lu",
+            "recovery_attempts=%lu",
+            "recovery_successes=%lu",
+            "recovery_failures=%lu",
+            "longest_failure_streak=%lu",
+            "last_hal_status=%u",
+            "last_hal_error=0x%08lX",
+            "last_hal_error_name=%s",
+            "sda=%u scl=%u",
+            "uptime_ms=%lu",
+        ):
+            self.assertIn(field, diagnostics)
+        self.assertIn("sda_pin=PB9 scl_pin=PB8", diagnostics)
+        self.assertNotIn("PB7", diagnostics)
+        self.assertNotIn("PB6", diagnostics)
+
+    def test_as5600_line_sampling_uses_only_configured_i2c1_pins_without_reconfiguration(self) -> None:
+        sample = function_body("AS5600_SampleLineStates")
+        recover = function_body("AS5600_RecoverI2c")
+
+        for pin in ("GPIO_PIN_9", "GPIO_PIN_8"):
+            self.assertIn(pin, sample)
+        self.assertNotIn("GPIO_PIN_7", sample)
+        self.assertNotIn("GPIO_PIN_6", sample)
+        self.assertIn("PB9 for SDA", sample)
+        self.assertIn("PB8 for SCL", sample)
+        self.assertNotIn("HAL_GPIO_Init", sample)
+        for stage in (
+            "g_as5600RecoveryLineStates.before",
+            "g_as5600RecoveryLineStates.afterPulses",
+            "g_as5600RecoveryLineStates.afterBusClear",
+            "g_as5600RecoveryLineStates.afterReinit",
+        ):
+            self.assertIn(stage, recover)
+        self.assertLess(
+            recover.index("g_as5600RecoveryLineStates.before"),
+            recover.index("HAL_I2C_DeInit"),
+        )
+        self.assertLess(
+            recover.index("for (uint8_t pulse"),
+            recover.index("g_as5600RecoveryLineStates.afterPulses"),
+        )
+        self.assertLess(
+            recover.index("g_as5600RecoveryLineStates.afterReinit"),
+            recover.index("HAL_I2C_IsDeviceReady"),
+        )
+
+    def test_as5600_recovery_behavior_constants_and_sequence_remain_unchanged(self) -> None:
+        for definition in (
+            "#define AS5600_STARTUP_PROBE_ATTEMPTS 3U",
+            "#define AS5600_STARTUP_RETRY_DELAY_MS 25U",
+            "#define AS5600_READ_FAILURE_RECOVERY_THRESHOLD 3U",
+            "#define AS5600_RECOVERY_RETRY_INTERVAL_MS 1000U",
+            "#define AS5600_I2C_BUS_CLEAR_CLOCK_PULSES 9U",
+        ):
+            self.assertIn(definition, FIRMWARE_SOURCE)
+
+        recover = function_body("AS5600_RecoverI2c")
+        self.assertLess(recover.index("HAL_I2C_DeInit"), recover.index("GPIO_MODE_OUTPUT_OD"))
+        self.assertIn("HAL_Delay(1U)", recover)
+        self.assertIn("I2C1_Init()", recover)
+        self.assertIn("HAL_I2C_IsDeviceReady", recover)
+        self.assertIn("0x36U << 1", recover)
+
     def test_latch_firmware_interlocks_and_commanded_status_are_explicit(self) -> None:
         interlock = function_body("ServoLatchInterlockReason")
         for required_check in (

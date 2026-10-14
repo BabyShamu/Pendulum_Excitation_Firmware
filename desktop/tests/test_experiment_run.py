@@ -1,3 +1,4 @@
+import csv
 import base64
 import json
 import tempfile
@@ -9,6 +10,7 @@ from unittest.mock import patch
 from PySide6.QtWidgets import QApplication
 
 from pendulum_workbench.application.controller import WorkbenchController
+from pendulum_workbench.domain.angle_prediction import AngleSource
 from pendulum_workbench.domain.experiment_run import ExperimentRunState, VerticalSineDefinition
 from pendulum_workbench.domain.maintenance import BitResultState, PendulumLatchState, ReadinessState
 from pendulum_workbench.domain.models import (
@@ -559,9 +561,15 @@ class ExperimentRunTests(unittest.TestCase):
         self.prepare_ready_held_system(controller, device)
         event_log = []
         controller.state.event_added.connect(event_log.append)
-        experiment_id = controller.experiment_run.start(VerticalSineDefinition(5.0, 1.8, 0.45))
+        window = MainWindow(controller)
+        self.addCleanup(window.close)
+        page = window.experiment_page
+        experiment_id = controller.experiment_run.start(VerticalSineDefinition(5.0, 1.8, 0.9))
         self.assertTrue(
             self.wait_for(lambda: controller.experiment_run.snapshot.state == ExperimentRunState.RUNNING)
+        )
+        self.assertTrue(
+            self.wait_for(lambda: controller.experiment_run.snapshot.omega_est_deg_s is not None)
         )
 
         device.report_angle_sensor_unavailable()
@@ -570,6 +578,7 @@ class ExperimentRunTests(unittest.TestCase):
             self.wait_for(
                 lambda: controller.state.snapshot.latest_sample is not None
                 and controller.state.snapshot.latest_sample.angle_deg is None
+                and controller.experiment_run.snapshot.angle_source == AngleSource.PREDICTED
                 and any(
                     event.severity == EventSeverity.WARNING
                     and "AS5600 communication degraded" in event.message
@@ -580,12 +589,18 @@ class ExperimentRunTests(unittest.TestCase):
         self.assertEqual(controller.experiment_run.snapshot.state, ExperimentRunState.RUNNING)
         self.assertEqual(controller.state.snapshot.recording, RecordingState.RECORDING)
         self.assertTrue(device.sine_active)
+        self.assertIsNone(controller.state.snapshot.latest_sample.angle_deg)
+        self.assertAlmostEqual(controller.experiment_run.snapshot.predicted_angle_deg, 14.8)
+        self.assertIn("Angle source: PREDICTED", page.angle_source_value.text())
+        self.assertEqual(device.sine_amplitude_mm, 5.0)
 
         device.report_angle_sensor_restored()
         self.assertTrue(
             self.wait_for(
                 lambda: controller.state.snapshot.latest_sample is not None
                 and controller.state.snapshot.latest_sample.angle_deg is not None
+                and controller.experiment_run.snapshot.angle_source == AngleSource.MEASURED
+                and controller.experiment_run.snapshot.prediction_recovery_error_deg is not None
                 and any(
                     event.severity == EventSeverity.INFO
                     and "AS5600 communication restored during open-loop Vertical Sine" in event.message
@@ -595,6 +610,9 @@ class ExperimentRunTests(unittest.TestCase):
         )
         self.assertEqual(controller.experiment_run.snapshot.state, ExperimentRunState.RUNNING)
         self.assertTrue(device.sine_active)
+        self.assertEqual(page.angle_source_value.text(), "Angle source: MEASURED")
+        self.assertIsNotNone(controller.experiment_run.snapshot.prediction_outage_duration_ms)
+        self.assertGreater(controller.experiment_run.snapshot.prediction_outage_duration_ms, 0.0)
         self.assertTrue(
             self.wait_for(
                 lambda: controller.experiment_run.snapshot.state == ExperimentRunState.COMPLETE
@@ -604,6 +622,25 @@ class ExperimentRunTests(unittest.TestCase):
         self.assertFalse(device.sine_active)
         manifest = repository.load(repository.root / experiment_id).manifest
         self.assertEqual(manifest["completion_status"], "COMPLETED")
+        derived_path = repository.root / experiment_id / "derived" / "angle_prediction.csv"
+        self.assertTrue(derived_path.exists())
+        with derived_path.open("r", encoding="utf-8", newline="") as derived_file:
+            derived_rows = list(csv.DictReader(derived_file))
+        self.assertTrue(any(row["angle_source"] == "predicted" for row in derived_rows))
+        self.assertTrue(
+            any(row["prediction_recovery_error_deg"] for row in derived_rows)
+        )
+        self.assertNotIn("angle_deg", derived_rows[0])
+        with (repository.root / experiment_id / "telemetry.csv").open(
+            "r", encoding="utf-8", newline=""
+        ) as telemetry_file:
+            telemetry_rows = list(csv.DictReader(telemetry_file))
+        self.assertTrue(
+            any(
+                row["quality"] == "missing_measurement" and row["angle_deg"] == ""
+                for row in telemetry_rows
+            )
+        )
         raw_capture_path = Path(controller.state.snapshot.raw_capture_path)
         controller.disconnect_real()
         self.assertTrue(

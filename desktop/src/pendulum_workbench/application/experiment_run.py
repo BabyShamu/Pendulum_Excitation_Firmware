@@ -1,7 +1,9 @@
+import csv
 import math
 import time
 from dataclasses import replace
 from datetime import datetime, timezone
+from pathlib import Path
 
 from PySide6.QtCore import QObject, QTimer, Signal
 
@@ -13,6 +15,11 @@ from pendulum_workbench.application.firmware_commands import (
 )
 from pendulum_workbench.application.maintenance_service import MaintenanceService
 from pendulum_workbench.application.state import ApplicationStateModel
+from pendulum_workbench.domain.angle_prediction import (
+    AngleDropoutPredictor,
+    AnglePrediction,
+    AngleSource,
+)
 from pendulum_workbench.domain.experiment_run import (
     ExperimentMode,
     ExperimentRunSnapshot,
@@ -65,6 +72,8 @@ class ExperimentRunService(QObject):
         self._sine_started_monotonic: float | None = None
         self._stop_requested_monotonic: float | None = None
         self._samples_at_start = 0
+        self._angle_predictor: AngleDropoutPredictor | None = None
+        self._angle_prediction_rows: list[dict[str, object]] = []
         self._timer = QTimer(self)
         self._timer.setInterval(self._TICK_INTERVAL_MS)
         self._timer.timeout.connect(self._on_timer)
@@ -76,6 +85,7 @@ class ExperimentRunService(QObject):
         self.commands.command_completed.connect(self._on_command_completed)
         self.commands.command_failed.connect(self._on_command_failed)
         self.state.snapshot_changed.connect(self._on_application_snapshot)
+        self.state.telemetry_received.connect(self._on_telemetry_sample)
         self.maintenance.serial_client.device_event_received.connect(self._on_device_event)
         self.maintenance.serial_client.device_message_received.connect(self._on_device_message)
 
@@ -116,6 +126,10 @@ class ExperimentRunService(QObject):
         self._pending_completion_reason = ""
         self._sine_started_monotonic = None
         self._stop_requested_monotonic = None
+        self._angle_predictor = AngleDropoutPredictor(
+            max_prediction_age_s=definition.duration_s
+        )
+        self._angle_prediction_rows.clear()
         self._phase = "recording_start"
         self._set_snapshot(
             state=ExperimentRunState.PREPARING,
@@ -131,6 +145,12 @@ class ExperimentRunService(QObject):
             error_message="",
             started_at=None,
             sample_count=0,
+            angle_source=AngleSource.UNAVAILABLE,
+            predicted_angle_deg=None,
+            prediction_age_ms=None,
+            omega_est_deg_s=None,
+            prediction_recovery_error_deg=None,
+            prediction_outage_duration_ms=None,
         )
         try:
             initial_metadata = definition.manifest_values(measured_initial_angle_deg=None)
@@ -254,6 +274,9 @@ class ExperimentRunService(QObject):
         try:
             measured_angle = self._current_valid_angle()
             definition = self._require_definition()
+            if self._angle_predictor is not None:
+                estimate = self._angle_predictor.observe(time.monotonic(), measured_angle)
+                self._set_angle_prediction_snapshot(estimate)
             generated_name = definition.final_name(measured_angle)
             self._set_snapshot(
                 measured_initial_angle_deg=measured_angle,
@@ -509,12 +532,97 @@ class ExperimentRunService(QObject):
                 self._pending_completion_reason = "recording_interrupted"
         self._phase = "terminal"
         self._timer.stop()
+        try:
+            self._write_angle_prediction_data()
+        except OSError as error:
+            self.state.report_event(
+                EventSeverity.WARNING,
+                f"Could not save derived angle prediction data: {error}",
+            )
         self._publish_terminal(
             self._pending_final_state,
             self._pending_completion_reason,
             self._snapshot.actual_elapsed_duration_s or 0.0,
             recording_state=self.state.snapshot.recording.value,
         )
+
+    def _on_telemetry_sample(self, sample) -> None:
+        if (
+            self._phase not in ("metadata_before_open", "latch_open", "sine_start", "running")
+            or self._angle_predictor is None
+            or sample.source != "real"
+            or self._definition is None
+            or self._definition.mode != ExperimentMode.VERTICAL_SINUSOIDAL_EXCITATION
+        ):
+            return
+
+        is_running = self.is_open_loop_vertical_sine_running
+        if not is_running and sample.angle_deg is None:
+            return
+
+        estimate = self._angle_predictor.observe(
+            time.monotonic(),
+            sample.angle_deg,
+        )
+        if is_running and (
+            estimate.angle_source != AngleSource.MEASURED
+            or estimate.prediction_recovery_error_deg is not None
+        ):
+            self._angle_prediction_rows.append(
+                {
+                    "sample_index": sample.device_sample_index or sample.sample_index,
+                    "time_s": sample.time_s,
+                    "angle_source": estimate.angle_source.value,
+                    "predicted_angle_deg": estimate.predicted_angle_deg,
+                    "prediction_age_ms": estimate.prediction_age_ms,
+                    "omega_est_deg_s": estimate.omega_est_deg_s,
+                    "prediction_recovery_error_deg": estimate.prediction_recovery_error_deg,
+                    "outage_duration_ms": estimate.outage_duration_ms,
+                }
+            )
+            if estimate.prediction_recovery_error_deg is not None:
+                self.state.report_event(
+                    EventSeverity.INFO,
+                    "Angle prediction recovered: "
+                    f"prediction_recovery_error_deg={estimate.prediction_recovery_error_deg:.6f}, "
+                    f"outage_duration_ms={estimate.outage_duration_ms:.3f}.",
+                )
+
+        self._set_angle_prediction_snapshot(estimate)
+
+    def _set_angle_prediction_snapshot(self, estimate: AnglePrediction) -> None:
+        self._set_snapshot(
+            angle_source=estimate.angle_source,
+            predicted_angle_deg=estimate.predicted_angle_deg,
+            prediction_age_ms=estimate.prediction_age_ms,
+            omega_est_deg_s=estimate.omega_est_deg_s,
+            prediction_recovery_error_deg=estimate.prediction_recovery_error_deg,
+            prediction_outage_duration_ms=estimate.outage_duration_ms,
+        )
+
+    def _write_angle_prediction_data(self) -> None:
+        directory = self._snapshot.directory
+        if not directory or not self._angle_prediction_rows:
+            return
+        destination = Path(directory) / "derived" / "angle_prediction.csv"
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        with destination.open("w", encoding="utf-8", newline="") as output_file:
+            writer = csv.DictWriter(
+                output_file,
+                fieldnames=(
+                    "sample_index",
+                    "time_s",
+                    "angle_source",
+                    "predicted_angle_deg",
+                    "prediction_age_ms",
+                    "omega_est_deg_s",
+                    "prediction_recovery_error_deg",
+                    "outage_duration_ms",
+                ),
+                lineterminator="\n",
+            )
+            writer.writeheader()
+            writer.writerows(self._angle_prediction_rows)
 
     def _on_recording_failed(self, experiment_id: str, message: str) -> None:
         if experiment_id != self._experiment_id:
