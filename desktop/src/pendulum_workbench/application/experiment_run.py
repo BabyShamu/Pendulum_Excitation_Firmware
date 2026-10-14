@@ -116,6 +116,21 @@ class ExperimentRunService(QObject):
         )
 
     @property
+    def tolerates_transient_angle_dropout(self) -> bool:
+        definition = self._snapshot.definition
+        if definition is None:
+            return False
+        if definition.mode == ExperimentMode.VERTICAL_SINUSOIDAL_EXCITATION:
+            return self.is_open_loop_vertical_sine_running
+        if definition.mode == ExperimentMode.AUTO_RESONANCE_PARAMETRIC_CLOSED_LOOP:
+            return (
+                self.is_active
+                and self._snapshot.measured_initial_angle_deg is not None
+                and self._phase in ("metadata_before_open", "latch_open", "autores_start", "running", "sine_stop")
+            )
+        return False
+
+    @property
     def setup_locked(self) -> bool:
         return self.is_active
 
@@ -744,16 +759,22 @@ class ExperimentRunService(QObject):
                 final_state=ExperimentRunState.INTERRUPTED,
             )
         elif event.name == "angle_sensor_unavailable":
-            if not self.is_open_loop_vertical_sine_running:
+            if not self.tolerates_transient_angle_dropout:
                 self._handle_safety_interruption(f"safety_event:{event.name}")
         elif event.name == "fault_appeared":
-            self._handle_safety_interruption(f"safety_event:{event.name}")
+            fault_code = event.fields.get("code")
+            reason = (
+                f"safety_event:fault_appeared:{fault_code}"
+                if fault_code
+                else "safety_event:fault_appeared"
+            )
+            self._handle_safety_interruption(reason)
 
     def _on_device_message(self, message: str) -> None:
         if (
             self.is_active
             and message.strip().lower() == "angle sensor unavailable"
-            and not self.is_open_loop_vertical_sine_running
+            and not self.tolerates_transient_angle_dropout
         ):
             self._handle_safety_interruption("safety_event:angle_sensor_unavailable")
 

@@ -270,11 +270,11 @@ class WorkbenchController(QObject):
             self.state.set_home_status(HomeStatus.HOMING)
         if (
             normalized.startswith("angle sensor unavailable")
-            and self.experiment_run.is_open_loop_vertical_sine_running
+            and self.experiment_run.tolerates_transient_angle_dropout
         ):
             self.state.report_event(
                 EventSeverity.WARNING,
-                "AS5600 communication degraded during open-loop Vertical Sine; missing angle samples are retained while the run continues.",
+                "AS5600 communication degraded: temporarily unavailable during the active experiment; missing angle samples remain unavailable while firmware applies its fault threshold.",
             )
             return
         meaningful_prefixes = (
@@ -314,11 +314,11 @@ class WorkbenchController(QObject):
             message = f"Manual pivot motion started {direction}."
             severity = EventSeverity.WARNING
         elif event.name == "angle_sensor_unavailable":
-            if self.experiment_run.is_open_loop_vertical_sine_running:
+            if self.experiment_run.tolerates_transient_angle_dropout:
                 severity = EventSeverity.WARNING
                 message = (
-                    "AS5600 communication degraded during open-loop Vertical Sine; "
-                    "missing angle samples are retained while the run continues."
+                    "AS5600 communication degraded: temporarily unavailable during the active experiment; "
+                    "missing angle samples remain unavailable while firmware applies its fault threshold."
                 )
             else:
                 severity = EventSeverity.ERROR
@@ -327,6 +327,8 @@ class WorkbenchController(QObject):
             severity = EventSeverity.INFO
             if self.experiment_run.is_open_loop_vertical_sine_running:
                 message = "AS5600 communication restored during open-loop Vertical Sine."
+            elif self.experiment_run.tolerates_transient_angle_dropout:
+                message = "AS5600 communication restored during the active experiment."
             else:
                 message = "AS5600 communication restored; rerun System Check to validate the sensor."
         elif event.name == "manual_motion_stopped":

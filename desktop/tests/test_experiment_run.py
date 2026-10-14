@@ -237,9 +237,9 @@ class SineExperimentSerial:
         self.angle_available = True
         self._enqueue("event: type=angle_sensor_restored\r\n")
 
-    def report_closed_loop_fault(self) -> None:
+    def report_closed_loop_fault(self, code: str = "upper_limit") -> None:
         self.autores_active = False
-        self._enqueue("event: type=fault_appeared code=upper_limit\r\n")
+        self._enqueue(f"event: type=fault_appeared code={code}\r\n")
 
     def _enqueue(self, text: str) -> None:
         if "type=latch_open" in text:
@@ -712,6 +712,91 @@ class ExperimentRunTests(unittest.TestCase):
         manifest = repository.load(repository.root / experiment_id).manifest
         self.assertEqual(manifest["completion_status"], "INTERRUPTED")
         self.assertTrue(manifest["experiment"]["completion_reason"].startswith("safety_event:fault_appeared"))
+
+    def test_autoresonance_lower_limit_fault_code_is_preserved(self) -> None:
+        directory = self.temporary_directory()
+        controller, device, repository = self.create_connected_controller(directory)
+        self.addCleanup(controller.shutdown)
+        self.prepare_ready_held_system(controller, device)
+        experiment_id = controller.experiment_run.start(AutoResonanceDefinition(5.0, 0.0, 30.0))
+        self.assertTrue(
+            self.wait_for(lambda: controller.experiment_run.snapshot.state == ExperimentRunState.RUNNING)
+        )
+
+        device.report_closed_loop_fault("lower_limit")
+
+        self.assertTrue(
+            self.wait_for(
+                lambda: controller.experiment_run.snapshot.state == ExperimentRunState.FAULT
+                and controller.state.snapshot.recording == RecordingState.INTERRUPTED
+            )
+        )
+        self.assertIn("autores_stop", device.protocol_actions)
+        manifest = repository.load(repository.root / experiment_id).manifest
+        self.assertEqual(
+            manifest["experiment"]["completion_reason"],
+            "safety_event:fault_appeared:lower_limit",
+        )
+
+    def test_autoresonance_transient_sensor_events_wait_for_firmware_fault_threshold(self) -> None:
+        directory = self.temporary_directory()
+        controller, device, repository = self.create_connected_controller(directory)
+        self.addCleanup(controller.shutdown)
+        self.prepare_ready_held_system(controller, device)
+        event_log = []
+        controller.state.event_added.connect(event_log.append)
+        experiment_id = controller.experiment_run.start(AutoResonanceDefinition(5.0, 5.0, 30.0))
+        self.assertTrue(
+            self.wait_for(lambda: controller.experiment_run.snapshot.state == ExperimentRunState.RUNNING)
+        )
+
+        device.report_angle_sensor_unavailable()
+
+        self.assertTrue(
+            self.wait_for(
+                lambda: controller.state.snapshot.latest_sample is not None
+                and controller.state.snapshot.latest_sample.angle_deg is None
+                and any(
+                    event.severity == EventSeverity.WARNING
+                    and "AS5600 communication degraded" in event.message
+                    for event in event_log
+                )
+            )
+        )
+        self.assertEqual(controller.experiment_run.snapshot.state, ExperimentRunState.RUNNING)
+        self.assertEqual(controller.state.snapshot.recording, RecordingState.RECORDING)
+        self.assertTrue(device.autores_active)
+        self.assertNotIn("autores_stop", device.protocol_actions)
+
+        device.report_angle_sensor_restored()
+        self.assertTrue(
+            self.wait_for(
+                lambda: controller.state.snapshot.latest_sample is not None
+                and controller.state.snapshot.latest_sample.angle_deg is not None
+                and any(
+                    event.severity == EventSeverity.INFO
+                    and "AS5600 communication restored during the active experiment" in event.message
+                    for event in event_log
+                )
+            )
+        )
+        self.assertEqual(controller.experiment_run.snapshot.state, ExperimentRunState.RUNNING)
+        self.assertTrue(device.autores_active)
+        self.assertNotIn("autores_stop", device.protocol_actions)
+
+        device.report_closed_loop_fault("angle_sensor")
+        self.assertTrue(
+            self.wait_for(
+                lambda: controller.experiment_run.snapshot.state == ExperimentRunState.FAULT
+                and controller.state.snapshot.recording == RecordingState.INTERRUPTED
+            )
+        )
+        self.assertIn("autores_stop", device.protocol_actions)
+        manifest = repository.load(repository.root / experiment_id).manifest
+        self.assertEqual(
+            manifest["experiment"]["completion_reason"],
+            "safety_event:fault_appeared:angle_sensor",
+        )
 
     def test_autoresonance_connection_loss_interrupts_recording(self) -> None:
         directory = self.temporary_directory()
