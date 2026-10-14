@@ -658,6 +658,62 @@ class ExperimentRunTests(unittest.TestCase):
         self.assertIn("event: type=angle_sensor_restored", raw_payloads)
         self.assertIn("angle_deg=NaN", raw_payloads)
 
+    def test_live_predictor_uses_device_sample_time_not_irregular_host_receive_time(self) -> None:
+        directory = self.temporary_directory()
+        controller, device, _repository = self.create_connected_controller(directory)
+        self.addCleanup(controller.shutdown)
+        self.prepare_ready_held_system(controller, device)
+        controller.experiment_run.start(VerticalSineDefinition(5.0, 1.8, 30.0))
+        self.assertTrue(
+            self.wait_for(lambda: controller.experiment_run.snapshot.state == ExperimentRunState.RUNNING)
+        )
+        device._live_enabled = False
+        predictor = controller.experiment_run._angle_predictor
+        predictor.reset()
+
+        for sample in (
+            TelemetrySample(
+                100,
+                10.0,
+                10.0,
+                0.0,
+                source="real",
+                device_time_s=10.0,
+                received_elapsed_s=1.0,
+            ),
+            TelemetrySample(
+                101,
+                10.1,
+                11.0,
+                0.0,
+                source="real",
+                device_time_s=10.1,
+                received_elapsed_s=3.7,
+            ),
+            TelemetrySample(
+                102,
+                10.2,
+                None,
+                0.0,
+                source="real",
+                device_time_s=10.2,
+                received_elapsed_s=11.0,
+            ),
+        ):
+            controller.experiment_run._on_telemetry_sample(sample)
+
+        snapshot = controller.experiment_run.snapshot
+        self.assertAlmostEqual(snapshot.omega_est_deg_s, 10.0)
+        self.assertEqual(snapshot.angle_source, AngleSource.PREDICTED)
+        self.assertAlmostEqual(snapshot.predicted_angle_deg, 12.0)
+        self.assertAlmostEqual(snapshot.prediction_age_ms, 100.0)
+        controller.experiment_run.stop()
+        self.assertTrue(
+            self.wait_for(
+                lambda: controller.experiment_run.snapshot.state == ExperimentRunState.OPERATOR_STOPPED
+            )
+        )
+
     def test_open_failure_preserves_recording_and_never_starts_sine(self) -> None:
         directory = self.temporary_directory()
         controller, device, repository = self.create_connected_controller(directory)

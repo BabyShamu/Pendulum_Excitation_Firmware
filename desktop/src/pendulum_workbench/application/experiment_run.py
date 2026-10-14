@@ -275,7 +275,10 @@ class ExperimentRunService(QObject):
             measured_angle = self._current_valid_angle()
             definition = self._require_definition()
             if self._angle_predictor is not None:
-                estimate = self._angle_predictor.observe(time.monotonic(), measured_angle)
+                measured_sample = self.state.snapshot.latest_sample
+                if measured_sample is None:
+                    raise RuntimeError("A measured angle sample is required to seed the predictor")
+                estimate = self._angle_predictor.observe(measured_sample.time_s, measured_angle)
                 self._set_angle_prediction_snapshot(estimate)
             generated_name = definition.final_name(measured_angle)
             self._set_snapshot(
@@ -561,7 +564,7 @@ class ExperimentRunService(QObject):
             return
 
         estimate = self._angle_predictor.observe(
-            time.monotonic(),
+            sample.time_s,
             sample.angle_deg,
         )
         if is_running and (
