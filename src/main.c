@@ -1849,7 +1849,7 @@ static void UpdateParametricTest(void)
 
     if (elapsedMs < PARAMETRIC_TEST_PERIOD_MS)
     {
-       combined = quadSat * PARAMETRIC_TEST_PHASE_COS + directSat * PARAMETRIC_TEST_PHASE_SIN;
+        return;
     }
     g_parametricTestLastSampleMs = now;
 
@@ -1885,7 +1885,7 @@ static void UpdateParametricTest(void)
                 ((directAgc < -PARAMETRIC_TEST_SATURATION) ? -PARAMETRIC_TEST_SATURATION : directAgc);
     quadSat = (quadAgc > PARAMETRIC_TEST_SATURATION) ? PARAMETRIC_TEST_SATURATION :
               ((quadAgc < -PARAMETRIC_TEST_SATURATION) ? -PARAMETRIC_TEST_SATURATION : quadAgc);
-    combined = quadSat * g_parametricClosedLoopPhaseCos + directSat * g_parametricClosedLoopPhaseSin;
+    combined = quadSat * PARAMETRIC_TEST_PHASE_COS + directSat * PARAMETRIC_TEST_PHASE_SIN;
 
     // The Simulink 10 us Transport Delay is intentionally omitted because it is
     // only 0.2% of the 5 ms controller sample and a discrete delay would add 5 ms.
@@ -1949,6 +1949,7 @@ static void UpdateParametricClosedLoop(void)
     float rateDelta;
     float zSimscapeMm;
     float zMotorTargetMm;
+    float normalizedOutput;
     const float dt = (float)PARAMETRIC_TEST_PERIOD_MS / 1000.0f;
     int32_t targetSteps;
     int32_t allowedHalfTravelSteps;
@@ -1958,9 +1959,7 @@ static void UpdateParametricClosedLoop(void)
 
     if ((int32_t)(now - g_parametricClosedLoopNextSampleMs) < 0)
     {
-        // User phase is relative to the 2x quadrature basis; phase=0 selects quadrature only.
-        combined = quadSat * g_parametricClosedLoopPhaseCos +
-                   directSat * g_parametricClosedLoopPhaseSin;
+        return;
     }
 
     // The validated discrete filter coefficients and +/-0.1 rad rate limit
@@ -2031,9 +2030,10 @@ static void UpdateParametricClosedLoop(void)
 
     if (g_parametricClosedLoopExperimentMode != 0U)
     {
-        // The normalized controller output scales the requested amplitude before hard safety limits.
-        zSimscapeMm = g_parametricClosedLoopAmplitudeMm *
-                      (g_parametricClosedLoopRateLimitedRad / PARAMETRIC_TEST_MASTER_GAIN);
+        // outputSat is bounded by 2 and master gain is 2, so the controller range is +/-4.
+        normalizedOutput = g_parametricClosedLoopRateLimitedRad /
+                           (PARAMETRIC_TEST_OUTPUT_SATURATION * PARAMETRIC_TEST_MASTER_GAIN);
+        zSimscapeMm = g_parametricClosedLoopAmplitudeMm * normalizedOutput;
     }
     else
     {
