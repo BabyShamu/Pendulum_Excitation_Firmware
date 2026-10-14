@@ -9,6 +9,7 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QMessageBox,
     QPushButton,
+    QSizePolicy,
     QStackedWidget,
     QStyle,
     QVBoxLayout,
@@ -37,7 +38,7 @@ class MainWindow(QMainWindow):
         self._saved_experiment_name: str | None = None
         self.setWindowTitle("Pendulum Workbench")
         self.resize(1220, 860)
-        self.setMinimumSize(1000, 760)
+        self.setMinimumSize(900, 640)
         self.setStyleSheet(
             """
             QMainWindow { background: #e9eeeb; color: #24363a; }
@@ -154,6 +155,10 @@ class MainWindow(QMainWindow):
 
         self.page_stack = QStackedWidget()
         self.page_stack.setObjectName("pageStack")
+        self.page_stack.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Expanding,
+        )
         self.monitor_page = MonitorPage(controller)
         self.live_page = self.monitor_page
         self.experiment_page = ExperimentPage(controller)

@@ -7,7 +7,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from PySide6.QtCore import QTimer
-from PySide6.QtWidgets import QApplication, QPushButton, QWidget
+from PySide6.QtWidgets import QApplication, QScrollArea, QSizePolicy, QPushButton, QWidget
 
 from pendulum_workbench.application.controller import WorkbenchController
 from pendulum_workbench.domain.models import (
@@ -138,6 +138,52 @@ class MainWindowTests(unittest.TestCase):
         self.assertEqual(window.live_page.position_value[1].text(), "-1.00")
         self.assertEqual(window.live_page.samples_value[1].text(), "1")
         window.close()
+
+    def test_experiment_sections_scroll_separately_at_small_window_size(self) -> None:
+        controller = WorkbenchController(mock_source=MockTelemetrySource(interval_ms=1000))
+        self.addCleanup(controller.shutdown)
+        window = MainWindow(controller)
+        self.addCleanup(window.close)
+        window.resize(900, 640)
+        window.show()
+        window.experiment_navigation_button.click()
+        self.qt_app.processEvents()
+
+        page = window.experiment_page
+        self.assertIsInstance(page.scroll_area, QScrollArea)
+        self.assertTrue(page.scroll_area.widgetResizable())
+        self.assertGreater(page.scroll_area.verticalScrollBar().maximum(), 0)
+        content_layout = page.content_widget.layout()
+        sections = [page.setup_panel, page.run_status_panel, page.run_record_panel]
+        section_indices = [content_layout.indexOf(section) for section in sections]
+        self.assertTrue(all(index >= 0 for index in section_indices))
+        self.assertEqual(section_indices, sorted(section_indices))
+        for panel in sections:
+            self.assertGreater(panel.maximumHeight(), panel.minimumHeight())
+            self.assertNotEqual(panel.sizePolicy().verticalPolicy(), QSizePolicy.Policy.Fixed)
+        self.assertLess(page.setup_panel.geometry().bottom(), page.run_status_panel.geometry().top())
+        self.assertLess(page.run_status_panel.geometry().bottom(), page.run_record_panel.geometry().top())
+
+    def test_monitor_plots_keep_readable_heights_and_page_scrolls(self) -> None:
+        controller = WorkbenchController(mock_source=MockTelemetrySource(interval_ms=1000))
+        self.addCleanup(controller.shutdown)
+        window = MainWindow(controller)
+        self.addCleanup(window.close)
+        window.resize(900, 640)
+        window.show()
+        window.monitor_navigation_button.click()
+        self.qt_app.processEvents()
+
+        page = window.monitor_page
+        self.assertIsInstance(page.scroll_area, QScrollArea)
+        self.assertTrue(page.scroll_area.widgetResizable())
+        self.assertGreater(page.scroll_area.verticalScrollBar().maximum(), 0)
+        self.assertGreaterEqual(page.angle_plot.minimumHeight(), 200)
+        self.assertGreaterEqual(page.position_plot.minimumHeight(), 200)
+        charts_layout = page.charts_panel.layout()
+        self.assertGreaterEqual(charts_layout.indexOf(page.angle_plot), 0)
+        self.assertGreaterEqual(charts_layout.indexOf(page.position_plot), 0)
+        self.assertLess(page.angle_plot.geometry().bottom(), page.position_plot.geometry().top())
 
     def test_navigation_during_active_recording_does_not_stop_writer(self) -> None:
         temporary_directory = tempfile.TemporaryDirectory()

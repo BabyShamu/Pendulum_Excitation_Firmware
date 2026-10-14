@@ -11,6 +11,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QListWidget,
     QPushButton,
+    QScrollArea,
     QSizePolicy,
     QStyle,
     QVBoxLayout,
@@ -44,9 +45,25 @@ class MonitorPage(QWidget):
         self._last_displayed_source: DataSourceMode | None = None
         self._last_connection_state: ConnectionState | None = None
 
-        layout = QVBoxLayout(self)
+        outer_layout = QVBoxLayout(self)
+        outer_layout.setContentsMargins(0, 0, 0, 0)
+        self.scroll_area = QScrollArea(self)
+        self.scroll_area.setObjectName("monitorPageScrollArea")
+        self.scroll_area.setWidgetResizable(True)
+        self.scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.scroll_area.setFrameShape(QFrame.Shape.NoFrame)
+        self.content_widget = QWidget()
+        self.content_widget.setObjectName("monitorPageContent")
+        self.content_widget.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Preferred,
+        )
+        layout = QVBoxLayout(self.content_widget)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(10)
+        outer_layout.addWidget(self.scroll_area)
+        self.scroll_area.setWidget(self.content_widget)
 
         self.connection_panel = QFrame()
         self.connection_panel.setObjectName("surface")
@@ -135,13 +152,20 @@ class MonitorPage(QWidget):
         content = QHBoxLayout()
         content.setSpacing(12)
         charts = QFrame()
+        self.charts_panel = charts
         charts.setObjectName("surface")
+        charts.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Preferred,
+        )
         self._apply_card_depth(charts)
         charts_layout = QVBoxLayout(charts)
         charts_layout.setContentsMargins(12, 8, 12, 8)
         charts_layout.setSpacing(2)
         self.angle_plot = TrendPlot("Pendulum angle", "deg", "#277a68")
         self.position_plot = TrendPlot("Pivot position", "mm", "#d36b42")
+        self.angle_plot.setMinimumHeight(220)
+        self.position_plot.setMinimumHeight(220)
         charts_layout.addWidget(self.angle_plot, 1)
         charts_layout.addWidget(self.position_plot, 1)
         content.addWidget(charts, 3)

@@ -13,6 +13,8 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QProgressBar,
     QPushButton,
+    QScrollArea,
+    QSizePolicy,
     QStyle,
     QVBoxLayout,
     QWidget,
@@ -42,13 +44,33 @@ class ExperimentPage(QWidget):
         self._recording_notes = ""
         self._experiment_directory: Path | None = None
 
-        layout = QVBoxLayout(self)
+        outer_layout = QVBoxLayout(self)
+        outer_layout.setContentsMargins(0, 0, 0, 0)
+        self.scroll_area = QScrollArea(self)
+        self.scroll_area.setObjectName("experimentPageScrollArea")
+        self.scroll_area.setWidgetResizable(True)
+        self.scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.scroll_area.setFrameShape(QFrame.Shape.NoFrame)
+        self.content_widget = QWidget()
+        self.content_widget.setObjectName("experimentPageContent")
+        self.content_widget.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Preferred,
+        )
+        layout = QVBoxLayout(self.content_widget)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(12)
+        outer_layout.addWidget(self.scroll_area)
+        self.scroll_area.setWidget(self.content_widget)
 
         recording_panel = QFrame()
+        self.setup_panel = recording_panel
         recording_panel.setObjectName("surface")
-        recording_panel.setMinimumHeight(320)
+        recording_panel.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Preferred,
+        )
         self._apply_card_depth(recording_panel)
         recording_layout = QVBoxLayout(recording_panel)
         recording_layout.setContentsMargins(18, 14, 18, 14)
@@ -138,7 +160,12 @@ class ExperimentPage(QWidget):
         layout.addWidget(recording_panel)
 
         run_status_panel = QFrame()
+        self.run_status_panel = run_status_panel
         run_status_panel.setObjectName("surface")
+        run_status_panel.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Preferred,
+        )
         self._apply_card_depth(run_status_panel)
         run_status_layout = QVBoxLayout(run_status_panel)
         run_status_layout.setContentsMargins(18, 14, 18, 14)
@@ -189,7 +216,12 @@ class ExperimentPage(QWidget):
         layout.addWidget(run_status_panel)
 
         saved_panel = QFrame()
+        self.run_record_panel = saved_panel
         saved_panel.setObjectName("surface")
+        saved_panel.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Preferred,
+        )
         self._apply_card_depth(saved_panel)
         saved_layout = QVBoxLayout(saved_panel)
         saved_layout.setContentsMargins(18, 14, 18, 14)
