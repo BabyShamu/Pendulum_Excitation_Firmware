@@ -86,6 +86,14 @@
 #define CLOSED_LOOP_ANGLE_FAILURE_LIMIT  4U
 #define PENDULUM_ANGLE_LIMIT_DEG         90.0f
 #define PENDULUM_ANGLE_SAFETY_POLL_MS    10U
+/* Three normal 10 ms proven-parametric samples; holdover is bounded by the 3-read AS5600 failure gate. */
+#define PENDULUM_ANGLE_SAFETY_MAX_AGE_MS (3U * PARAMETRIC_UPDATE_PERIOD_MS)
+#define STEP_STOP_REASON_NONE             0U
+#define STEP_STOP_REASON_UPPER_LIMIT      1U
+#define STEP_STOP_REASON_LOWER_LIMIT      2U
+#define STEP_STOP_REASON_ANGLE_SENSOR     3U
+#define STEP_STOP_REASON_PENDULUM_ANGLE   4U
+#define STEP_STOP_REASON_INVALID_RATE     5U
 #define CLOSED_LOOP_PHASE_IDLE           0U
 #define CLOSED_LOOP_PHASE_DIR_SETUP      1U
 #define CLOSED_LOOP_PHASE_STEP_HIGH      2U
@@ -187,6 +195,7 @@ static uint8_t LowerLimitPressedDebounced(void);
 static uint8_t WaitForDebouncedLimit(uint8_t upperLimit);
 static HAL_StatusTypeDef AS5600_ReadAngle(uint16_t *angle);
 static HAL_StatusTypeDef AS5600_ReadAngleOnce(uint16_t *angle);
+static void AS5600_RecordValidAngleSample(uint16_t angle);
 static uint8_t AS5600_RecoverI2c(void);
 static void AS5600_RecordHalFailure(HAL_StatusTypeDef status, uint32_t error);
 static void AS5600_RecordReadFailure(HAL_StatusTypeDef status, uint32_t error);
@@ -204,8 +213,12 @@ static void UpdateManualMotion(void);
 static void StopManualMotion(const char *reason);
 static uint8_t ManualMotionSafetyStopReason(void);
 static const char *ManualMotionStopReasonText(uint8_t reason);
-static uint8_t PendulumAngleSafetyPoll(void);
+static uint8_t PendulumAngleSafetyPoll(uint8_t motionActive);
+static uint8_t PendulumAngleSafetyReadyForMotion(void);
+static uint8_t PivotMotionIsActive(void);
 static void PendulumAngleLimitTrip(float angleDeg);
+static void PendulumAngleSensorFaultTrip(void);
+static const char *StepStopReasonName(uint8_t reason);
 static uint8_t ServoLatchPwmInitialize(void);
 static uint8_t ServoLatchCommand(uint16_t pulseUs, uint8_t commandedState);
 static const char *ServoLatchStateName(uint8_t state);
@@ -317,6 +330,11 @@ static volatile uint8_t g_closedLoopFaultPending = 0U;
 static volatile uint8_t g_pendulumAngleSafetyAvailable = 0U;
 static uint32_t g_pendulumAngleSafetyLastPollMs = 0U;
 static float g_pendulumAngleLimitFaultDeg = 0.0f;
+static volatile uint8_t g_latestAngleSampleValid = 0U;
+static volatile uint16_t g_latestAngleRaw = 0U;
+static float g_latestAngleRelativeDeg = 0.0f;
+static uint32_t g_latestAngleSampleMs = 0U;
+static uint8_t g_stepStopReason = STEP_STOP_REASON_NONE;
 static volatile uint32_t g_closedLoopKickCount = 0U;
 static volatile uint32_t g_closedLoopTimerArmCount = 0U;
 static volatile uint32_t g_tim6IrqCount = 0U;
@@ -494,7 +512,7 @@ int main(void)
 
     while (1)
     {
-        (void)PendulumAngleSafetyPoll();
+        (void)PendulumAngleSafetyPoll(PivotMotionIsActive());
         ReportClosedLoopFault();
         if (g_parametricTestRunning == 0U && ClosedLoopActuatorIsActive() == 0U)
         {
@@ -653,7 +671,7 @@ static uint8_t WaitForDebouncedLimit(uint8_t upperLimit)
 {
     while ((upperLimit != 0U) ? (UpperLimitPressed() != 0U) : (LowerLimitPressed() != 0U))
     {
-        if (PendulumAngleSafetyPoll() == 0U)
+        if (PendulumAngleSafetyPoll(1U) == 0U)
         {
             return 0U;
         }
@@ -678,14 +696,6 @@ static HAL_StatusTypeDef AS5600_ReadAngle(uint16_t *angle)
     {
         g_angleSensorConsecutiveFailures = 0U;
         AS5600_ReportRestored();
-        if (g_angleZeroValid != 0U && g_closedLoopFault == 0U)
-        {
-            float angleDeg = RelativeAngleDegrees(*angle);
-            if (fabsf(angleDeg) >= PENDULUM_ANGLE_LIMIT_DEG)
-            {
-                PendulumAngleLimitTrip(angleDeg);
-            }
-        }
         return HAL_OK;
     }
 
@@ -757,7 +767,31 @@ static HAL_StatusTypeDef AS5600_ReadAngleOnce(uint16_t *angle)
     }
 
     *angle = (uint16_t)((((uint16_t)data[0] << 8U) | data[1]) & 0x0FFFU);
+    AS5600_RecordValidAngleSample(*angle);
     return HAL_OK;
+}
+
+static void AS5600_RecordValidAngleSample(uint16_t angle)
+{
+    g_latestAngleRaw = angle;
+    g_latestAngleSampleMs = HAL_GetTick();
+    g_latestAngleSampleValid = 1U;
+
+    if (g_angleZeroValid == 0U)
+    {
+        g_pendulumAngleSafetyAvailable = 0U;
+        return;
+    }
+
+    g_latestAngleRelativeDeg = RelativeAngleDegrees(angle);
+    if (g_closedLoopFault == 0U &&
+        fabsf(g_latestAngleRelativeDeg) >= PENDULUM_ANGLE_LIMIT_DEG)
+    {
+        PendulumAngleLimitTrip(g_latestAngleRelativeDeg);
+        return;
+    }
+    g_pendulumAngleSafetyAvailable =
+        (g_closedLoopFault == 0U && g_angleSensorUnavailable == 0U) ? 1U : 0U;
 }
 
 static void AS5600_RecordHalFailure(HAL_StatusTypeDef status, uint32_t error)
@@ -1063,47 +1097,200 @@ static void PendulumAngleLimitTrip(float angleDeg)
     }
 }
 
-static uint8_t PendulumAngleSafetyPoll(void)
+static uint8_t PendulumAngleSafetyPoll(uint8_t motionActive)
 {
     uint16_t angle;
     uint32_t now = HAL_GetTick();
+    uint32_t sampleAgeMs;
 
     if (g_closedLoopFault != 0U)
     {
+        g_pendulumAngleSafetyAvailable = 0U;
         return 0U;
     }
-    if (g_pendulumAngleSafetyLastPollMs != 0U &&
-        (now - g_pendulumAngleSafetyLastPollMs) < PENDULUM_ANGLE_SAFETY_POLL_MS)
+    if (g_angleZeroValid == 0U || g_latestAngleSampleValid == 0U)
     {
-        return g_pendulumAngleSafetyAvailable;
-    }
-    g_pendulumAngleSafetyLastPollMs = now;
-    g_pendulumAngleSafetyAvailable = 0U;
-    if (g_angleZeroValid == 0U || AS5600_ReadAngle(&angle) != HAL_OK)
-    {
+        g_pendulumAngleSafetyAvailable = 0U;
+        if (motionActive != 0U)
+        {
+            PendulumAngleSensorFaultTrip();
+        }
         return 0U;
     }
 
+    if (g_angleSensorUnavailable != 0U ||
+        g_angleSensorConsecutiveFailures >= AS5600_READ_FAILURE_RECOVERY_THRESHOLD)
     {
-        float angleDeg = RelativeAngleDegrees(angle);
-        g_pendulumAngleSafetyAvailable = 1U;
-        if (fabsf(angleDeg) >= PENDULUM_ANGLE_LIMIT_DEG)
+        g_pendulumAngleSafetyAvailable = 0U;
+        if (motionActive != 0U)
         {
-            PendulumAngleLimitTrip(angleDeg);
+            PendulumAngleSensorFaultTrip();
+        }
+        return 0U;
+    }
+
+    sampleAgeMs = now - g_latestAngleSampleMs;
+    if (sampleAgeMs <= PENDULUM_ANGLE_SAFETY_MAX_AGE_MS)
+    {
+        if (fabsf(g_latestAngleRelativeDeg) >= PENDULUM_ANGLE_LIMIT_DEG)
+        {
+            PendulumAngleLimitTrip(g_latestAngleRelativeDeg);
             return 0U;
         }
+        g_pendulumAngleSafetyAvailable = 1U;
+        return 1U;
     }
-    return 1U;
+
+    if (g_pendulumAngleSafetyLastPollMs != 0U &&
+        (now - g_pendulumAngleSafetyLastPollMs) < PENDULUM_ANGLE_SAFETY_POLL_MS)
+    {
+        if (motionActive != 0U &&
+            g_angleSensorConsecutiveFailures < AS5600_READ_FAILURE_RECOVERY_THRESHOLD)
+        {
+            g_pendulumAngleSafetyAvailable = 1U;
+            return 1U;
+        }
+        g_pendulumAngleSafetyAvailable = 0U;
+        return 0U;
+    }
+
+    g_pendulumAngleSafetyLastPollMs = now;
+    if (AS5600_ReadAngle(&angle) == HAL_OK)
+    {
+        if (g_closedLoopFault != 0U || g_angleSensorUnavailable != 0U)
+        {
+            g_pendulumAngleSafetyAvailable = 0U;
+            return 0U;
+        }
+        g_pendulumAngleSafetyAvailable = 1U;
+        return 1U;
+    }
+
+    if (g_closedLoopFault != 0U ||
+        g_angleSensorUnavailable != 0U ||
+        g_angleSensorConsecutiveFailures >= AS5600_READ_FAILURE_RECOVERY_THRESHOLD)
+    {
+        g_pendulumAngleSafetyAvailable = 0U;
+        if (motionActive != 0U)
+        {
+            PendulumAngleSensorFaultTrip();
+        }
+        return 0U;
+    }
+
+    if (motionActive != 0U && g_latestAngleSampleValid != 0U)
+    {
+        g_pendulumAngleSafetyAvailable = 1U;
+        return 1U;
+    }
+    g_pendulumAngleSafetyAvailable = 0U;
+    return 0U;
+}
+
+static uint8_t PendulumAngleSafetyReadyForMotion(void)
+{
+    uint32_t now;
+
+    if (PendulumAngleSafetyPoll(0U) == 0U || g_angleZeroValid == 0U ||
+        g_latestAngleSampleValid == 0U || g_angleSensorUnavailable != 0U ||
+        g_closedLoopFault != 0U)
+    {
+        return 0U;
+    }
+    now = HAL_GetTick();
+    return ((now - g_latestAngleSampleMs) <= PENDULUM_ANGLE_SAFETY_MAX_AGE_MS) ? 1U : 0U;
+}
+
+static uint8_t PivotMotionIsActive(void)
+{
+    return (g_manualMotionDirection != 0U || g_homingActive != 0U || g_run != 0U ||
+            g_sineRunning != 0U || g_parametricRunning != 0U ||
+            g_parametricClosedLoopRunning != 0U || g_phaseTrackedSineRunning != 0U)
+               ? 1U
+               : 0U;
+}
+
+static void PendulumAngleSensorFaultTrip(void)
+{
+    if (g_closedLoopFault != 0U)
+    {
+        return;
+    }
+    g_pendulumAngleSafetyAvailable = 0U;
+    g_closedLoopFault = 3U;
+    g_closedLoopFaultPending = 1U;
+    g_manualMotionDirection = 0U;
+    g_homingActive = 0U;
+    g_run = 0U;
+    g_sineRunning = 0U;
+    g_parametricRunning = 0U;
+    g_parametricTestRunning = 0U;
+    g_parametricClosedLoopRunning = 0U;
+    g_parametricClosedLoopExperimentMode = 0U;
+    g_phaseTrackedSineRunning = 0U;
+    ManualStepTimerStop();
+    ClosedLoopActuatorStop();
+}
+
+static const char *StepStopReasonName(uint8_t reason)
+{
+    switch (reason)
+    {
+        case STEP_STOP_REASON_UPPER_LIMIT:
+            return "upper_limit";
+        case STEP_STOP_REASON_LOWER_LIMIT:
+            return "lower_limit";
+        case STEP_STOP_REASON_ANGLE_SENSOR:
+            return "angle_sensor_unavailable";
+        case STEP_STOP_REASON_PENDULUM_ANGLE:
+            return "pendulum_angle_limit";
+        default:
+            return "invalid_or_interlocked";
+    }
 }
 
 static uint8_t StepOne(uint32_t hz, uint8_t stopUpper, uint8_t stopLower)
 {
     uint32_t halfUs;
 
-    if (hz == 0U || g_closedLoopFault != 0U || PendulumAngleSafetyPoll() == 0U ||
-        (stopUpper != 0U && UpperLimitPressed() != 0U) ||
-        (stopLower != 0U && LowerLimitPressed() != 0U))
+    g_stepStopReason = STEP_STOP_REASON_NONE;
+    if (hz == 0U)
     {
+        g_stepStopReason = STEP_STOP_REASON_INVALID_RATE;
+        return 0U;
+    }
+    if (g_closedLoopFault == 4U)
+    {
+        g_stepStopReason = STEP_STOP_REASON_PENDULUM_ANGLE;
+        return 0U;
+    }
+    if (g_closedLoopFault == 3U)
+    {
+        g_stepStopReason = STEP_STOP_REASON_ANGLE_SENSOR;
+        return 0U;
+    }
+    if (g_closedLoopFault == 1U || g_closedLoopFault == 2U)
+    {
+        g_stepStopReason = (g_closedLoopFault == 1U)
+                               ? STEP_STOP_REASON_UPPER_LIMIT
+                               : STEP_STOP_REASON_LOWER_LIMIT;
+        return 0U;
+    }
+    if (PendulumAngleSafetyPoll(1U) == 0U)
+    {
+        g_stepStopReason = (g_closedLoopFault == 4U)
+                               ? STEP_STOP_REASON_PENDULUM_ANGLE
+                               : STEP_STOP_REASON_ANGLE_SENSOR;
+        return 0U;
+    }
+    if (stopUpper != 0U && UpperLimitPressed() != 0U)
+    {
+        g_stepStopReason = STEP_STOP_REASON_UPPER_LIMIT;
+        return 0U;
+    }
+    if (stopLower != 0U && LowerLimitPressed() != 0U)
+    {
+        g_stepStopReason = STEP_STOP_REASON_LOWER_LIMIT;
         return 0U;
     }
 
@@ -1562,7 +1749,7 @@ static void ManualStepTimerOnTimer(void)
 
 static void Jog(uint8_t dir, uint32_t steps)
 {
-    if (g_closedLoopFault != 0U || PendulumAngleSafetyPoll() == 0U)
+    if (g_closedLoopFault != 0U || PendulumAngleSafetyReadyForMotion() == 0U)
     {
         UartPrint("jog rejected: motion safety interlock\r\n");
         return;
@@ -1578,9 +1765,13 @@ static void Jog(uint8_t dir, uint32_t steps)
     {
         if (StepOne(JOG_SPEED_HZ, 1U, 1U) == 0U)
         {
-            if (g_closedLoopFault != 4U)
+            if (g_stepStopReason == STEP_STOP_REASON_UPPER_LIMIT ||
+                g_stepStopReason == STEP_STOP_REASON_LOWER_LIMIT)
             {
-                UartPrint("jog stopped by limit\r\n");
+                char message[80];
+                snprintf(message, sizeof(message), "jog stopped: %s\r\n",
+                         StepStopReasonName(g_stepStopReason));
+                UartPrint(message);
             }
             return;
         }
@@ -1595,7 +1786,7 @@ static void Home(void)
     uint32_t lowerSteps = 0U;
     uint32_t spanSteps = 0U;
 
-    if (g_closedLoopFault != 0U || PendulumAngleSafetyPoll() == 0U)
+    if (g_closedLoopFault != 0U || PendulumAngleSafetyReadyForMotion() == 0U)
     {
         UartPrint("homing rejected: motion safety interlock\r\n");
         return;
@@ -1621,7 +1812,7 @@ static void Home(void)
     SetDirection(DIR_DOWN);
     while (lowerSteps < MAX_HOMING_STEPS)
     {
-        if (PendulumAngleSafetyPoll() == 0U)
+        if (PendulumAngleSafetyPoll(1U) == 0U)
         {
             if (g_closedLoopFault == 4U)
             {
@@ -1665,7 +1856,7 @@ static void Home(void)
     SetDirection(DIR_UP);
     while (spanSteps < MAX_HOMING_STEPS)
     {
-        if (PendulumAngleSafetyPoll() == 0U)
+        if (PendulumAngleSafetyPoll(1U) == 0U)
         {
             if (g_closedLoopFault == 4U)
             {
@@ -1717,7 +1908,7 @@ static void Home(void)
     SetDirection(DIR_DOWN);
     for (uint32_t i = 0U; i < spanSteps / 2U; i++)
     {
-        if (PendulumAngleSafetyPoll() == 0U)
+        if (PendulumAngleSafetyPoll(1U) == 0U)
         {
             if (g_closedLoopFault == 4U)
             {
@@ -1732,11 +1923,7 @@ static void Home(void)
         }
         if (StepOne(HOMING_SPEED_HZ, 0U, 1U) == 0U)
         {
-            if (g_closedLoopFault == 4U)
-            {
-                return;
-            }
-            if (g_closedLoopFault == 4U)
+            if (g_closedLoopFault == 4U || g_closedLoopFault == 3U)
             {
                 return;
             }
@@ -1841,7 +2028,14 @@ static void ReturnToCenter(void)
         SetDirection(direction);
         if (StepOne(JOG_SPEED_HZ, 1U, 1U) == 0U)
         {
-            UartPrint("return to zero stopped by limit\r\n");
+            if (g_stepStopReason == STEP_STOP_REASON_UPPER_LIMIT ||
+                g_stepStopReason == STEP_STOP_REASON_LOWER_LIMIT)
+            {
+                char message[80];
+                snprintf(message, sizeof(message), "return to zero stopped: %s\r\n",
+                         StepStopReasonName(g_stepStopReason));
+                UartPrint(message);
+            }
             return;
         }
         g_positionSteps += (direction == 0U) ? 1 : -1;
@@ -1883,10 +2077,16 @@ static void UpdateSine(void)
         {
             g_sineRunning = 0U;
             g_run = 0U;
-            if (g_closedLoopFault != 4U)
+            if (g_stepStopReason == STEP_STOP_REASON_UPPER_LIMIT ||
+                g_stepStopReason == STEP_STOP_REASON_LOWER_LIMIT)
             {
-                UartPrint("event: type=sine_motion_stopped reason=limit\r\n");
-                UartPrint("sine stopped: limit switch reached\r\n");
+                char message[96];
+                const char *reason = StepStopReasonName(g_stepStopReason);
+                snprintf(message, sizeof(message),
+                         "event: type=sine_motion_stopped reason=%s\r\n", reason);
+                UartPrint(message);
+                snprintf(message, sizeof(message), "sine stopped: %s\r\n", reason);
+                UartPrint(message);
             }
             return;
         }
@@ -2011,7 +2211,14 @@ static void UpdateParametric(void)
         {
             g_parametricRunning = 0U;
             g_run = 0U;
-            UartPrint("parametric stopped: limit switch reached\r\n");
+            if (g_stepStopReason == STEP_STOP_REASON_UPPER_LIMIT ||
+                g_stepStopReason == STEP_STOP_REASON_LOWER_LIMIT)
+            {
+                char message[96];
+                snprintf(message, sizeof(message), "parametric stopped: %s\r\n",
+                         StepStopReasonName(g_stepStopReason));
+                UartPrint(message);
+            }
             return;
         }
         g_positionSteps += (direction == 0U) ? 1 : -1;
@@ -2967,12 +3174,18 @@ static void SetAngleZero(void)
 {
     uint16_t angle;
 
+    if (g_closedLoopFault != 0U || PivotMotionIsActive() != 0U)
+    {
+        UartPrint("angle zero rejected: stop motion and clear faults first\r\n");
+        return;
+    }
     g_pendulumAngleSafetyAvailable = 0U;
     g_pendulumAngleSafetyLastPollMs = 0U;
     if (AS5600_ReadAngle(&angle) == HAL_OK && g_closedLoopFault == 0U)
     {
         g_angleZeroRaw = angle;
         g_angleZeroValid = 1U;
+        AS5600_RecordValidAngleSample(angle);
         UartPrint("angle zero set\r\n");
     }
     else
@@ -3134,6 +3347,14 @@ static uint8_t ProcessMaintenanceCommand(char *arguments)
             UartPrint(msg);
             return 1U;
         }
+        if (g_closedLoopFault != 0U || PivotMotionIsActive() != 0U)
+        {
+            snprintf(msg, sizeof(msg),
+                     "maintenance: id=%lu type=zero ok=0 zeroed=0 error=motion_or_fault_active\r\n",
+                     requestId);
+            UartPrint(msg);
+            return 1U;
+        }
         if (g_closedLoopFault != 0U)
         {
             snprintf(msg, sizeof(msg),
@@ -3143,7 +3364,8 @@ static uint8_t ProcessMaintenanceCommand(char *arguments)
             return 1U;
         }
         SetAngleZero();
-        angleOk = (g_closedLoopFault == 0U && g_angleZeroValid != 0U &&
+        angleOk = (g_closedLoopFault == 0U && PivotMotionIsActive() == 0U &&
+               g_angleZeroValid != 0U &&
                AS5600_ReadAngle(&angle) == HAL_OK) ? 1U : 0U;
         if (angleOk != 0U)
         {
@@ -3380,7 +3602,7 @@ static uint8_t ProcessMaintenanceCommand(char *arguments)
             error = "frequency_out_of_range";
         }
 
-        if (error == NULL && PendulumAngleSafetyPoll() == 0U)
+        if (error == NULL && PendulumAngleSafetyReadyForMotion() == 0U)
         {
             error = (g_closedLoopFault != 0U) ? "blocking_fault" : "angle_sensor_unavailable";
         }
@@ -3512,7 +3734,7 @@ static uint8_t ProcessMaintenanceCommand(char *arguments)
             }
         }
 
-        if (error == NULL && PendulumAngleSafetyPoll() == 0U)
+        if (error == NULL && PendulumAngleSafetyReadyForMotion() == 0U)
         {
             error = (g_closedLoopFault != 0U) ? "blocking_fault" : "angle_sensor_unavailable";
         }
@@ -3625,7 +3847,7 @@ static uint8_t ProcessMaintenanceCommand(char *arguments)
             error = "amplitude_out_of_travel";
         }
 
-        if (error == NULL && PendulumAngleSafetyPoll() == 0U)
+        if (error == NULL && PendulumAngleSafetyReadyForMotion() == 0U)
         {
             error = (g_closedLoopFault != 0U) ? "blocking_fault" : "angle_sensor_unavailable";
         }
@@ -3764,7 +3986,7 @@ static uint8_t ProcessMaintenanceCommand(char *arguments)
             }
         }
 
-        if (error == NULL && PendulumAngleSafetyPoll() == 0U)
+        if (error == NULL && PendulumAngleSafetyReadyForMotion() == 0U)
         {
             error = (g_closedLoopFault != 0U) ? "blocking_fault" : "angle_sensor_unavailable";
         }
@@ -3827,7 +4049,7 @@ static uint8_t ProcessMaintenanceCommand(char *arguments)
         {
             error = "blocking_fault";
         }
-        else if (PendulumAngleSafetyPoll() == 0U)
+        else if (PendulumAngleSafetyReadyForMotion() == 0U)
         {
             error = (g_closedLoopFault != 0U) ? "blocking_fault" : "angle_sensor_unavailable";
         }
@@ -4132,9 +4354,9 @@ static void ProcessLine(char *line)
 
     if (strcmp(line, "zero") == 0)
     {
-        if (g_closedLoopFault != 0U)
+        if (g_closedLoopFault != 0U || PivotMotionIsActive() != 0U)
         {
-            UartPrint("zero rejected: clear the blocking fault first\r\n");
+            UartPrint("zero rejected: stop motion and clear faults first\r\n");
             return;
         }
         SetAngleZero();
@@ -4298,7 +4520,7 @@ static void ProcessLine(char *line)
             UartPrint("time_s,theta_deg,controller_mm,motor_target_mm,actual_mm,target_steps,actual_steps,step_error\r\n");
             return;
         }
-        if (PendulumAngleSafetyPoll() == 0U)
+        if (PendulumAngleSafetyReadyForMotion() == 0U)
         {
             UartPrint("closed loop rejected: pendulum angle safety unavailable\r\n");
             return;
@@ -4408,7 +4630,7 @@ static void ProcessLine(char *line)
             UartPrint("sine rejected: run home first\r\n");
             return;
         }
-        if (g_closedLoopFault != 0U || PendulumAngleSafetyPoll() == 0U)
+        if (g_closedLoopFault != 0U || PendulumAngleSafetyReadyForMotion() == 0U)
         {
             UartPrint("sine rejected: motion safety interlock\r\n");
             return;
@@ -4479,7 +4701,7 @@ static void ProcessLine(char *line)
             UartPrint("parametric rejected: blocking fault; use maint <id> fault_clear\r\n");
             return;
         }
-        if (PendulumAngleSafetyPoll() == 0U)
+        if (PendulumAngleSafetyReadyForMotion() == 0U)
         {
             UartPrint("parametric rejected: pendulum angle safety unavailable\r\n");
             return;
@@ -4509,7 +4731,7 @@ static void ProcessLine(char *line)
             return;
         }
         if (value != 0U &&
-            (g_closedLoopFault != 0U || PendulumAngleSafetyPoll() == 0U))
+            (g_closedLoopFault != 0U || PendulumAngleSafetyReadyForMotion() == 0U))
         {
             UartPrint("run rejected: motion safety interlock\r\n");
             return;

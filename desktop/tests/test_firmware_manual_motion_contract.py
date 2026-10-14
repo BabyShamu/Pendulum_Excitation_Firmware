@@ -450,7 +450,9 @@ class FirmwareManualMotionContractTests(unittest.TestCase):
         self.assertIn("lroundf(targetMm * g_stepsPerMm)", sine_update)
         self.assertIn("while (g_positionSteps != targetSteps)", sine_update)
         self.assertIn("StepOne(speedHz, 1U, 1U) == 0U", sine_update)
-        self.assertIn("event: type=sine_motion_stopped reason=limit", sine_update)
+        self.assertIn("g_stepStopReason == STEP_STOP_REASON_UPPER_LIMIT", sine_update)
+        self.assertIn("g_stepStopReason == STEP_STOP_REASON_LOWER_LIMIT", sine_update)
+        self.assertIn("event: type=sine_motion_stopped reason=%s", sine_update)
 
     def test_autores_start_stop_apply_user_values_without_weakening_existing_limits(self) -> None:
         def assert_assigned_before_read(body: str, variable: str) -> None:
@@ -791,18 +793,18 @@ class FirmwareManualMotionContractTests(unittest.TestCase):
         safety = function_body("PendulumAngleSafetyPoll")
         for required in (
             "g_angleZeroValid == 0U",
-            "AS5600_ReadAngle(&angle) != HAL_OK",
-            "RelativeAngleDegrees(angle)",
-            "fabsf(angleDeg) >= PENDULUM_ANGLE_LIMIT_DEG",
-            "PendulumAngleLimitTrip(angleDeg)",
+            "g_latestAngleSampleValid == 0U",
+            "AS5600_ReadAngle(&angle) == HAL_OK",
+            "fabsf(g_latestAngleRelativeDeg) >= PENDULUM_ANGLE_LIMIT_DEG",
+            "PendulumAngleLimitTrip(g_latestAngleRelativeDeg)",
         ):
             self.assertIn(required, safety)
 
         sensor_read = function_body("AS5600_ReadAngle")
         self.assertIn("if (status == HAL_OK)", sensor_read)
-        self.assertIn("g_angleZeroValid != 0U && g_closedLoopFault == 0U", sensor_read)
-        self.assertIn("PendulumAngleLimitTrip(angleDeg)", sensor_read)
-        self.assertLess(sensor_read.index("if (status == HAL_OK)"), sensor_read.index("PendulumAngleLimitTrip(angleDeg)"))
+        self.assertIn("AS5600_RecordValidAngleSample(*angle)", function_body("AS5600_ReadAngleOnce"))
+        self.assertIn("if (g_angleZeroValid == 0U)", function_body("AS5600_RecordValidAngleSample"))
+        self.assertIn("PendulumAngleLimitTrip(g_latestAngleRelativeDeg)", function_body("AS5600_RecordValidAngleSample"))
 
         trip = function_body("PendulumAngleLimitTrip")
         for stopped_state in (
@@ -829,8 +831,8 @@ class FirmwareManualMotionContractTests(unittest.TestCase):
             "event: type=fault_appeared code=pendulum_angle_limit angle_deg=%.2f",
             function_body("ReportClosedLoopFault"),
         )
-        self.assertIn("PendulumAngleSafetyPoll();", function_body("main"))
-        self.assertIn("PendulumAngleSafetyPoll() == 0U", function_body("StepOne"))
+        self.assertIn("PendulumAngleSafetyPoll(PivotMotionIsActive());", function_body("main"))
+        self.assertIn("PendulumAngleSafetyPoll(1U) == 0U", function_body("StepOne"))
         self.assertIn("g_pendulumAngleSafetyAvailable == 0U", function_body("ManualMotionSafetyStopReason"))
         self.assertIn("g_closedLoopFault != 0U || g_pendulumAngleSafetyAvailable == 0U", function_body("ClosedLoopActuatorOnTimer"))
         self.assertIn("ManualMotionSafetyStopReason()", function_body("ManualStepTimerOnTimer"))
@@ -844,21 +846,21 @@ class FirmwareManualMotionContractTests(unittest.TestCase):
             ('if (strncmp(end, "phase_sine_start ", 17U) == 0)', 'if (strcmp(end, "phase_sine_stop") == 0)'),
         ):
             block = maintenance.split(command, 1)[1].split(terminator, 1)[0]
-            self.assertIn("PendulumAngleSafetyPoll() == 0U", block)
+            self.assertIn("PendulumAngleSafetyReadyForMotion() == 0U", block)
             self.assertIn('"blocking_fault"', block)
 
         manual_start = maintenance.split(
             'if (strcmp(end, "manual_up") == 0', 1
         )[1].split('if (strcmp(end, "manual_keepalive_up") == 0', 1)[0]
-        self.assertIn("PendulumAngleSafetyPoll() == 0U", manual_start)
+        self.assertIn("PendulumAngleSafetyReadyForMotion() == 0U", manual_start)
         self.assertIn('"blocking_fault"', manual_start)
 
         home_command = maintenance.split('if (strcmp(end, "home") == 0)', 1)[1].split(
             'if (strcmp(end, "zero") == 0)', 1
         )[0]
         self.assertIn("g_closedLoopFault != 0U", home_command)
-        self.assertIn("if (g_closedLoopFault != 0U || PendulumAngleSafetyPoll() == 0U)", function_body("Home"))
-        self.assertIn("if (g_closedLoopFault != 0U || PendulumAngleSafetyPoll() == 0U)", function_body("Jog"))
+        self.assertIn("if (g_closedLoopFault != 0U || PendulumAngleSafetyReadyForMotion() == 0U)", function_body("Home"))
+        self.assertIn("if (g_closedLoopFault != 0U || PendulumAngleSafetyReadyForMotion() == 0U)", function_body("Jog"))
         self.assertIn("g_closedLoopFault == 0U", function_body("SetAngleZero"))
         self.assertIn("g_closedLoopFault != 0U", function_body("ProcessLine").split(
             'if (strcmp(line, "zero") == 0)', 1
@@ -879,10 +881,10 @@ class FirmwareManualMotionContractTests(unittest.TestCase):
                 'if (strncmp(line, "scale ", 6) == 0', 1
             )[0],
         )
-        self.assertIn("PendulumAngleSafetyPoll() == 0U", legacy_starts[0])
-        self.assertIn("PendulumAngleSafetyPoll() == 0U", legacy_starts[1])
-        self.assertIn("PendulumAngleSafetyPoll() == 0U", legacy_starts[2])
-        self.assertIn("PendulumAngleSafetyPoll() == 0U", legacy_starts[3])
+        self.assertIn("PendulumAngleSafetyReadyForMotion() == 0U", legacy_starts[0])
+        self.assertIn("PendulumAngleSafetyReadyForMotion() == 0U", legacy_starts[1])
+        self.assertIn("PendulumAngleSafetyReadyForMotion() == 0U", legacy_starts[2])
+        self.assertIn("PendulumAngleSafetyReadyForMotion() == 0U", legacy_starts[3])
 
         angle_limit_clear = function_body("ProcessMaintenanceCommand").split(
             'if (strcmp(end, "fault_clear") == 0)', 1
@@ -912,6 +914,63 @@ class FirmwareManualMotionContractTests(unittest.TestCase):
         self.assertAlmostEqual(relative_angle(3073), -89.912109375)
         self.assertEqual(relative_angle(3072), -90.0)
         self.assertLess(relative_angle(3071), -90.0)
+
+    def test_safety_cache_reuses_controller_samples_and_faults_only_after_existing_sensor_threshold(self) -> None:
+        self.assertRegex(FIRMWARE_SOURCE, r"#define PENDULUM_ANGLE_SAFETY_MAX_AGE_MS\s+\(3U \* PARAMETRIC_UPDATE_PERIOD_MS\)")
+        self.assertRegex(FIRMWARE_SOURCE, r"#define PARAMETRIC_UPDATE_PERIOD_MS\s+10U")
+        self.assertRegex(FIRMWARE_SOURCE, r"#define AS5600_READ_FAILURE_RECOVERY_THRESHOLD\s+3U")
+
+        read_once = function_body("AS5600_ReadAngleOnce")
+        self.assertIn("AS5600_RecordValidAngleSample(*angle)", read_once)
+        self.assertNotIn("PendulumAngleLimitTrip", function_body("AS5600_ReadAngle"))
+        record = function_body("AS5600_RecordValidAngleSample")
+        for cached_value in (
+            "g_latestAngleRaw = angle",
+            "g_latestAngleSampleMs = HAL_GetTick()",
+            "g_latestAngleSampleValid = 1U",
+            "g_latestAngleRelativeDeg = RelativeAngleDegrees(angle)",
+            "fabsf(g_latestAngleRelativeDeg) >= PENDULUM_ANGLE_LIMIT_DEG",
+            "PendulumAngleLimitTrip(g_latestAngleRelativeDeg)",
+        ):
+            self.assertIn(cached_value, record)
+
+        poll = function_body("PendulumAngleSafetyPoll")
+        age_check = poll.index("sampleAgeMs <= PENDULUM_ANGLE_SAFETY_MAX_AGE_MS")
+        stale_read = poll.index("AS5600_ReadAngle(&angle)")
+        self.assertLess(age_check, stale_read)
+        self.assertEqual(poll.count("AS5600_ReadAngle(&angle)"), 1)
+        self.assertIn("g_angleSensorConsecutiveFailures < AS5600_READ_FAILURE_RECOVERY_THRESHOLD", poll)
+        self.assertIn("AS5600_ReportUnavailable()", function_body("AS5600_ReadAngle"))
+        self.assertLess(
+            function_body("AS5600_ReadAngle").index("g_angleSensorConsecutiveFailures < AS5600_READ_FAILURE_RECOVERY_THRESHOLD"),
+            function_body("AS5600_ReadAngle").index("AS5600_ReportUnavailable()"),
+        )
+        self.assertIn("PendulumAngleSensorFaultTrip()", poll)
+        self.assertIn("g_angleSensorUnavailable != 0U", poll)
+        self.assertIn("g_closedLoopFault = 3U", function_body("PendulumAngleSensorFaultTrip"))
+
+        autores = function_body("UpdateParametric")
+        self.assertEqual(autores.count("AS5600_ReadAngle(&angle)"), 1)
+        self.assertIn("g_latestAngleSampleValid", function_body("PendulumAngleSafetyReadyForMotion"))
+        readiness = function_body("PendulumAngleSafetyReadyForMotion")
+        self.assertIn("PENDULUM_ANGLE_SAFETY_MAX_AGE_MS", readiness)
+        self.assertLess(
+            readiness.index("PendulumAngleSafetyPoll(0U)"),
+            readiness.index("now = HAL_GetTick()"),
+        )
+
+        step = function_body("StepOne")
+        for stop_reason in (
+            "STEP_STOP_REASON_UPPER_LIMIT",
+            "STEP_STOP_REASON_LOWER_LIMIT",
+            "STEP_STOP_REASON_ANGLE_SENSOR",
+            "STEP_STOP_REASON_PENDULUM_ANGLE",
+        ):
+            self.assertIn(stop_reason, step)
+        self.assertIn("STEP_STOP_REASON_ANGLE_SENSOR", FIRMWARE_SOURCE)
+        self.assertIn("g_stepStopReason == STEP_STOP_REASON_UPPER_LIMIT", function_body("UpdateParametric"))
+        self.assertNotIn('"parametric stopped: limit switch reached"', function_body("UpdateParametric"))
+        self.assertNotIn('"event: type=sine_motion_stopped reason=limit', function_body("UpdateSine"))
 
 
 if __name__ == "__main__":
