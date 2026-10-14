@@ -11,7 +11,11 @@ from PySide6.QtWidgets import QApplication
 
 from pendulum_workbench.application.controller import WorkbenchController
 from pendulum_workbench.domain.angle_prediction import AngleSource
-from pendulum_workbench.domain.experiment_run import ExperimentRunState, VerticalSineDefinition
+from pendulum_workbench.domain.experiment_run import (
+    AutoResonanceDefinition,
+    ExperimentRunState,
+    VerticalSineDefinition,
+)
 from pendulum_workbench.domain.maintenance import BitResultState, PendulumLatchState, ReadinessState
 from pendulum_workbench.domain.models import (
     ConnectionState,
@@ -64,6 +68,9 @@ class SineExperimentSerial:
         self.latch_state = "unknown"
         self.homed = initially_homed
         self.sine_active = False
+        self.autores_active = False
+        self.autores_amplitude_mm: float | None = None
+        self.autores_phase_deg: float | None = None
         self.sine_amplitude_mm: float | None = None
         self.sine_frequency_hz: float | None = None
         self.home_motion_start_count = 0
@@ -82,7 +89,13 @@ class SineExperimentSerial:
             if command.startswith("latch_"):
                 self.latch_commands.append(command)
             if command == "status":
-                mode = "sine" if self.sine_active else "idle"
+                mode = (
+                    "parametric_closed_loop"
+                    if self.autores_active
+                    else "sine"
+                    if self.sine_active
+                    else "idle"
+                )
                 self._enqueue(
                     f"maintenance: id={request_id} type=status ok=1 homed={int(self.homed)} "
                     f"upper_limit=0 lower_limit=0 fault=0 active_mode={mode} "
@@ -167,6 +180,22 @@ class SineExperimentSerial:
                 self._enqueue(
                     f"maintenance: id={request_id} type=sine_stop ok=1 active=0 position_steps=0\r\n"
                 )
+            elif command == "autores_start":
+                amplitude = float(fields[3])
+                phase = float(fields[4])
+                self.autores_active = True
+                self.autores_amplitude_mm = amplitude
+                self.autores_phase_deg = phase
+                self._enqueue(
+                    f"maintenance: id={request_id} type=autores_start ok=1 active=1 "
+                    f"active_mode=parametric_closed_loop amplitude_mm={amplitude:.6f} "
+                    f"phase_deg={phase:.6f}\r\n"
+                )
+            elif command == "autores_stop":
+                self.autores_active = False
+                self._enqueue(
+                    f"maintenance: id={request_id} type=autores_stop ok=1 active=0 active_mode=idle\r\n"
+                )
         return len(data)
 
     def release_latch_open(self) -> None:
@@ -207,6 +236,10 @@ class SineExperimentSerial:
     def report_angle_sensor_restored(self) -> None:
         self.angle_available = True
         self._enqueue("event: type=angle_sensor_restored\r\n")
+
+    def report_closed_loop_fault(self) -> None:
+        self.autores_active = False
+        self._enqueue("event: type=fault_appeared code=upper_limit\r\n")
 
     def _enqueue(self, text: str) -> None:
         if "type=latch_open" in text:
@@ -335,6 +368,8 @@ class ExperimentRunTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(RuntimeError, "AS5600 angle"):
             controller.experiment_run.start(VerticalSineDefinition(5.0, 1.8, 30.0))
+        with self.assertRaisesRegex(RuntimeError, "AS5600 angle"):
+            controller.experiment_run.start(AutoResonanceDefinition(5.0, 0.0, 30.0))
         self.assertEqual(controller.experiment_run.snapshot.state, ExperimentRunState.READY)
         self.assertFalse(controller.experiment_recorder.is_recording)
         self.assertEqual(device.latch_state, "hold")
@@ -534,6 +569,168 @@ class ExperimentRunTests(unittest.TestCase):
         manifest = repository.load(repository.root / experiment_id).manifest
         self.assertEqual(manifest["completion_status"], "INTERRUPTED")
         self.assertEqual(manifest["experiment"]["completion_reason"], "operator_stop")
+
+    def test_autoresonance_transaction_uses_correlated_commands_and_preserves_parameters(self) -> None:
+        directory = self.temporary_directory()
+        controller, device, repository = self.create_connected_controller(directory)
+        self.addCleanup(controller.shutdown)
+        self.prepare_ready_held_system(controller, device)
+        device.protocol_actions.clear()
+
+        with self.assertRaisesRegex(ValueError, "7.5 mm"):
+            controller.experiment_run.start(AutoResonanceDefinition(10.0, 0.0, 20.0))
+        self.assertFalse(controller.experiment_recorder.is_recording)
+        self.assertNotIn("autores_start", device.protocol_actions)
+
+        definition = AutoResonanceDefinition(6.0, -12.5, 0.2, label="AR test", notes="phase sign")
+        experiment_id = controller.experiment_run.start(definition)
+        self.assertTrue(
+            self.wait_for(lambda: device.latch_state == "open" and "autores_start" in device.protocol_actions)
+        )
+        self.assertTrue(
+            self.wait_for(lambda: controller.experiment_run.snapshot.state == ExperimentRunState.RUNNING)
+        )
+        self.assertTrue(device.autores_active)
+        self.assertEqual(device.autores_amplitude_mm, 6.0)
+        self.assertEqual(device.autores_phase_deg, -12.5)
+        self.assertNotIn("sine_start", device.protocol_actions)
+        self.assertEqual(device.latch_state, "open")
+        self.assertEqual(device.recording_state_when_open_commanded, RecordingState.RECORDING)
+        self.assertEqual(device.initial_angle_at_latch_open, 14.8)
+        self.assertEqual(
+            [action for action in device.protocol_actions if action in ("latch_open", "autores_start")],
+            ["latch_open", "autores_start"],
+        )
+
+        manifest_before_stop = repository.load(repository.root / experiment_id).manifest
+        self.assertEqual(
+            manifest_before_stop["experiment"]["commanded_amplitude_mm"],
+            6.0,
+        )
+        self.assertEqual(manifest_before_stop["experiment"]["commanded_phase_deg"], -12.5)
+        self.assertEqual(manifest_before_stop["experiment"]["experiment_mode"],
+                         "AUTO_RESONANCE_PARAMETRIC_CLOSED_LOOP")
+
+        self.assertTrue(
+            self.wait_for(
+                lambda: controller.experiment_run.snapshot.state == ExperimentRunState.COMPLETE
+                and controller.state.snapshot.recording == RecordingState.SAVED
+            )
+        )
+        self.assertFalse(device.autores_active)
+        self.assertIn("autores_stop", device.protocol_actions)
+        self.assertEqual(device.latch_state, "open")
+        manifest = repository.load(repository.root / experiment_id).manifest
+        self.assertEqual(manifest["completion_status"], "COMPLETED")
+        self.assertEqual(manifest["experiment"]["completion_reason"], "duration_elapsed")
+
+    def test_typed_autoresonance_commands_validate_and_correlate_parameters(self) -> None:
+        directory = self.temporary_directory()
+        controller, device, _repository = self.create_connected_controller(directory)
+        self.addCleanup(controller.shutdown)
+        commands = controller.firmware_commands
+
+        with self.assertRaisesRegex(ValueError, "7.5 mm"):
+            commands.start_parametric_closed_loop(10.0, 0.0)
+        with self.assertRaisesRegex(ValueError, "greater than zero"):
+            commands.start_parametric_closed_loop(-1.0, 0.0)
+        with self.assertRaisesRegex(ValueError, "finite"):
+            commands.start_parametric_closed_loop(5.0, float("nan"))
+        self.assertNotIn("autores_start", device.protocol_actions)
+
+        commands.start_parametric_closed_loop(6.25, -17.5)
+        self.assertTrue(
+            self.wait_for(
+                lambda: device.autores_active
+                and not controller.firmware_commands.is_busy
+            )
+        )
+        self.assertEqual(device.autores_amplitude_mm, 6.25)
+        self.assertEqual(device.autores_phase_deg, -17.5)
+        request_line = next(
+            write.decode("ascii").strip()
+            for write in device.writes
+            if b"autores_start" in write
+        )
+        self.assertRegex(request_line, r"maint \d+ autores_start 6\.25 -17\.5")
+
+        commands.stop_parametric_closed_loop()
+        self.assertTrue(
+            self.wait_for(
+                lambda: not device.autores_active
+                and not controller.firmware_commands.is_busy
+            )
+        )
+        self.assertEqual(device.protocol_actions[-1], "autores_stop")
+
+    def test_autoresonance_operator_stop_uses_correlated_stop_and_keeps_latch_open(self) -> None:
+        directory = self.temporary_directory()
+        controller, device, repository = self.create_connected_controller(directory)
+        self.addCleanup(controller.shutdown)
+        self.prepare_ready_held_system(controller, device)
+        experiment_id = controller.experiment_run.start(AutoResonanceDefinition(5.0, 0.0, 30.0))
+        self.assertTrue(
+            self.wait_for(lambda: controller.experiment_run.snapshot.state == ExperimentRunState.RUNNING)
+        )
+
+        controller.experiment_run.stop()
+
+        self.assertTrue(
+            self.wait_for(
+                lambda: controller.experiment_run.snapshot.state == ExperimentRunState.OPERATOR_STOPPED
+                and controller.state.snapshot.recording == RecordingState.INTERRUPTED
+            )
+        )
+        self.assertFalse(device.autores_active)
+        self.assertIn("autores_stop", device.protocol_actions)
+        self.assertNotIn("sine_stop", device.protocol_actions)
+        self.assertEqual(device.latch_state, "open")
+        manifest = repository.load(repository.root / experiment_id).manifest
+        self.assertEqual(manifest["experiment"]["completion_reason"], "operator_stop")
+
+    def test_autoresonance_firmware_fault_stops_and_finalizes_run(self) -> None:
+        directory = self.temporary_directory()
+        controller, device, repository = self.create_connected_controller(directory)
+        self.addCleanup(controller.shutdown)
+        self.prepare_ready_held_system(controller, device)
+        experiment_id = controller.experiment_run.start(AutoResonanceDefinition(5.0, 0.0, 30.0))
+        self.assertTrue(
+            self.wait_for(lambda: controller.experiment_run.snapshot.state == ExperimentRunState.RUNNING)
+        )
+
+        device.report_closed_loop_fault()
+
+        self.assertTrue(
+            self.wait_for(
+                lambda: controller.experiment_run.snapshot.state == ExperimentRunState.FAULT
+                and controller.state.snapshot.recording == RecordingState.INTERRUPTED
+            )
+        )
+        self.assertFalse(device.autores_active)
+        self.assertIn("autores_stop", device.protocol_actions)
+        self.assertEqual(device.latch_state, "open")
+        manifest = repository.load(repository.root / experiment_id).manifest
+        self.assertEqual(manifest["completion_status"], "INTERRUPTED")
+        self.assertTrue(manifest["experiment"]["completion_reason"].startswith("safety_event:fault_appeared"))
+
+    def test_autoresonance_connection_loss_interrupts_recording(self) -> None:
+        directory = self.temporary_directory()
+        controller, _device, _repository = self.create_connected_controller(directory)
+        self.addCleanup(controller.shutdown)
+        self.prepare_ready_held_system(controller, _device)
+        controller.experiment_run.start(AutoResonanceDefinition(5.0, 0.0, 30.0))
+        self.assertTrue(
+            self.wait_for(lambda: controller.experiment_run.snapshot.state == ExperimentRunState.RUNNING)
+        )
+
+        controller.state.set_connection(ConnectionState.DISCONNECTED)
+
+        self.assertTrue(
+            self.wait_for(
+                lambda: controller.experiment_run.snapshot.state == ExperimentRunState.INTERRUPTED
+                and controller.state.snapshot.recording == RecordingState.INTERRUPTED
+            )
+        )
 
     def test_serial_disconnect_during_run_still_interrupts_transaction(self) -> None:
         directory = self.temporary_directory()
@@ -881,7 +1078,7 @@ class ExperimentRunTests(unittest.TestCase):
         window = MainWindow(controller)
         page = window.experiment_page
 
-        self.assertEqual(page.experiment_mode_selector.count(), 1)
+        self.assertEqual(page.experiment_mode_selector.count(), 2)
         self.assertEqual(page.experiment_mode_selector.currentText(), "Vertical Sinusoidal Excitation")
         self.assertTrue(all(hasattr(page, name) for name in (
             "amplitude_input",
@@ -922,6 +1119,46 @@ class ExperimentRunTests(unittest.TestCase):
         )
         self.assertEqual(page.primary_run_button.text(), "RUN EXPERIMENT")
         window.close()
+
+    def test_autoresonance_mode_defaults_fields_and_restores_vertical_sine_inputs(self) -> None:
+        directory = self.temporary_directory()
+        controller, _device, _repository = self.create_connected_controller(directory)
+        self.addCleanup(controller.shutdown)
+        self.prepare_ready_held_system(controller, _device)
+        window = MainWindow(controller)
+        self.addCleanup(window.close)
+        page = window.experiment_page
+
+        page.amplitude_input.setText("5.0")
+        page.frequency_input.setText("1.8")
+        page.duration_input.setText("20")
+        page.experiment_mode_selector.setCurrentIndex(1)
+
+        self.assertEqual(page.experiment_mode_selector.currentText(), "Auto-Resonance / Parametric Closed Loop")
+        self.assertEqual(page.amplitude_input.text(), "10.0")
+        self.assertEqual(page.phase_input.text(), "0.0")
+        self.assertEqual(page.duration_input.text(), "20")
+        self.assertTrue(page.frequency_input.isHidden())
+        self.assertFalse(page.phase_input.isHidden())
+        self.assertFalse(page.primary_run_button.isEnabled())
+        self.assertIn("7.5 mm", page.run_error_value.text())
+
+        page.amplitude_input.setText("6.0")
+        page.phase_input.setText("-12.5")
+        self.assertTrue(page.primary_run_button.isEnabled())
+        self.assertAlmostEqual(page._definition_from_fields().phase_deg, -12.5)
+
+        page.experiment_mode_selector.setCurrentIndex(0)
+        self.assertEqual(page.amplitude_input.text(), "5.0")
+        self.assertEqual(page.frequency_input.text(), "1.8")
+        self.assertFalse(page.frequency_input.isHidden())
+        self.assertTrue(page.phase_input.isHidden())
+        self.assertTrue(page.primary_run_button.isEnabled())
+
+        page.experiment_mode_selector.setCurrentIndex(1)
+        self.assertEqual(page.amplitude_input.text(), "10.0")
+        self.assertEqual(page.phase_input.text(), "0.0")
+        self.assertFalse(page.primary_run_button.isEnabled())
 
     def test_experiment_page_accepts_zero_amplitude_baseline(self) -> None:
         directory = self.temporary_directory()

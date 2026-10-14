@@ -9,6 +9,8 @@ from PySide6.QtCore import QObject, QTimer, Signal
 
 from pendulum_workbench.application.experiment_recording import ExperimentRecordingService
 from pendulum_workbench.application.firmware_commands import (
+    FIRMWARE_CLOSED_LOOP_TRAVEL_MARGIN_MM,
+    FIRMWARE_MAX_CLOSED_LOOP_AMPLITUDE_MM,
     FirmwareCommand,
     FirmwareCommandFailure,
     FirmwareCommandService,
@@ -21,7 +23,9 @@ from pendulum_workbench.domain.angle_prediction import (
     AngleSource,
 )
 from pendulum_workbench.domain.experiment_run import (
+    AutoResonanceDefinition,
     ExperimentMode,
+    ExperimentDefinition,
     ExperimentRunSnapshot,
     ExperimentRunState,
     VerticalSineDefinition,
@@ -65,7 +69,7 @@ class ExperimentRunService(QObject):
         self._snapshot = ExperimentRunSnapshot()
         self._phase = ""
         self._experiment_id: str | None = None
-        self._definition: VerticalSineDefinition | None = None
+        self._definition: ExperimentDefinition | None = None
         self._stop_requested = False
         self._pending_final_state = ExperimentRunState.INTERRUPTED
         self._pending_completion_reason = ""
@@ -115,7 +119,7 @@ class ExperimentRunService(QObject):
     def setup_locked(self) -> bool:
         return self.is_active
 
-    def start(self, definition: VerticalSineDefinition) -> str:
+    def start(self, definition: ExperimentDefinition) -> str:
         if self.is_active:
             raise RuntimeError("An experiment run is already active")
         self.validate_start(definition)
@@ -171,7 +175,7 @@ class ExperimentRunService(QObject):
         self._set_snapshot(experiment_id=experiment_id)
         return experiment_id
 
-    def validate_start(self, definition: VerticalSineDefinition) -> None:
+    def validate_start(self, definition: ExperimentDefinition) -> None:
         definition.validate()
         self._validate_start_conditions(definition)
 
@@ -196,7 +200,7 @@ class ExperimentRunService(QObject):
         elif self._phase == "running":
             self._issue_sine_stop()
 
-    def _validate_start_conditions(self, definition: VerticalSineDefinition) -> None:
+    def _validate_start_conditions(self, definition: ExperimentDefinition) -> None:
         snapshot = self.state.snapshot
         maintenance = self.maintenance.snapshot
         if snapshot.data_source != DataSourceMode.REAL:
@@ -228,18 +232,34 @@ class ExperimentRunService(QObject):
             raise RuntimeError("Wait for the active maintenance command to finish")
         if maintenance.latch_state != PendulumLatchState.HOLD:
             raise RuntimeError("Command Pendulum Latch HOLD and wait for confirmation before RUN")
-        if definition.frequency_hz > FIRMWARE_MAX_SINE_FREQUENCY_HZ:
-            raise ValueError(
-                f"Frequency exceeds the current firmware command limit of "
-                f"{FIRMWARE_MAX_SINE_FREQUENCY_HZ:g} Hz"
-            )
-
         span_steps = snapshot.hardware_status.travel_span_steps
         steps_per_mm = snapshot.hardware_status.steps_per_mm
         if span_steps is None or steps_per_mm is None or steps_per_mm <= 0.0:
             raise RuntimeError("Homed travel is not available to validate pivot amplitude")
-        if definition.amplitude_mm * 2.0 * steps_per_mm >= span_steps:
-            raise ValueError("Pivot amplitude must remain strictly within the homed travel")
+        if isinstance(definition, VerticalSineDefinition):
+            if definition.frequency_hz > FIRMWARE_MAX_SINE_FREQUENCY_HZ:
+                raise ValueError(
+                    f"Frequency exceeds the current firmware command limit of "
+                    f"{FIRMWARE_MAX_SINE_FREQUENCY_HZ:g} Hz"
+                )
+            if definition.amplitude_mm * 2.0 * steps_per_mm >= span_steps:
+                raise ValueError("Pivot amplitude must remain strictly within the homed travel")
+        elif isinstance(definition, AutoResonanceDefinition):
+            if definition.amplitude_mm > FIRMWARE_MAX_CLOSED_LOOP_AMPLITUDE_MM:
+                raise ValueError(
+                    "Pivot amplitude exceeds the existing firmware closed-loop limit of "
+                    f"{FIRMWARE_MAX_CLOSED_LOOP_AMPLITUDE_MM:g} mm"
+                )
+            available_half_travel_mm = (
+                span_steps / (2.0 * steps_per_mm)
+                - FIRMWARE_CLOSED_LOOP_TRAVEL_MARGIN_MM
+            )
+            if definition.amplitude_mm > available_half_travel_mm:
+                raise ValueError(
+                    "Pivot amplitude exceeds homed travel after the existing closed-loop margin"
+                )
+        else:
+            raise TypeError(f"Unsupported experiment definition: {type(definition).__name__}")
         self._current_valid_angle()
 
     def _current_valid_angle(self) -> float:
@@ -334,9 +354,19 @@ class ExperimentRunService(QObject):
 
     def _issue_sine_start(self) -> None:
         definition = self._require_definition()
-        self._phase = "sine_start"
         try:
-            self.commands.start_vertical_sine(definition.amplitude_mm, definition.frequency_hz)
+            if isinstance(definition, AutoResonanceDefinition):
+                self._phase = "autores_start"
+                self.commands.start_parametric_closed_loop(
+                    definition.amplitude_mm,
+                    definition.phase_deg,
+                )
+            else:
+                self._phase = "sine_start"
+                self.commands.start_vertical_sine(
+                    definition.amplitude_mm,
+                    definition.frequency_hz,
+                )
         except (RuntimeError, ValueError, OSError) as error:
             self._issue_sine_stop_after_uncertain_start(f"sine_start_failed: {error}")
 
@@ -357,8 +387,25 @@ class ExperimentRunService(QObject):
                 self._issue_sine_start()
             return
 
-        if self._phase == "sine_start" and command == FirmwareCommand.SINE_START:
-            if response.fields.get("active") != "1":
+        start_command = (
+            self._phase == "sine_start" and command == FirmwareCommand.SINE_START
+        ) or (
+            self._phase == "autores_start"
+            and command == FirmwareCommand.AUTO_RESONANCE_START
+        )
+        if start_command:
+            expected_mode = (
+                "parametric_closed_loop"
+                if command == FirmwareCommand.AUTO_RESONANCE_START
+                else None
+            )
+            if (
+                response.fields.get("active") != "1"
+                or (
+                    expected_mode is not None
+                    and response.fields.get("active_mode") != expected_mode
+                )
+            ):
                 self._issue_sine_stop_after_uncertain_start("sine_start_unconfirmed")
             elif self._stop_requested:
                 self._sine_started_monotonic = time.monotonic()
@@ -375,8 +422,18 @@ class ExperimentRunService(QObject):
                 self.state.set_motion(MotionState.RUNNING)
             return
 
-        if self._phase == "sine_stop" and command == FirmwareCommand.SINE_STOP:
-            if response.fields.get("active") != "0":
+        stop_command = self._phase == "sine_stop" and command in (
+            FirmwareCommand.SINE_STOP,
+            FirmwareCommand.AUTO_RESONANCE_STOP,
+        )
+        if stop_command:
+            if (
+                response.fields.get("active") != "0"
+                or (
+                    command == FirmwareCommand.AUTO_RESONANCE_STOP
+                    and response.fields.get("active_mode") != "idle"
+                )
+            ):
                 self._pending_final_state = ExperimentRunState.FAULT
                 self._pending_completion_reason = "sine_stop_unconfirmed"
             self._set_motion_after_sine_stop()
@@ -398,9 +455,15 @@ class ExperimentRunService(QObject):
                 ExperimentRunState.FAULT,
                 f"latch_open_failed: {failure.message}",
             )
-        elif self._phase == "sine_start" and failure.command == FirmwareCommand.SINE_START:
+        elif self._phase in ("sine_start", "autores_start") and failure.command in (
+            FirmwareCommand.SINE_START,
+            FirmwareCommand.AUTO_RESONANCE_START,
+        ):
             self._issue_sine_stop_after_uncertain_start(f"sine_start_failed: {failure.message}")
-        elif self._phase == "sine_stop" and failure.command == FirmwareCommand.SINE_STOP:
+        elif self._phase == "sine_stop" and failure.command in (
+            FirmwareCommand.SINE_STOP,
+            FirmwareCommand.AUTO_RESONANCE_STOP,
+        ):
             self._pending_final_state = ExperimentRunState.FAULT
             self._pending_completion_reason = f"sine_stop_failed: {failure.message}"
             self._begin_recording_finalization(
@@ -427,7 +490,10 @@ class ExperimentRunService(QObject):
             return
         self._phase = "sine_stop"
         try:
-            self.commands.stop_vertical_sine()
+            if isinstance(self._require_definition(), AutoResonanceDefinition):
+                self.commands.stop_parametric_closed_loop()
+            else:
+                self.commands.stop_vertical_sine()
         except (RuntimeError, ValueError, OSError) as error:
             self._pending_final_state = ExperimentRunState.FAULT
             self._pending_completion_reason = f"sine_stop_failed: {error}"
@@ -637,7 +703,7 @@ class ExperimentRunService(QObject):
             self._set_snapshot(state=ExperimentRunState.STOPPING, error_message=message)
             self._issue_sine_stop()
             return
-        if self._phase == "sine_start":
+        if self._phase in ("sine_start", "autores_start"):
             self._stop_requested = True
             self._pending_final_state = ExperimentRunState.FAULT
             self._pending_completion_reason = f"recording_failed: {message}"
@@ -704,7 +770,7 @@ class ExperimentRunService(QObject):
             self._stop_requested_monotonic = time.monotonic()
             self._set_snapshot(state=ExperimentRunState.STOPPING, completion_reason=reason)
             self._issue_sine_stop()
-        elif self._phase in ("metadata_before_open", "latch_open", "sine_start"):
+        elif self._phase in ("metadata_before_open", "latch_open", "sine_start", "autores_start"):
             self._set_snapshot(state=ExperimentRunState.STOPPING, completion_reason=reason)
         elif self._phase == "recording_start":
             self._set_snapshot(state=ExperimentRunState.STOPPING, completion_reason=reason)
@@ -749,7 +815,7 @@ class ExperimentRunService(QObject):
             recording_state=recording_state or self.state.snapshot.recording.value,
         )
 
-    def _require_definition(self) -> VerticalSineDefinition:
+    def _require_definition(self) -> ExperimentDefinition:
         if self._definition is None:
             raise RuntimeError("No vertical sine definition is active")
         return self._definition

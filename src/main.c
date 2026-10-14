@@ -249,7 +249,12 @@ static float g_parametricTestQuadAgcLogGain = 0.0f;
 static float g_parametricTestRateLimitedRad = 0.0f;
 static uint32_t g_parametricTestSampleCount = 0U;
 static volatile uint8_t g_parametricClosedLoopRunning = 0U;
+static volatile uint8_t g_parametricClosedLoopExperimentMode = 0U;
 static volatile int32_t g_parametricClosedLoopTargetSteps = 0;
+static float g_parametricClosedLoopAmplitudeMm = 0.0f;
+static float g_parametricClosedLoopPhaseDeg = 0.0f;
+static float g_parametricClosedLoopPhaseCos = PARAMETRIC_TEST_PHASE_COS;
+static float g_parametricClosedLoopPhaseSin = PARAMETRIC_TEST_PHASE_SIN;
 static volatile uint8_t g_closedLoopActuatorPhase = 0U;
 static volatile uint8_t g_closedLoopFault = 0U;
 static volatile uint8_t g_closedLoopFaultPending = 0U;
@@ -998,6 +1003,7 @@ static void ClosedLoopActuatorStop(void)
 static void ClosedLoopActuatorFault(uint8_t fault)
 {
     g_parametricClosedLoopRunning = 0U;
+    g_parametricClosedLoopExperimentMode = 0U;
     g_closedLoopFault = fault;
     g_closedLoopFaultPending = 1U;
     TIM6->CR1 &= ~TIM_CR1_CEN;
@@ -1843,7 +1849,7 @@ static void UpdateParametricTest(void)
 
     if (elapsedMs < PARAMETRIC_TEST_PERIOD_MS)
     {
-        return;
+       combined = quadSat * PARAMETRIC_TEST_PHASE_COS + directSat * PARAMETRIC_TEST_PHASE_SIN;
     }
     g_parametricTestLastSampleMs = now;
 
@@ -1879,7 +1885,7 @@ static void UpdateParametricTest(void)
                 ((directAgc < -PARAMETRIC_TEST_SATURATION) ? -PARAMETRIC_TEST_SATURATION : directAgc);
     quadSat = (quadAgc > PARAMETRIC_TEST_SATURATION) ? PARAMETRIC_TEST_SATURATION :
               ((quadAgc < -PARAMETRIC_TEST_SATURATION) ? -PARAMETRIC_TEST_SATURATION : quadAgc);
-    combined = quadSat * PARAMETRIC_TEST_PHASE_COS + directSat * PARAMETRIC_TEST_PHASE_SIN;
+    combined = quadSat * g_parametricClosedLoopPhaseCos + directSat * g_parametricClosedLoopPhaseSin;
 
     // The Simulink 10 us Transport Delay is intentionally omitted because it is
     // only 0.2% of the 5 ms controller sample and a discrete delay would add 5 ms.
@@ -1952,7 +1958,9 @@ static void UpdateParametricClosedLoop(void)
 
     if ((int32_t)(now - g_parametricClosedLoopNextSampleMs) < 0)
     {
-        return;
+        // User phase is relative to the 2x quadrature basis; phase=0 selects quadrature only.
+        combined = quadSat * g_parametricClosedLoopPhaseCos +
+                   directSat * g_parametricClosedLoopPhaseSin;
     }
 
     // The validated discrete filter coefficients and +/-0.1 rad rate limit
@@ -2003,7 +2011,9 @@ static void UpdateParametricClosedLoop(void)
                 ((directAgc < -PARAMETRIC_TEST_SATURATION) ? -PARAMETRIC_TEST_SATURATION : directAgc);
     quadSat = (quadAgc > PARAMETRIC_TEST_SATURATION) ? PARAMETRIC_TEST_SATURATION :
               ((quadAgc < -PARAMETRIC_TEST_SATURATION) ? -PARAMETRIC_TEST_SATURATION : quadAgc);
-    combined = quadSat * PARAMETRIC_TEST_PHASE_COS + directSat * PARAMETRIC_TEST_PHASE_SIN;
+    // User phase is relative to the 2x quadrature basis; phase=0 selects quadrature only.
+    combined = quadSat * g_parametricClosedLoopPhaseCos +
+               directSat * g_parametricClosedLoopPhaseSin;
     outputSat = (combined > PARAMETRIC_TEST_OUTPUT_SATURATION) ? PARAMETRIC_TEST_OUTPUT_SATURATION :
                 ((combined < -PARAMETRIC_TEST_OUTPUT_SATURATION) ? -PARAMETRIC_TEST_OUTPUT_SATURATION : combined);
     masterOut = PARAMETRIC_TEST_MASTER_GAIN * outputSat;
@@ -2019,8 +2029,17 @@ static void UpdateParametricClosedLoop(void)
     }
     g_parametricClosedLoopRateLimitedRad += rateDelta;
 
-    // Original Simscape-equivalent rack command from the 10 mm pinion radius.
-    zSimscapeMm = PARAMETRIC_TEST_PINION_RADIUS_MM * g_parametricClosedLoopRateLimitedRad;
+    if (g_parametricClosedLoopExperimentMode != 0U)
+    {
+        // The normalized controller output scales the requested amplitude before hard safety limits.
+        zSimscapeMm = g_parametricClosedLoopAmplitudeMm *
+                      (g_parametricClosedLoopRateLimitedRad / PARAMETRIC_TEST_MASTER_GAIN);
+    }
+    else
+    {
+        // Preserve the legacy console mode's original pinion-radius mapping.
+        zSimscapeMm = PARAMETRIC_TEST_PINION_RADIUS_MM * g_parametricClosedLoopRateLimitedRad;
+    }
     // Experimental physical-command polarity: +1 original, -1 180-degree inversion.
     zMotorTargetMm = CLOSED_LOOP_COMMAND_SIGN * zSimscapeMm;
     // Stage-4 physical command is intentionally restricted to +/-7.5 mm.
@@ -2213,6 +2232,7 @@ static void PrintHelp(void)
     UartPrint("  home            - find both limits and move to midpoint\r\n");
     UartPrint("  sine <amp_mm> <hz> - start sinusoidal pivot motion after homing\r\n");
     UartPrint("  sine stop       - stop sine motion\r\n");
+    UartPrint("  maint <id> autores_start <amp_mm> <phase_deg> | autores_stop - correlated parametric closed-loop control\r\n");
     UartPrint("  maint <id> sine_start <amp_mm> <hz> | sine_stop - correlated sine motion control\r\n");
     UartPrint("  parametric <amp_mm> <phi_deg> - drive pivot at 2x pendulum phase rate\r\n");
     UartPrint("  parametric stop - stop parametric drive\r\n");
@@ -2695,6 +2715,143 @@ static uint8_t ProcessMaintenanceCommand(char *arguments)
         return 1U;
     }
 
+    if (strncmp(end, "autores_start ", 14U) == 0)
+    {
+        char *amplitudeEnd;
+        char *phaseEnd;
+        char *arguments = end + 14U;
+        float amplitudeMm = strtof(arguments, &amplitudeEnd);
+        float phaseDeg;
+        float availableHalfTravelMm;
+        const char *error = NULL;
+
+        if (amplitudeEnd == arguments || (*amplitudeEnd != ' ' && *amplitudeEnd != '\t'))
+        {
+            error = "invalid_parameters";
+        }
+        else
+        {
+            while (*amplitudeEnd == ' ' || *amplitudeEnd == '\t')
+            {
+                amplitudeEnd++;
+            }
+            phaseDeg = strtof(amplitudeEnd, &phaseEnd);
+            if (phaseEnd == amplitudeEnd)
+            {
+                error = "invalid_parameters";
+            }
+            else
+            {
+                while (*phaseEnd == ' ' || *phaseEnd == '\t')
+                {
+                    phaseEnd++;
+                }
+                if (*phaseEnd != '\0')
+                {
+                    error = "invalid_parameters";
+                }
+            }
+        }
+
+        if (error == NULL && (!isfinite(amplitudeMm) || !isfinite(phaseDeg)))
+        {
+            error = "invalid_parameters";
+        }
+        else if (error == NULL && amplitudeMm <= 0.0f)
+        {
+            error = "invalid_amplitude";
+        }
+        else if (error == NULL && g_homed == 0U)
+        {
+            error = "home_required";
+        }
+        else if (error == NULL && g_servoLatchCommandedState != SERVO_LATCH_STATE_OPEN)
+        {
+            error = "latch_not_open";
+        }
+        else if (error == NULL && g_closedLoopFault != 0U)
+        {
+            error = "blocking_fault";
+        }
+        else if (error == NULL && (g_homingActive != 0U || g_manualMotionDirection != 0U ||
+                                   g_run != 0U || g_sineRunning != 0U ||
+                                   g_parametricRunning != 0U || g_parametricTestRunning != 0U ||
+                                   g_parametricClosedLoopRunning != 0U))
+        {
+            error = "motion_active";
+        }
+        else if (error == NULL && amplitudeMm > CLOSED_LOOP_MAX_MM)
+        {
+            error = "amplitude_out_of_range";
+        }
+        else if (error == NULL && g_stepsPerMm <= 0.0f)
+        {
+            error = "travel_unavailable";
+        }
+        else if (error == NULL)
+        {
+            availableHalfTravelMm = ((float)g_travelSteps / (2.0f * g_stepsPerMm)) -
+                                    CLOSED_LOOP_TRAVEL_MARGIN_MM;
+            if (availableHalfTravelMm <= 0.0f || amplitudeMm > availableHalfTravelMm)
+            {
+                error = "amplitude_out_of_travel";
+            }
+        }
+
+        if (error != NULL)
+        {
+            snprintf(msg, sizeof(msg),
+                     "maintenance: id=%lu type=autores_start ok=0 active=0 active_mode=%s error=%s\r\n",
+                     requestId,
+                     ActiveModeName(),
+                     error);
+        }
+        else
+        {
+            uint32_t now = HAL_GetTick();
+            ClosedLoopActuatorStop();
+            g_parametricClosedLoopAmplitudeMm = amplitudeMm;
+            g_parametricClosedLoopPhaseDeg = phaseDeg;
+            g_parametricClosedLoopPhaseCos = cosf(phaseDeg * (PI_F / 180.0f));
+            g_parametricClosedLoopPhaseSin = sinf(phaseDeg * (PI_F / 180.0f));
+            g_parametricClosedLoopExperimentMode = 1U;
+            g_parametricClosedLoopFilterValid = 0U;
+            g_parametricClosedLoopDcEstimate = 0.0f;
+            g_parametricClosedLoopPrevDcBlocked = 0.0f;
+            g_parametricClosedLoopQuadFiltered = 0.0f;
+            g_parametricClosedLoopDirectAgcLogGain = 0.0f;
+            g_parametricClosedLoopQuadAgcLogGain = 0.0f;
+            g_parametricClosedLoopRateLimitedRad = 0.0f;
+            g_parametricClosedLoopSampleCount = 0U;
+            g_parametricClosedLoopAngleFailureCount = 0U;
+            g_parametricClosedLoopStartMs = now;
+            g_parametricClosedLoopNextSampleMs = now + PARAMETRIC_TEST_PERIOD_MS;
+            g_parametricClosedLoopTargetSteps = g_positionSteps;
+            g_closedLoopFaultPending = 0U;
+            g_parametricClosedLoopRunning = 1U;
+            snprintf(msg, sizeof(msg),
+                     "maintenance: id=%lu type=autores_start ok=1 active=1 active_mode=parametric_closed_loop amplitude_mm=%.6f phase_deg=%.6f\r\n",
+                     requestId,
+                     (double)g_parametricClosedLoopAmplitudeMm,
+                     (double)g_parametricClosedLoopPhaseDeg);
+        }
+        UartPrint(msg);
+        return 1U;
+    }
+
+    if (strcmp(end, "autores_stop") == 0)
+    {
+        g_parametricClosedLoopRunning = 0U;
+        g_parametricClosedLoopExperimentMode = 0U;
+        ClosedLoopActuatorStop();
+        snprintf(msg, sizeof(msg),
+                 "maintenance: id=%lu type=autores_stop ok=1 active=0 active_mode=%s\r\n",
+                 requestId,
+                 ActiveModeName());
+        UartPrint(msg);
+        return 1U;
+    }
+
     if (strcmp(end, "manual_up") == 0 || strcmp(end, "manual_down") == 0)
     {
         uint8_t direction = (strcmp(end, "manual_up") == 0) ? 1U : 2U;
@@ -3137,6 +3294,9 @@ static void ProcessLine(char *line)
             g_parametricClosedLoopDirectAgcLogGain = 0.0f;
             g_parametricClosedLoopQuadAgcLogGain = 0.0f;
             g_parametricClosedLoopRateLimitedRad = 0.0f;
+            g_parametricClosedLoopExperimentMode = 0U;
+            g_parametricClosedLoopPhaseCos = PARAMETRIC_TEST_PHASE_COS;
+            g_parametricClosedLoopPhaseSin = PARAMETRIC_TEST_PHASE_SIN;
             g_parametricClosedLoopSampleCount = 0U;
             g_parametricClosedLoopAngleFailureCount = 0U;
             g_parametricClosedLoopStartMs = now;

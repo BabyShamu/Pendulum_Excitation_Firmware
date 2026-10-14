@@ -10,6 +10,10 @@ from pendulum_workbench.infrastructure.firmware_protocol import MaintenanceRespo
 from pendulum_workbench.infrastructure.serial_client import SerialTelemetryClient
 
 
+FIRMWARE_MAX_CLOSED_LOOP_AMPLITUDE_MM = 7.5
+FIRMWARE_CLOSED_LOOP_TRAVEL_MARGIN_MM = 2.0
+
+
 class FirmwareCommand(str, Enum):
     STATUS = "status"
     SWITCHES = "switches"
@@ -24,6 +28,8 @@ class FirmwareCommand(str, Enum):
     LATCH_STATUS = "latch_status"
     SINE_START = "sine_start"
     SINE_STOP = "sine_stop"
+    AUTO_RESONANCE_START = "autores_start"
+    AUTO_RESONANCE_STOP = "autores_stop"
 
 
 @dataclass(frozen=True, slots=True)
@@ -41,6 +47,7 @@ class FirmwareCommandService(QObject):
     _HOME_TIMEOUT_MS = 65000
     _MANUAL_COMMAND_TIMEOUT_MS = 500
     _SINE_STOP_TIMEOUT_MS = 75000
+    _AUTO_RESONANCE_STOP_TIMEOUT_MS = 75000
 
     def __init__(
         self,
@@ -119,6 +126,25 @@ class FirmwareCommandService(QObject):
         return self._request(
             FirmwareCommand.SINE_STOP,
             timeout_ms=self._SINE_STOP_TIMEOUT_MS,
+        )
+
+    def start_parametric_closed_loop(self, amplitude_mm: float, phase_deg: float) -> int:
+        if not math.isfinite(amplitude_mm) or amplitude_mm <= 0.0:
+            raise ValueError("pivot amplitude must be finite and greater than zero")
+        if not math.isfinite(phase_deg):
+            raise ValueError("phase must be finite")
+        if amplitude_mm > FIRMWARE_MAX_CLOSED_LOOP_AMPLITUDE_MM:
+            raise ValueError(
+                "pivot amplitude exceeds the existing firmware closed-loop bound of "
+                f"{FIRMWARE_MAX_CLOSED_LOOP_AMPLITUDE_MM:g} mm"
+            )
+        arguments = f"{amplitude_mm:.9g} {phase_deg:.9g}"
+        return self._request(FirmwareCommand.AUTO_RESONANCE_START, arguments=arguments)
+
+    def stop_parametric_closed_loop(self) -> int:
+        return self._request(
+            FirmwareCommand.AUTO_RESONANCE_STOP,
+            timeout_ms=self._AUTO_RESONANCE_STOP_TIMEOUT_MS,
         )
 
     def _request(

@@ -30,7 +30,13 @@ from pendulum_workbench.domain.models import (
     MotionState,
     RecordingState,
 )
-from pendulum_workbench.domain.experiment_run import ExperimentRunState, VerticalSineDefinition
+from pendulum_workbench.domain.experiment_run import (
+    AutoResonanceDefinition,
+    ExperimentDefinition,
+    ExperimentMode,
+    ExperimentRunState,
+    VerticalSineDefinition,
+)
 from pendulum_workbench.domain.maintenance import PendulumLatchState
 from pendulum_workbench.experiments.repository import LoadedExperiment
 
@@ -43,6 +49,9 @@ class ExperimentPage(QWidget):
         self._recording_name = ""
         self._recording_notes = ""
         self._experiment_directory: Path | None = None
+        self._active_experiment_mode = ExperimentMode.VERTICAL_SINUSOIDAL_EXCITATION
+        self._vertical_amplitude_text = ""
+        self._vertical_frequency_text = ""
 
         outer_layout = QVBoxLayout(self)
         outer_layout.setContentsMargins(0, 0, 0, 0)
@@ -99,6 +108,7 @@ class ExperimentPage(QWidget):
         mode_label.setObjectName("sectionTitle")
         self.experiment_mode_selector = QComboBox()
         self.experiment_mode_selector.addItem("Vertical Sinusoidal Excitation")
+        self.experiment_mode_selector.addItem("Auto-Resonance / Parametric Closed Loop")
         self.experiment_mode_selector.setMinimumHeight(38)
         mode_row.addWidget(mode_label)
         mode_row.addWidget(self.experiment_mode_selector, 1)
@@ -113,12 +123,23 @@ class ExperimentPage(QWidget):
         self.amplitude_input.setObjectName("experimentAmplitudeInput")
         self.amplitude_input.setPlaceholderText("Required")
         self.amplitude_input.setMinimumHeight(38)
-        frequency_label = QLabel("EXCITATION FREQUENCY [Hz]")
-        frequency_label.setObjectName("sectionTitle")
+        self.frequency_label = QLabel("EXCITATION FREQUENCY [Hz]")
+        self.frequency_label.setObjectName("sectionTitle")
         self.frequency_input = QLineEdit()
         self.frequency_input.setObjectName("experimentFrequencyInput")
         self.frequency_input.setPlaceholderText("Required")
         self.frequency_input.setMinimumHeight(38)
+        self.phase_label = QLabel("PHASE [deg]")
+        self.phase_label.setObjectName("sectionTitle")
+        self.phase_input = QLineEdit()
+        self.phase_input.setObjectName("experimentPhaseInput")
+        self.phase_input.setPlaceholderText("Required")
+        self.phase_input.setMinimumHeight(38)
+        self.phase_input.setToolTip(
+            "Phase offset in degrees; 0 deg selects the quadrature component before firmware polarity inversion."
+        )
+        self.phase_label.hide()
+        self.phase_input.hide()
         duration_label = QLabel("DURATION [s]")
         duration_label.setObjectName("sectionTitle")
         self.duration_input = QLineEdit()
@@ -127,8 +148,10 @@ class ExperimentPage(QWidget):
         self.duration_input.setMinimumHeight(38)
         fields.addWidget(amplitude_label, 0, 0)
         fields.addWidget(self.amplitude_input, 1, 0)
-        fields.addWidget(frequency_label, 0, 1)
+        fields.addWidget(self.frequency_label, 0, 1)
         fields.addWidget(self.frequency_input, 1, 1)
+        fields.addWidget(self.phase_label, 0, 1)
+        fields.addWidget(self.phase_input, 1, 1)
         fields.addWidget(duration_label, 0, 2)
         fields.addWidget(self.duration_input, 1, 2)
 
@@ -313,7 +336,9 @@ class ExperimentPage(QWidget):
         self.amplitude_input.textChanged.connect(self._update_setup_validity)
         self.frequency_input.textChanged.connect(self._update_setup_validity)
         self.duration_input.textChanged.connect(self._update_setup_validity)
+        self.phase_input.textChanged.connect(self._update_setup_validity)
         self.experiment_name_input.textChanged.connect(self._update_name_preview)
+        self.experiment_mode_selector.currentIndexChanged.connect(self._on_experiment_mode_changed)
         self.controller.experiment_loaded.connect(self._show_saved_experiment)
         self.controller.maintenance.snapshot_changed.connect(self._update_readiness)
         self._update_snapshot(self.controller.state.snapshot)
@@ -401,7 +426,23 @@ class ExperimentPage(QWidget):
         self.current_experiment_path.setText(message)
         self.current_experiment_path.setToolTip(message)
 
-    def _definition_from_fields(self) -> VerticalSineDefinition:
+    def _definition_from_fields(self) -> ExperimentDefinition:
+        if self.experiment_mode_selector.currentIndex() == 1:
+            try:
+                amplitude = float(self.amplitude_input.text().strip())
+                phase = float(self.phase_input.text().strip())
+                duration = float(self.duration_input.text().strip())
+            except ValueError as error:
+                raise ValueError("Enter numeric amplitude, phase, and duration values") from error
+            definition = AutoResonanceDefinition(
+                amplitude,
+                phase,
+                duration,
+                label=self.experiment_name_input.text(),
+                notes=self.experiment_notes_input.text(),
+            )
+            definition.validate()
+            return definition
         try:
             amplitude = float(self.amplitude_input.text().strip())
             frequency = float(self.frequency_input.text().strip())
@@ -417,6 +458,29 @@ class ExperimentPage(QWidget):
         )
         definition.validate()
         return definition
+
+    def _on_experiment_mode_changed(self, index: int) -> None:
+        if self._active_experiment_mode == ExperimentMode.VERTICAL_SINUSOIDAL_EXCITATION:
+            self._vertical_amplitude_text = self.amplitude_input.text()
+            self._vertical_frequency_text = self.frequency_input.text()
+
+        if index == 1:
+            self._active_experiment_mode = ExperimentMode.AUTO_RESONANCE_PARAMETRIC_CLOSED_LOOP
+            self.amplitude_input.setText("10.0")
+            self.phase_input.setText("0.0")
+            self.frequency_label.hide()
+            self.frequency_input.hide()
+            self.phase_label.show()
+            self.phase_input.show()
+        else:
+            self._active_experiment_mode = ExperimentMode.VERTICAL_SINUSOIDAL_EXCITATION
+            self.amplitude_input.setText(self._vertical_amplitude_text)
+            self.frequency_input.setText(self._vertical_frequency_text)
+            self.phase_label.hide()
+            self.phase_input.hide()
+            self.frequency_label.show()
+            self.frequency_input.show()
+        self._update_setup_validity()
 
     def _on_primary_run_button(self) -> None:
         run_state = self.run_service.snapshot.state
@@ -502,6 +566,7 @@ class ExperimentPage(QWidget):
             self.experiment_mode_selector,
             self.amplitude_input,
             self.frequency_input,
+            self.phase_input,
             self.duration_input,
             self.experiment_name_input,
             self.experiment_notes_input,

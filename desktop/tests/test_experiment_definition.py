@@ -1,6 +1,7 @@
 import unittest
 
 from pendulum_workbench.domain.experiment_run import (
+    AutoResonanceDefinition,
     ExperimentMode,
     ExperimentRunState,
     VerticalSineDefinition,
@@ -68,6 +69,45 @@ class VerticalSineDefinitionTests(unittest.TestCase):
         self.assertEqual(manifest["optional_label"], "Trial")
         self.assertEqual(manifest["notes"], "note")
         self.assertNotIn("target_initial_angle_deg", manifest)
+
+
+class AutoResonanceDefinitionTests(unittest.TestCase):
+    def test_mode_defaults_and_manifest_preserve_user_phase_and_amplitude(self) -> None:
+        definition = AutoResonanceDefinition(6.0, -12.5, 20.0, label="Trial", notes="note")
+
+        definition.validate()
+        self.assertEqual(definition.mode, ExperimentMode.AUTO_RESONANCE_PARAMETRIC_CLOSED_LOOP)
+        self.assertEqual(
+            definition.final_name(18.2),
+            "Trial_AR_A6mm_Phim12.5deg_Thetap18.2deg_T20s",
+        )
+        manifest = definition.manifest_values(measured_initial_angle_deg=18.2)
+        self.assertEqual(manifest["experiment_mode"], "AUTO_RESONANCE_PARAMETRIC_CLOSED_LOOP")
+        self.assertEqual(manifest["commanded_amplitude_mm"], 6.0)
+        self.assertEqual(manifest["commanded_phase_deg"], -12.5)
+        self.assertEqual(manifest["requested_duration_s"], 20.0)
+        self.assertEqual(manifest["optional_label"], "Trial")
+        self.assertEqual(manifest["notes"], "note")
+
+    def test_rejects_nonpositive_amplitude_duration_and_nonfinite_phase(self) -> None:
+        for values in (
+            (0.0, 0.0, 20.0),
+            (-1.0, 0.0, 20.0),
+            (5.0, 0.0, 0.0),
+            (5.0, float("nan"), 20.0),
+            (5.0, float("inf"), 20.0),
+        ):
+            with self.subTest(values=values), self.assertRaises(ValueError):
+                AutoResonanceDefinition(*values).validate()
+
+    def test_rejects_cross_mode_definition_override(self) -> None:
+        with self.assertRaisesRegex(ValueError, "requires Auto-Resonance"):
+            AutoResonanceDefinition(
+                6.0,
+                0.0,
+                20.0,
+                mode=ExperimentMode.VERTICAL_SINUSOIDAL_EXCITATION,
+            ).validate()
 
 
 if __name__ == "__main__":

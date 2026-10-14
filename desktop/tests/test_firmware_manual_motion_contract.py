@@ -390,6 +390,107 @@ class FirmwareManualMotionContractTests(unittest.TestCase):
         self.assertIn("StepOne(speedHz, 1U, 1U) == 0U", sine_update)
         self.assertIn("event: type=sine_motion_stopped reason=limit", sine_update)
 
+    def test_autores_start_stop_apply_user_values_without_weakening_existing_limits(self) -> None:
+        maintenance = function_body("ProcessMaintenanceCommand")
+        start = maintenance.split('if (strncmp(end, "autores_start ", 14U) == 0)', 1)[1].split(
+            'if (strcmp(end, "autores_stop") == 0)', 1
+        )[0]
+        for required_guard in (
+            "!isfinite(amplitudeMm)",
+            "!isfinite(phaseDeg)",
+            "amplitudeMm <= 0.0f",
+            "g_homed == 0U",
+            "g_servoLatchCommandedState != SERVO_LATCH_STATE_OPEN",
+            "g_closedLoopFault != 0U",
+            "g_homingActive != 0U",
+            "g_manualMotionDirection != 0U",
+            "g_sineRunning != 0U",
+            "g_parametricRunning != 0U",
+            "g_parametricTestRunning != 0U",
+            "g_parametricClosedLoopRunning != 0U",
+            "amplitudeMm > CLOSED_LOOP_MAX_MM",
+            "CLOSED_LOOP_TRAVEL_MARGIN_MM",
+        ):
+            self.assertIn(required_guard, start)
+        self.assertNotIn("g_recording != 0U", start)
+        self.assertNotIn("g_closedLoopFault = 0U", start)
+        for field in (
+            "phaseDeg * (PI_F / 180.0f)",
+            "type=autores_start ok=1 active=1 active_mode=parametric_closed_loop",
+            "amplitude_mm=%.6f phase_deg=%.6f",
+        ):
+            self.assertIn(field, start)
+
+        update = function_body("UpdateParametricClosedLoop")
+        self.assertIn("phase=0 selects quadrature only", update)
+        self.assertIn("quadSat * g_parametricClosedLoopPhaseCos", update)
+        self.assertIn("directSat * g_parametricClosedLoopPhaseSin", update)
+        self.assertIn("g_parametricClosedLoopAmplitudeMm *", update)
+        self.assertIn("g_parametricClosedLoopRateLimitedRad / PARAMETRIC_TEST_MASTER_GAIN", update)
+        self.assertLess(update.index("zSimscapeMm = g_parametricClosedLoopAmplitudeMm"),
+                        update.index("zMotorTargetMm = CLOSED_LOOP_COMMAND_SIGN"))
+        self.assertIn("zMotorTargetMm > CLOSED_LOOP_MAX_MM", update)
+        self.assertIn("CLOSED_LOOP_MAX_STEP_HZ", function_body("ClosedLoopActuatorOnTimer"))
+
+        legacy_start = function_body("ProcessLine").split(
+            'if (strncmp(line, "parametric_closed_loop", 22) == 0', 1
+        )[1].split('if (strncmp(line, "scale ", 6) == 0', 1)[0]
+        self.assertIn("g_parametricClosedLoopExperimentMode = 0U", legacy_start)
+        self.assertIn("g_parametricClosedLoopPhaseCos = PARAMETRIC_TEST_PHASE_COS", legacy_start)
+        self.assertIn("g_parametricClosedLoopPhaseSin = PARAMETRIC_TEST_PHASE_SIN", legacy_start)
+        self.assertIn("PARAMETRIC_TEST_PHASE_COS", function_body("UpdateParametricTest"))
+        self.assertIn("PARAMETRIC_TEST_PHASE_SIN", function_body("UpdateParametricTest"))
+
+        stop = maintenance.split('if (strcmp(end, "autores_stop") == 0)', 1)[1].split(
+            'if (strcmp(end, "manual_up") == 0', 1
+        )[0]
+        self.assertIn("g_parametricClosedLoopRunning = 0U", stop)
+        self.assertIn("ClosedLoopActuatorStop()", stop)
+        self.assertIn("type=autores_stop ok=1 active=0 active_mode=%s", stop)
+
+    def test_correlated_autoresonance_commands_apply_phase_amplitude_and_keep_hard_bounds(self) -> None:
+        maintenance = function_body("ProcessMaintenanceCommand")
+        autores_start = maintenance.split('if (strncmp(end, "autores_start ", 14U) == 0)', 1)[1].split(
+            'if (strcmp(end, "autores_stop") == 0)', 1
+        )[0]
+        for required_check in (
+            "isfinite(amplitudeMm)",
+            "isfinite(phaseDeg)",
+            "amplitudeMm <= 0.0f",
+            "g_homed == 0U",
+            "g_servoLatchCommandedState != SERVO_LATCH_STATE_OPEN",
+            "g_closedLoopFault != 0U",
+            "g_homingActive != 0U",
+            "g_manualMotionDirection != 0U",
+            "g_parametricClosedLoopRunning != 0U",
+            "amplitudeMm > CLOSED_LOOP_MAX_MM",
+            "CLOSED_LOOP_TRAVEL_MARGIN_MM",
+            "phaseDeg * (PI_F / 180.0f)",
+            "active_mode=parametric_closed_loop",
+            "amplitude_mm=%.6f phase_deg=%.6f",
+        ):
+            self.assertIn(required_check, autores_start)
+        self.assertNotIn("g_recording != 0U", autores_start)
+        self.assertRegex(FIRMWARE_SOURCE, r"#define CLOSED_LOOP_MAX_MM\s+7\.5f")
+        self.assertRegex(FIRMWARE_SOURCE, r"#define CLOSED_LOOP_TRAVEL_MARGIN_MM\s+2\.0f")
+        self.assertRegex(FIRMWARE_SOURCE, r"#define CLOSED_LOOP_MAX_STEP_HZ\s+6000U")
+
+        closed_loop = function_body("UpdateParametricClosedLoop")
+        self.assertIn("g_parametricClosedLoopPhaseCos", closed_loop)
+        self.assertIn("g_parametricClosedLoopPhaseSin", closed_loop)
+        self.assertIn("g_parametricClosedLoopAmplitudeMm", closed_loop)
+        self.assertIn("g_parametricClosedLoopRateLimitedRad / PARAMETRIC_TEST_MASTER_GAIN", closed_loop)
+        self.assertIn("CLOSED_LOOP_MAX_MM", closed_loop)
+        self.assertIn("CLOSED_LOOP_TRAVEL_MARGIN_MM", closed_loop)
+
+        autores_stop = maintenance.split('if (strcmp(end, "autores_stop") == 0)', 1)[1].split(
+            'if (strcmp(end, "manual_up") == 0', 1
+        )[0]
+        self.assertIn("g_parametricClosedLoopRunning = 0U", autores_stop)
+        self.assertIn("ClosedLoopActuatorStop()", autores_stop)
+        self.assertIn("type=autores_stop ok=1 active=0 active_mode=%s", autores_stop)
+        self.assertIn('strncmp(line, "parametric_closed_loop", 22)', function_body("ProcessLine"))
+
 
 if __name__ == "__main__":
     unittest.main()
