@@ -173,6 +173,14 @@ class ExperimentPage(QWidget):
         fields.addWidget(self.phase_input, 1, 1)
         fields.addWidget(duration_label, 0, 2)
         fields.addWidget(self.duration_input, 1, 2)
+        target_label = QLabel("TARGET ANGLE [deg]")
+        target_label.setObjectName("sectionTitle")
+        self.target_angle_input = QLineEdit("90")
+        self.target_angle_input.setObjectName("experimentTargetAngleInput")
+        self.target_angle_input.setToolTip("Stop when the absolute measured pendulum angle reaches this value. Firmware safety limits remain active.")
+        self.target_angle_input.setMinimumHeight(38)
+        fields.addWidget(target_label, 0, 3)
+        fields.addWidget(self.target_angle_input, 1, 3)
 
         name_group = QVBoxLayout()
         name_label = QLabel("OPTIONAL EXPERIMENT LABEL")
@@ -355,6 +363,7 @@ class ExperimentPage(QWidget):
         self.amplitude_input.textChanged.connect(self._update_setup_validity)
         self.frequency_input.textChanged.connect(self._update_setup_validity)
         self.duration_input.textChanged.connect(self._update_setup_validity)
+        self.target_angle_input.textChanged.connect(self._update_setup_validity)
         self.phase_input.textChanged.connect(self._update_setup_validity)
         self.experiment_name_input.textChanged.connect(self._update_name_preview)
         self.experiment_mode_selector.currentIndexChanged.connect(self._on_experiment_mode_changed)
@@ -460,6 +469,10 @@ class ExperimentPage(QWidget):
         self.current_experiment_path.setToolTip(message)
 
     def _definition_from_fields(self) -> ExperimentDefinition:
+        try:
+            target_angle = float(self.target_angle_input.text().strip())
+        except ValueError as error:
+            raise ValueError("Enter a numeric target angle") from error
         if self.experiment_mode_selector.currentIndex() in (1, 2):
             try:
                 amplitude = float(self.amplitude_input.text().strip())
@@ -478,6 +491,7 @@ class ExperimentPage(QWidget):
                 duration,
                 label=self.experiment_name_input.text(),
                 notes=self.experiment_notes_input.text(),
+                target_angle_deg=target_angle,
             )
             definition.validate()
             return definition
@@ -493,6 +507,7 @@ class ExperimentPage(QWidget):
             duration,
             label=self.experiment_name_input.text(),
             notes=self.experiment_notes_input.text(),
+            target_angle_deg=target_angle,
         )
         definition.validate()
         return definition
@@ -611,6 +626,7 @@ class ExperimentPage(QWidget):
             self.frequency_input,
             self.phase_input,
             self.duration_input,
+            self.target_angle_input,
             self.experiment_name_input,
             self.experiment_notes_input,
             self.choose_storage_button,
