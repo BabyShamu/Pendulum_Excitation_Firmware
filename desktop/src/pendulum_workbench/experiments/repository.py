@@ -84,12 +84,23 @@ class ExperimentRepository:
             "AUTO_RESONANCE_PARAMETRIC": "AutoResonance",
             "PHASE_TRACKED_SINE_AUTO_RESONANCE": "PhaseTracked",
         }.get(mode, mode)
-        duration = details.get("requested_duration_s")
-        duration_token = (
-            f"{float(duration):g}s" if isinstance(duration, (int, float)) else "UnknownDuration"
-        )
         local_created_at = created_at.astimezone()
-        label = f"{local_created_at:%Y-%m-%d_%H-%M-%S}_{mode}_{duration_token}"
+        mode_short = {
+            "Sinusoidal": "VS",
+            "AutoResonance": "AR",
+            "PhaseTracked": "PT",
+        }.get(mode, mode)
+        tokens = [f"{local_created_at:%Y-%m-%d_%H-%M-%S}", mode_short]
+        amplitude = details.get("commanded_amplitude_mm")
+        frequency = details.get("commanded_frequency_hz")
+        phase = details.get("commanded_phase_deg")
+        if isinstance(amplitude, (int, float)):
+            tokens.append(f"A{amplitude:g}mm")
+        if isinstance(frequency, (int, float)):
+            tokens.append(f"F{frequency:g}Hz")
+        if isinstance(phase, (int, float)):
+            tokens.append(f"P{phase:g}deg")
+        label = "_".join(tokens)
         label = re.sub(r"[^A-Za-z0-9._-]", "_", label)
         directory = self.root / label
         suffix = 2
