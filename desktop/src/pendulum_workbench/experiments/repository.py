@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
+from zoneinfo import ZoneInfo
 from typing import Any
 from uuid import uuid4
 
@@ -78,6 +79,7 @@ class ExperimentRepository:
             )
         experiment_id = experiment_id or str(uuid4())
         created_at = (created_at or datetime.now(timezone.utc)).astimezone(timezone.utc)
+        display_created_at = created_at.astimezone(ZoneInfo("Asia/Jerusalem"))
         details = experiment_metadata or {}
         mode = str(details.get("experiment_mode") or "Recording")
         mode = {
@@ -130,8 +132,8 @@ class ExperimentRepository:
             "telemetry_schema_version": TELEMETRY_SCHEMA_VERSION,
             "experiment_id": experiment_id,
             "name": name.strip() or experiment_id,
-            "created_at": created_at.isoformat(),
-            "started_at": created_at.isoformat(),
+            "created_at": display_created_at.isoformat(),
+            "started_at": display_created_at.isoformat(),
             "ended_at": None,
             "completion_status": "RECORDING",
             "interruption_reason": None,
@@ -207,7 +209,7 @@ class ExperimentRepository:
         manifest = dict(session.manifest)
         manifest.update(
             completion_status=completion_status,
-            ended_at=(ended_at or datetime.now(timezone.utc)).astimezone(timezone.utc).isoformat(),
+            ended_at=(ended_at or datetime.now(timezone.utc)).astimezone(ZoneInfo("Asia/Jerusalem")).isoformat(),
             interruption_reason=interruption_reason,
             sample_count=sample_count,
             raw_line_count=raw_line_count,
