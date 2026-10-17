@@ -1,5 +1,6 @@
 import csv
 import json
+import math
 import os
 import re
 from dataclasses import dataclass
@@ -211,6 +212,27 @@ class ExperimentRepository:
             sample_count=sample_count,
             raw_line_count=raw_line_count,
         )
+        # Compute the peak from the recorded samples, including samples received
+        # after excitation stopped but before the recorder was finalized.
+        peak_angle = None
+        peak_time = None
+        with (session.directory / "telemetry.csv").open(
+            "r", encoding="utf-8", newline=""
+        ) as telemetry_file:
+            for row in csv.DictReader(telemetry_file):
+                try:
+                    angle = float(row["angle_deg"])
+                    sample_time = float(row["time_s"])
+                except (KeyError, TypeError, ValueError):
+                    continue
+                if not (math.isfinite(angle) and math.isfinite(sample_time)):
+                    continue
+                if peak_angle is None or abs(angle) > abs(peak_angle):
+                    peak_angle = angle
+                    peak_time = sample_time
+        manifest["peak_absolute_angle_deg"] = abs(peak_angle) if peak_angle is not None else None
+        manifest["peak_signed_angle_deg"] = peak_angle
+        manifest["peak_angle_time_s"] = peak_time
         self.write_manifest(session.directory, manifest)
         write_simscape_input(session.directory, manifest)
         return manifest
