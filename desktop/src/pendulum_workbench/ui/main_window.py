@@ -1,3 +1,5 @@
+from pathlib import Path
+
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QAction, QColor
 from PySide6.QtWidgets import (
@@ -5,6 +7,7 @@ from PySide6.QtWidgets import (
     QFrame,
     QGraphicsDropShadowEffect,
     QHBoxLayout,
+    QDialog,
     QLabel,
     QMainWindow,
     QMessageBox,
@@ -344,21 +347,39 @@ class MainWindow(QMainWindow):
         self._update_source_badge(self.controller.state.snapshot)
 
     def _show_about(self) -> None:
-        dialog = QMessageBox(self)
+        dialog = QDialog(self)
         dialog.setWindowTitle("About Pendulum Workbench")
-        dialog.setIcon(QMessageBox.Icon.Information)
-        dialog.setText("Pendulum Workbench")
-        dialog.setInformativeText(
-            "Live instrumentation and reproducible experiment recording."
-        )
-        # Native QMessageBox dialogs can inherit a dark Windows palette while
-        # retaining the application's dark foreground, making text invisible.
+        dialog.setMinimumWidth(480)
         dialog.setStyleSheet(
-            "QMessageBox { background-color: #f7f9f7; color: #24363a; }"
-            "QMessageBox QLabel { background: transparent; color: #24363a; }"
-            "QMessageBox QPushButton { background: #f4f7f5; color: #28463b;"
-            " border: 1px solid #cbd8d0; padding: 6px 16px; }"
+            "QDialog { background: #f7f9f7; color: #24363a; }"
+            "QLabel { color: #24363a; background: transparent; }"
         )
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(24, 20, 24, 20)
+        layout.setSpacing(12)
+        image_path = Path(__file__).resolve().parents[1] / "assets" / "pendulum_cad.png"
+        if image_path.is_file():
+            from PySide6.QtGui import QPixmap
+            image_label = QLabel()
+            image_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            image_label.setPixmap(
+                QPixmap(str(image_path)).scaled(
+                    300, 330,
+                    Qt.AspectRatioMode.KeepAspectRatio,
+                    Qt.TransformationMode.SmoothTransformation,
+                )
+            )
+            layout.addWidget(image_label)
+        heading = QLabel("Pendulum Workbench")
+        heading.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        heading.setStyleSheet("font-size: 20px; font-weight: 700;")
+        layout.addWidget(heading)
+        description = QLabel("Experimental Control & Data Acquisition")
+        description.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(description)
+        ok_button = QPushButton("OK")
+        ok_button.clicked.connect(dialog.accept)
+        layout.addWidget(ok_button, alignment=Qt.AlignmentFlag.AlignRight)
         dialog.exec()
 
     def closeEvent(self, event) -> None:
