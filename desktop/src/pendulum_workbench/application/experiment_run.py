@@ -394,6 +394,7 @@ class ExperimentRunService(QObject):
                 self.commands.start_parametric(
                     definition.amplitude_mm,
                     definition.phase_deg,
+                    definition.target_angle_deg,
                 )
             elif isinstance(definition, PhaseTrackedSineDefinition):
                 self._phase = "phase_sine_start"
@@ -837,6 +838,14 @@ class ExperimentRunService(QObject):
 
     def _on_device_event(self, event) -> None:
         if not self.is_active:
+            return
+        if event.name == "experiment_target_reached":
+            if self._phase == "running" and self._snapshot.state == ExperimentRunState.RUNNING:
+                self._pending_final_state = ExperimentRunState.COMPLETE
+                self._pending_completion_reason = "TARGET_REACHED"
+                self._stop_requested_monotonic = time.monotonic()
+                self._set_snapshot(state=ExperimentRunState.STOPPING, completion_reason="TARGET_REACHED")
+                self._issue_sine_stop()
             return
         if event.name == "sine_motion_stopped":
             self._handle_safety_interruption(
