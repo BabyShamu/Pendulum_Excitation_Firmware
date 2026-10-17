@@ -68,6 +68,7 @@ class MaintenanceService(QObject):
         self._operation_fault = False
         self._homing_failure_latched = False
         self._sensor_failure_latched = False
+        self._latch_sync_needed = True
         self._current_angle_deg: float | None = None
         self._travel_span_steps: int | None = None
         self._position_steps: int | None = None
@@ -365,6 +366,8 @@ class MaintenanceService(QObject):
             # Defer until the status command has fully completed.
             if self._bit_state == BitResultState.NOT_RUN:
                 QTimer.singleShot(0, self._auto_check_after_connect)
+            elif self._latch_sync_needed:
+                QTimer.singleShot(0, self._sync_latch_after_check)
             return
         if command == FirmwareCommand.MANUAL_STOP:
             self._finish_manual_stop(
@@ -736,6 +739,8 @@ class MaintenanceService(QObject):
         severity = EventSeverity.INFO if passed else EventSeverity.ERROR
         self.state.report_event(severity, self._operation_message)
         self._emit_snapshot()
+        if self._latch_sync_needed:
+            QTimer.singleShot(0, self._sync_latch_after_check)
 
     def _fail_homing(self, message: str) -> None:
         message = self._user_facing_error(message)
@@ -1048,6 +1053,23 @@ class MaintenanceService(QObject):
                 f"Automatic post-connection system check skipped: {error}",
             )
 
+    def _sync_latch_after_check(self) -> None:
+        # Query only: never command HOLD or OPEN on connection.
+        if (
+            not self._latch_sync_needed
+            or self.state.snapshot.connection != ConnectionState.CONNECTED
+            or self.is_busy
+        ):
+            return
+        self._latch_sync_needed = False
+        try:
+            self.request_latch_status()
+        except (RuntimeError, ValueError, OSError) as error:
+            self.state.report_event(
+                EventSeverity.WARNING,
+                f"Could not read latch state after connection: {error}",
+            )
+
     def _request_status_sync(self) -> None:
         if self.state.snapshot.connection != ConnectionState.CONNECTED:
             return
@@ -1088,6 +1110,7 @@ class MaintenanceService(QObject):
         self._operation_fault = False
         self._homing_failure_latched = False
         self._sensor_failure_latched = False
+        self._latch_sync_needed = True
         self._travel_span_steps = None
         self._position_steps = None
         self._steps_per_mm = None
