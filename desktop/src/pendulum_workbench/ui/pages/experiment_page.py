@@ -127,7 +127,6 @@ class ExperimentPage(QWidget):
         self.experiment_mode_selector = QComboBox()
         self.experiment_mode_selector.addItem("Vertical Sinusoidal Excitation")
         self.experiment_mode_selector.addItem("Auto-Resonance")
-        self.experiment_mode_selector.addItem("Phase-Tracked Sinusoidal Auto-Resonance")
         self.experiment_mode_selector.setMinimumHeight(38)
         mode_row.addWidget(mode_label)
         mode_row.addWidget(self.experiment_mode_selector, 1)
@@ -473,19 +472,14 @@ class ExperimentPage(QWidget):
             target_angle = float(self.target_angle_input.text().strip())
         except ValueError as error:
             raise ValueError("Enter a numeric target angle") from error
-        if self.experiment_mode_selector.currentIndex() in (1, 2):
+        if self.experiment_mode_selector.currentIndex() == 1:
             try:
                 amplitude = float(self.amplitude_input.text().strip())
                 phase = float(self.phase_input.text().strip())
                 duration = float(self.duration_input.text().strip())
             except ValueError as error:
                 raise ValueError("Enter numeric amplitude, phase, and duration values") from error
-            definition_type = (
-                AutoResonanceDefinition
-                if self.experiment_mode_selector.currentIndex() == 1
-                else PhaseTrackedSineDefinition
-            )
-            definition = definition_type(
+            definition = AutoResonanceDefinition(
                 amplitude,
                 phase,
                 duration,
@@ -517,15 +511,10 @@ class ExperimentPage(QWidget):
             self._vertical_amplitude_text = self.amplitude_input.text()
             self._vertical_frequency_text = self.frequency_input.text()
 
-        if index in (1, 2):
-            if index == 1:
-                self._active_experiment_mode = ExperimentMode.AUTO_RESONANCE_PARAMETRIC
-                self.amplitude_input.setText("7.5")
-                self.phase_input.setText("22.5")
-            else:
-                self._active_experiment_mode = ExperimentMode.PHASE_TRACKED_SINE_AUTO_RESONANCE
-                self.amplitude_input.setText("10.0")
-                self.phase_input.setText("0.0")
+        if index == 1:
+            self._active_experiment_mode = ExperimentMode.AUTO_RESONANCE_PARAMETRIC
+            self.amplitude_input.setText("7.5")
+            self.phase_input.setText("22.5")
             self.frequency_label.hide()
             self.frequency_input.hide()
             self.phase_label.show()
