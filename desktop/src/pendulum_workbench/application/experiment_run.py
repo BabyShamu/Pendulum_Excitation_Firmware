@@ -686,6 +686,28 @@ class ExperimentRunService(QObject):
         )
 
     def _on_telemetry_sample(self, sample) -> None:
+        # A target is reached only by a valid, measured angle while actively running.
+        # Never reinterpret a firmware safety fault as a successful target event.
+        if (
+            self._phase == "running"
+            and self._snapshot.state == ExperimentRunState.RUNNING
+            and self._definition is not None
+            and sample.source == "real"
+            and sample.angle_deg is not None
+            and math.isfinite(sample.angle_deg)
+            and abs(sample.angle_deg) >= self._definition.target_angle_deg
+        ):
+            hardware = self.state.snapshot.hardware_status
+            if not (hardware.fault_known and hardware.fault):
+                self._pending_final_state = ExperimentRunState.COMPLETE
+                self._pending_completion_reason = "TARGET_REACHED"
+                self._stop_requested_monotonic = time.monotonic()
+                self._set_snapshot(
+                    state=ExperimentRunState.STOPPING,
+                    completion_reason="TARGET_REACHED",
+                )
+                self._issue_sine_stop()
+                return
         if (
             self._phase not in ("metadata_before_open", "latch_open", "sine_start", "running")
             or self._angle_predictor is None
