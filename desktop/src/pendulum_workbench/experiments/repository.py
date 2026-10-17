@@ -1,6 +1,7 @@
 import csv
 import json
 import os
+import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from importlib.metadata import PackageNotFoundError, version
@@ -75,7 +76,25 @@ class ExperimentRepository:
                 f"got {type(data_source).__name__}"
             )
         experiment_id = experiment_id or str(uuid4())
-        directory = self.root / experiment_id
+        created_at = (created_at or datetime.now(timezone.utc)).astimezone(timezone.utc)
+        details = experiment_metadata or {}
+        mode = str(details.get("experiment_mode") or "Recording")
+        mode = {
+            "VERTICAL_SINUSOIDAL_EXCITATION": "Sinusoidal",
+            "AUTO_RESONANCE_PARAMETRIC": "AutoResonance",
+            "PHASE_TRACKED_SINE_AUTO_RESONANCE": "PhaseTracked",
+        }.get(mode, mode)
+        duration = details.get("requested_duration_s")
+        duration_token = (
+            f"{float(duration):g}s" if isinstance(duration, (int, float)) else "UnknownDuration"
+        )
+        label = f"{created_at:%Y-%m-%d_%H-%M-%S}_{mode}_{duration_token}"
+        label = re.sub(r"[^A-Za-z0-9._-]", "_", label)
+        directory = self.root / label
+        suffix = 2
+        while directory.exists():
+            directory = self.root / f"{label}_{suffix}"
+            suffix += 1
         directory.mkdir(parents=True, exist_ok=False)
         (directory / "derived").mkdir()
         (directory / "serial_capture.log").open("x", encoding="utf-8").close()
