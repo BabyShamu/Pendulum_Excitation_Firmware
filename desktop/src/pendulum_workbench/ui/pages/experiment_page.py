@@ -1,3 +1,4 @@
+from collections import deque
 from pathlib import Path
 
 from PySide6.QtCore import QSettings, QUrl, Qt
@@ -29,6 +30,7 @@ from pendulum_workbench.domain.models import (
     EventSeverity,
     MotionState,
     RecordingState,
+    TelemetrySample,
 )
 from pendulum_workbench.domain.experiment_run import (
     AutoResonanceDefinition,
@@ -40,6 +42,7 @@ from pendulum_workbench.domain.experiment_run import (
 )
 from pendulum_workbench.domain.maintenance import PendulumLatchState
 from pendulum_workbench.experiments.repository import LoadedExperiment
+from pendulum_workbench.ui.trend_plot import TrendPlot
 
 
 class ExperimentPage(QWidget):
@@ -53,6 +56,9 @@ class ExperimentPage(QWidget):
         self._active_experiment_mode = ExperimentMode.VERTICAL_SINUSOIDAL_EXCITATION
         self._vertical_amplitude_text = ""
         self._vertical_frequency_text = ""
+        self._plot_samples: deque[TelemetrySample] = deque(maxlen=180)
+        self._plot_source: DataSourceMode | None = None
+        self._plot_connection: ConnectionState | None = None
 
         outer_layout = QVBoxLayout(self)
         outer_layout.setContentsMargins(0, 0, 0, 0)
@@ -264,6 +270,20 @@ class ExperimentPage(QWidget):
         run_status_layout.addWidget(self.run_error_value)
         layout.addWidget(run_status_panel)
 
+        charts = QFrame()
+        charts.setObjectName("surface")
+        self._apply_card_depth(charts)
+        charts_layout = QVBoxLayout(charts)
+        charts_layout.setContentsMargins(12, 8, 12, 8)
+        charts_layout.setSpacing(2)
+        self.angle_plot = TrendPlot("Pendulum angle", "deg", "#277a68")
+        self.position_plot = TrendPlot("Pivot position", "mm", "#d36b42")
+        self.angle_plot.setMinimumHeight(220)
+        self.position_plot.setMinimumHeight(220)
+        charts_layout.addWidget(self.angle_plot)
+        charts_layout.addWidget(self.position_plot)
+        layout.addWidget(charts)
+
         saved_panel = QFrame()
         self.run_record_panel = saved_panel
         saved_panel.setObjectName("surface")
@@ -351,6 +371,8 @@ class ExperimentPage(QWidget):
         layout.addWidget(saved_panel)
         layout.addStretch(1)
 
+        self.controller.state.telemetry_received.connect(self._append_plot_sample)
+        self.controller.experiment_loaded.connect(self._show_plot_experiment)
         self.controller.state.snapshot_changed.connect(self._update_snapshot)
         recorder = self.controller.experiment_recorder
         recorder.recording_requested.connect(self._on_recording_requested)
@@ -441,6 +463,29 @@ class ExperimentPage(QWidget):
             f"Experiment {experiment_id}; raw capture: {Path(directory) / 'serial_capture.log'}"
         )
         self.current_experiment_path.setToolTip(directory)
+
+    def _append_plot_sample(self, sample: TelemetrySample) -> None:
+        if sample.angle_deg is None or sample.position_mm is None:
+            return
+        self._plot_samples.append(sample)
+        self.angle_plot.set_samples(
+            [(item.elapsed_s, item.angle_deg) for item in self._plot_samples]
+        )
+        self.position_plot.set_samples(
+            [(item.elapsed_s, item.position_mm) for item in self._plot_samples]
+        )
+
+    def _show_plot_experiment(self, experiment: LoadedExperiment) -> None:
+        self._plot_samples.clear()
+        self._plot_samples.extend(experiment.telemetry[-self._plot_samples.maxlen:])
+        self.angle_plot.set_samples(
+            [(sample.elapsed_s, sample.angle_deg) for sample in self._plot_samples
+             if sample.angle_deg is not None]
+        )
+        self.position_plot.set_samples(
+            [(sample.elapsed_s, sample.position_mm) for sample in self._plot_samples
+             if sample.position_mm is not None]
+        )
 
     def _on_recording_finished(self, experiment_id: str, status: str) -> None:
         self.run_recording_state_value.setText(f"Recording: {status.title()}")
@@ -702,6 +747,16 @@ class ExperimentPage(QWidget):
         )
 
     def _update_snapshot(self, snapshot: ApplicationSnapshot) -> None:
+        new_session = (
+            snapshot.connection == ConnectionState.CONNECTING
+            and self._plot_connection != ConnectionState.CONNECTING
+        )
+        if snapshot.data_source != self._plot_source or new_session:
+            self._plot_samples.clear()
+            self.angle_plot.set_samples([])
+            self.position_plot.set_samples([])
+        self._plot_source = snapshot.data_source
+        self._plot_connection = snapshot.connection
         self._update_setup_validity()
         if snapshot.recording == RecordingState.ERROR:
             return
