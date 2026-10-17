@@ -840,6 +840,14 @@ class ExperimentRunService(QObject):
         if not self.is_active:
             return
         if event.name == "experiment_target_reached":
+            # Firmware can report the target after a telemetry sample has already
+            # initiated the desktop stop. Do not issue a duplicate stop request.
+            self.state.report_event(
+                EventSeverity.INFO,
+                "STM32 confirmed target angle reached"
+                + (f" at {event.fields['angle_deg']} deg" if event.fields.get("angle_deg") else "")
+                + ".",
+            )
             if self._phase == "running" and self._snapshot.state == ExperimentRunState.RUNNING:
                 self._pending_final_state = ExperimentRunState.COMPLETE
                 self._pending_completion_reason = "TARGET_REACHED"
