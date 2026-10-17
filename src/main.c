@@ -525,7 +525,7 @@ int main(void)
             if (g_closedLoopFault == 0U)
             {
                 snprintf(targetMessage, sizeof(targetMessage),
-                         "event: type=experiment_target_reached angle_deg=%.2f\\r\\n",
+                         "event: type=experiment_target_reached angle_deg=%.2f\r\n",
                          (double)g_experimentTargetReachedAngleDeg);
                 UartPrint(targetMessage);
             }
