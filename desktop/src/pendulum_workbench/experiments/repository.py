@@ -88,7 +88,8 @@ class ExperimentRepository:
         duration_token = (
             f"{float(duration):g}s" if isinstance(duration, (int, float)) else "UnknownDuration"
         )
-        label = f"{created_at:%Y-%m-%d_%H-%M-%S}_{mode}_{duration_token}"
+        local_created_at = created_at.astimezone()
+        label = f"{local_created_at:%Y-%m-%d_%H-%M-%S}_{mode}_{duration_token}"
         label = re.sub(r"[^A-Za-z0-9._-]", "_", label)
         directory = self.root / label
         suffix = 2
