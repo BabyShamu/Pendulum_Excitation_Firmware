@@ -74,12 +74,12 @@ class MainWindow(QMainWindow):
             QPushButton#manualMoveButton { min-height: 72px; font-size: 14px; font-weight: 700; background: #edf3ef; }
             QPushButton#manualMoveButton[manualActive="true"] { background: #277a68; color: #ffffff; border-color: #205f49; }
             QLabel#manualMotionState { color: #50615d; font-size: 13px; font-weight: 700; }
-            QMenuBar { background: transparent; color: #344a41; }
+            QMenuBar { background: #f3f6f4; color: #24363a; border-bottom: 1px solid #d8e1dc; }
             QMenuBar::item { background: transparent; padding: 5px 9px; border-radius: 5px; }
-            QMenuBar::item:selected { background: #dfe9e3; }
-            QMenu { background: #ffffff; border: 1px solid #d6e0da; border-radius: 7px; padding: 4px; }
+            QMenuBar::item:selected { background: #dfe9e3; color: #203238; }
+            QMenu { background: #ffffff; color: #24363a; border: 1px solid #d6e0da; border-radius: 7px; padding: 4px; }
             QMenu::item { padding: 6px 28px 6px 24px; border-radius: 4px; }
-            QMenu::item:selected { background: #edf3ef; }
+            QMenu::item:selected { background: #edf3ef; color: #203238; }
             QListWidget { background: #ffffff; border: 0; }
             """
         )
