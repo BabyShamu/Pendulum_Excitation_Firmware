@@ -361,6 +361,10 @@ class MaintenanceService(QObject):
             self._status_sync_pending = False
             self._apply_status_fields(response.fields)
             self._emit_snapshot()
+            # Run the read-only maintenance checks once after a fresh connection.
+            # Defer until the status command has fully completed.
+            if self._bit_state == BitResultState.NOT_RUN:
+                QTimer.singleShot(0, self._auto_check_after_connect)
             return
         if command == FirmwareCommand.MANUAL_STOP:
             self._finish_manual_stop(
@@ -1018,6 +1022,22 @@ class MaintenanceService(QObject):
         self._emit_snapshot()
         if connection_changed and snapshot.connection == ConnectionState.CONNECTED:
             self._request_status_sync()
+
+    def _auto_check_after_connect(self) -> None:
+        if (
+            self.state.snapshot.connection != ConnectionState.CONNECTED
+            or self.state.snapshot.data_source != DataSourceMode.REAL
+            or self._bit_state != BitResultState.NOT_RUN
+            or self.is_busy
+        ):
+            return
+        try:
+            self.run_system_check()
+        except (RuntimeError, ValueError, OSError) as error:
+            self.state.report_event(
+                EventSeverity.WARNING,
+                f"Automatic post-connection system check skipped: {error}",
+            )
 
     def _request_status_sync(self) -> None:
         if self.state.snapshot.connection != ConnectionState.CONNECTED:
