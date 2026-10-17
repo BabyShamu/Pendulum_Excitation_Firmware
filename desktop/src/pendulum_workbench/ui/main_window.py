@@ -344,12 +344,22 @@ class MainWindow(QMainWindow):
         self._update_source_badge(self.controller.state.snapshot)
 
     def _show_about(self) -> None:
-        QMessageBox.about(
-            self,
-            "About Pendulum Workbench",
-            "Pendulum Workbench\n\n"
-            "Live instrumentation and reproducible experiment recording.",
+        dialog = QMessageBox(self)
+        dialog.setWindowTitle("About Pendulum Workbench")
+        dialog.setIcon(QMessageBox.Icon.Information)
+        dialog.setText("Pendulum Workbench")
+        dialog.setInformativeText(
+            "Live instrumentation and reproducible experiment recording."
         )
+        # Native QMessageBox dialogs can inherit a dark Windows palette while
+        # retaining the application's dark foreground, making text invisible.
+        dialog.setStyleSheet(
+            "QMessageBox { background-color: #f7f9f7; color: #24363a; }"
+            "QMessageBox QLabel { background: transparent; color: #24363a; }"
+            "QMessageBox QPushButton { background: #f4f7f5; color: #28463b;"
+            " border: 1px solid #cbd8d0; padding: 6px 16px; }"
+        )
+        dialog.exec()
 
     def closeEvent(self, event) -> None:
         if self.controller.maintenance.is_manual_motion_active:
