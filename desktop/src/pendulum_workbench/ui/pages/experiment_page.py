@@ -1,6 +1,7 @@
+from collections import deque
 from pathlib import Path
 
-from PySide6.QtCore import QUrl, Qt
+from PySide6.QtCore import QSettings, QUrl, Qt
 from PySide6.QtGui import QColor, QDesktopServices
 from PySide6.QtWidgets import (
     QComboBox,
@@ -29,6 +30,7 @@ from pendulum_workbench.domain.models import (
     EventSeverity,
     MotionState,
     RecordingState,
+    TelemetrySample,
 )
 from pendulum_workbench.domain.experiment_run import (
     AutoResonanceDefinition,
@@ -40,6 +42,7 @@ from pendulum_workbench.domain.experiment_run import (
 )
 from pendulum_workbench.domain.maintenance import PendulumLatchState
 from pendulum_workbench.experiments.repository import LoadedExperiment
+from pendulum_workbench.ui.trend_plot import TrendPlot
 
 
 class ExperimentPage(QWidget):
@@ -53,6 +56,9 @@ class ExperimentPage(QWidget):
         self._active_experiment_mode = ExperimentMode.VERTICAL_SINUSOIDAL_EXCITATION
         self._vertical_amplitude_text = ""
         self._vertical_frequency_text = ""
+        self._plot_samples: deque[TelemetrySample] = deque(maxlen=180)
+        self._plot_source: DataSourceMode | None = None
+        self._plot_connection: ConnectionState | None = None
 
         outer_layout = QVBoxLayout(self)
         outer_layout.setContentsMargins(0, 0, 0, 0)
@@ -92,6 +98,23 @@ class ExperimentPage(QWidget):
         self.readiness_indicator.setObjectName("experimentReadinessIndicator")
         recording_layout.addWidget(self.readiness_indicator)
 
+        self.storage_settings = QSettings("PendulumWorkbench", "PendulumWorkbench")
+        self.storage_folder_label = QLabel()
+        self.storage_folder_label.setObjectName("experimentStorageFolder")
+        storage_row = QHBoxLayout()
+        storage_row.addWidget(self.storage_folder_label, 1)
+        self.choose_storage_button = QPushButton("CHOOSE EXPERIMENT FOLDER")
+        self.choose_storage_button.setObjectName("chooseExperimentStorageFolderButton")
+        self.choose_storage_button.clicked.connect(self._choose_storage_folder)
+        storage_row.addWidget(self.choose_storage_button)
+        recording_layout.addLayout(storage_row)
+        saved_root = self.storage_settings.value("experiment_storage_root", "", type=str)
+        if saved_root:
+            self.controller.experiment_recorder.repository.root = Path(saved_root)
+        self.storage_folder_label.setText(
+            str(self.controller.experiment_recorder.repository.root)
+        )
+
         latch_row = QHBoxLayout()
         self.latch_state_value = QLabel("Pendulum Latch: UNKNOWN")
         self.latch_state_value.setObjectName("experimentLatchState")
@@ -110,7 +133,6 @@ class ExperimentPage(QWidget):
         self.experiment_mode_selector = QComboBox()
         self.experiment_mode_selector.addItem("Vertical Sinusoidal Excitation")
         self.experiment_mode_selector.addItem("Auto-Resonance")
-        self.experiment_mode_selector.addItem("Phase-Tracked Sinusoidal Auto-Resonance")
         self.experiment_mode_selector.setMinimumHeight(38)
         mode_row.addWidget(mode_label)
         mode_row.addWidget(self.experiment_mode_selector, 1)
@@ -156,6 +178,14 @@ class ExperimentPage(QWidget):
         fields.addWidget(self.phase_input, 1, 1)
         fields.addWidget(duration_label, 0, 2)
         fields.addWidget(self.duration_input, 1, 2)
+        target_label = QLabel("TARGET ANGLE [deg]")
+        target_label.setObjectName("sectionTitle")
+        self.target_angle_input = QLineEdit("80")
+        self.target_angle_input.setObjectName("experimentTargetAngleInput")
+        self.target_angle_input.setToolTip("Stop at the measured target angle (maximum 80 degrees). Firmware safety limit remains 90 degrees.")
+        self.target_angle_input.setMinimumHeight(38)
+        fields.addWidget(target_label, 0, 3)
+        fields.addWidget(self.target_angle_input, 1, 3)
 
         name_group = QVBoxLayout()
         name_label = QLabel("OPTIONAL EXPERIMENT LABEL")
@@ -239,6 +269,20 @@ class ExperimentPage(QWidget):
         self.run_error_value.setWordWrap(True)
         run_status_layout.addWidget(self.run_error_value)
         layout.addWidget(run_status_panel)
+
+        charts = QFrame()
+        charts.setObjectName("surface")
+        self._apply_card_depth(charts)
+        charts_layout = QVBoxLayout(charts)
+        charts_layout.setContentsMargins(12, 8, 12, 8)
+        charts_layout.setSpacing(2)
+        self.angle_plot = TrendPlot("Pendulum angle", "deg", "#277a68")
+        self.position_plot = TrendPlot("Pivot position", "mm", "#d36b42")
+        self.angle_plot.setMinimumHeight(220)
+        self.position_plot.setMinimumHeight(220)
+        charts_layout.addWidget(self.angle_plot)
+        charts_layout.addWidget(self.position_plot)
+        layout.addWidget(charts)
 
         saved_panel = QFrame()
         self.run_record_panel = saved_panel
@@ -327,6 +371,8 @@ class ExperimentPage(QWidget):
         layout.addWidget(saved_panel)
         layout.addStretch(1)
 
+        self.controller.state.telemetry_received.connect(self._append_plot_sample)
+        self.controller.experiment_loaded.connect(self._show_plot_experiment)
         self.controller.state.snapshot_changed.connect(self._update_snapshot)
         recorder = self.controller.experiment_recorder
         recorder.recording_requested.connect(self._on_recording_requested)
@@ -338,6 +384,7 @@ class ExperimentPage(QWidget):
         self.amplitude_input.textChanged.connect(self._update_setup_validity)
         self.frequency_input.textChanged.connect(self._update_setup_validity)
         self.duration_input.textChanged.connect(self._update_setup_validity)
+        self.target_angle_input.textChanged.connect(self._update_setup_validity)
         self.phase_input.textChanged.connect(self._update_setup_validity)
         self.experiment_name_input.textChanged.connect(self._update_name_preview)
         self.experiment_mode_selector.currentIndexChanged.connect(self._on_experiment_mode_changed)
@@ -373,6 +420,18 @@ class ExperimentPage(QWidget):
             label.setObjectName(object_name)
         return label
 
+    def _choose_storage_folder(self) -> None:
+        selected = QFileDialog.getExistingDirectory(
+            self, "Choose experiment storage folder",
+            str(self.controller.experiment_recorder.repository.root),
+        )
+        if not selected:
+            return
+        root = Path(selected)
+        self.controller.experiment_recorder.repository.root = root
+        self.storage_settings.setValue("experiment_storage_root", str(root))
+        self.storage_folder_label.setText(str(root))
+
     def open_experiment_dialog(self) -> None:
         source, _ = QFileDialog.getOpenFileName(
             self,
@@ -398,11 +457,35 @@ class ExperimentPage(QWidget):
         self.run_recording_state_value.setText("Recording: Starting")
 
     def _on_recording_started(self, experiment_id: str, directory: str) -> None:
+        self._experiment_directory = Path(directory)
         self.run_recording_state_value.setText("Recording: Recording")
         self.current_experiment_path.setText(
             f"Experiment {experiment_id}; raw capture: {Path(directory) / 'serial_capture.log'}"
         )
         self.current_experiment_path.setToolTip(directory)
+
+    def _append_plot_sample(self, sample: TelemetrySample) -> None:
+        if sample.angle_deg is None or sample.position_mm is None:
+            return
+        self._plot_samples.append(sample)
+        self.angle_plot.set_samples(
+            [(item.elapsed_s, item.angle_deg) for item in self._plot_samples]
+        )
+        self.position_plot.set_samples(
+            [(item.elapsed_s, item.position_mm) for item in self._plot_samples]
+        )
+
+    def _show_plot_experiment(self, experiment: LoadedExperiment) -> None:
+        self._plot_samples.clear()
+        self._plot_samples.extend(experiment.telemetry[-self._plot_samples.maxlen:])
+        self.angle_plot.set_samples(
+            [(sample.elapsed_s, sample.angle_deg) for sample in self._plot_samples
+             if sample.angle_deg is not None]
+        )
+        self.position_plot.set_samples(
+            [(sample.elapsed_s, sample.position_mm) for sample in self._plot_samples
+             if sample.position_mm is not None]
+        )
 
     def _on_recording_finished(self, experiment_id: str, status: str) -> None:
         self.run_recording_state_value.setText(f"Recording: {status.title()}")
@@ -413,6 +496,7 @@ class ExperimentPage(QWidget):
                 f"Saved experiment metadata unavailable for {experiment_id}.",
             )
             return
+        self._experiment_directory = session.directory
         self._show_summary(
             experiment_id=session.experiment_id,
             directory=session.directory,
@@ -429,24 +513,24 @@ class ExperimentPage(QWidget):
         self.current_experiment_path.setToolTip(message)
 
     def _definition_from_fields(self) -> ExperimentDefinition:
-        if self.experiment_mode_selector.currentIndex() in (1, 2):
+        try:
+            target_angle = float(self.target_angle_input.text().strip())
+        except ValueError as error:
+            raise ValueError("Enter a numeric target angle") from error
+        if self.experiment_mode_selector.currentIndex() == 1:
             try:
                 amplitude = float(self.amplitude_input.text().strip())
                 phase = float(self.phase_input.text().strip())
                 duration = float(self.duration_input.text().strip())
             except ValueError as error:
                 raise ValueError("Enter numeric amplitude, phase, and duration values") from error
-            definition_type = (
-                AutoResonanceDefinition
-                if self.experiment_mode_selector.currentIndex() == 1
-                else PhaseTrackedSineDefinition
-            )
-            definition = definition_type(
+            definition = AutoResonanceDefinition(
                 amplitude,
                 phase,
                 duration,
                 label=self.experiment_name_input.text(),
                 notes=self.experiment_notes_input.text(),
+                target_angle_deg=target_angle,
             )
             definition.validate()
             return definition
@@ -462,6 +546,7 @@ class ExperimentPage(QWidget):
             duration,
             label=self.experiment_name_input.text(),
             notes=self.experiment_notes_input.text(),
+            target_angle_deg=target_angle,
         )
         definition.validate()
         return definition
@@ -471,15 +556,10 @@ class ExperimentPage(QWidget):
             self._vertical_amplitude_text = self.amplitude_input.text()
             self._vertical_frequency_text = self.frequency_input.text()
 
-        if index in (1, 2):
-            if index == 1:
-                self._active_experiment_mode = ExperimentMode.AUTO_RESONANCE_PARAMETRIC
-                self.amplitude_input.setText("7.5")
-                self.phase_input.setText("22.5")
-            else:
-                self._active_experiment_mode = ExperimentMode.PHASE_TRACKED_SINE_AUTO_RESONANCE
-                self.amplitude_input.setText("10.0")
-                self.phase_input.setText("0.0")
+        if index == 1:
+            self._active_experiment_mode = ExperimentMode.AUTO_RESONANCE_PARAMETRIC
+            self.amplitude_input.setText("7.5")
+            self.phase_input.setText("22.5")
             self.frequency_label.hide()
             self.frequency_input.hide()
             self.phase_label.show()
@@ -580,8 +660,10 @@ class ExperimentPage(QWidget):
             self.frequency_input,
             self.phase_input,
             self.duration_input,
+            self.target_angle_input,
             self.experiment_name_input,
             self.experiment_notes_input,
+            self.choose_storage_button,
         ):
             widget.setEnabled(not locked)
 
@@ -665,6 +747,16 @@ class ExperimentPage(QWidget):
         )
 
     def _update_snapshot(self, snapshot: ApplicationSnapshot) -> None:
+        new_session = (
+            snapshot.connection == ConnectionState.CONNECTING
+            and self._plot_connection != ConnectionState.CONNECTING
+        )
+        if snapshot.data_source != self._plot_source or new_session:
+            self._plot_samples.clear()
+            self.angle_plot.set_samples([])
+            self.position_plot.set_samples([])
+        self._plot_source = snapshot.data_source
+        self._plot_connection = snapshot.connection
         self._update_setup_validity()
         if snapshot.recording == RecordingState.ERROR:
             return
@@ -736,6 +828,7 @@ class ExperimentPage(QWidget):
         self.run_completion_reason_value.setText(
             str(experiment_metadata.get("completion_reason") or manifest.get("interruption_reason") or "-")
         )
+        self._experiment_directory = directory
         self.saved_experiment_summary.setVisible(True)
         self.open_recording_folder_button.setEnabled(directory.is_dir())
 

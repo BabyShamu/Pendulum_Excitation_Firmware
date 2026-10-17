@@ -1,3 +1,5 @@
+from pathlib import Path
+
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QAction, QColor
 from PySide6.QtWidgets import (
@@ -5,6 +7,7 @@ from PySide6.QtWidgets import (
     QFrame,
     QGraphicsDropShadowEffect,
     QHBoxLayout,
+    QDialog,
     QLabel,
     QMainWindow,
     QMessageBox,
@@ -74,12 +77,12 @@ class MainWindow(QMainWindow):
             QPushButton#manualMoveButton { min-height: 72px; font-size: 14px; font-weight: 700; background: #edf3ef; }
             QPushButton#manualMoveButton[manualActive="true"] { background: #277a68; color: #ffffff; border-color: #205f49; }
             QLabel#manualMotionState { color: #50615d; font-size: 13px; font-weight: 700; }
-            QMenuBar { background: transparent; color: #344a41; }
+            QMenuBar { background: #f3f6f4; color: #24363a; border-bottom: 1px solid #d8e1dc; }
             QMenuBar::item { background: transparent; padding: 5px 9px; border-radius: 5px; }
-            QMenuBar::item:selected { background: #dfe9e3; }
-            QMenu { background: #ffffff; border: 1px solid #d6e0da; border-radius: 7px; padding: 4px; }
+            QMenuBar::item:selected { background: #dfe9e3; color: #203238; }
+            QMenu { background: #ffffff; color: #24363a; border: 1px solid #d6e0da; border-radius: 7px; padding: 4px; }
             QMenu::item { padding: 6px 28px 6px 24px; border-radius: 4px; }
-            QMenu::item:selected { background: #edf3ef; }
+            QMenu::item:selected { background: #edf3ef; color: #203238; }
             QListWidget { background: #ffffff; border: 0; }
             """
         )
@@ -344,12 +347,40 @@ class MainWindow(QMainWindow):
         self._update_source_badge(self.controller.state.snapshot)
 
     def _show_about(self) -> None:
-        QMessageBox.about(
-            self,
-            "About Pendulum Workbench",
-            "Pendulum Workbench\n\n"
-            "Live instrumentation and reproducible experiment recording.",
+        dialog = QDialog(self)
+        dialog.setWindowTitle("About Pendulum Workbench")
+        dialog.setMinimumWidth(480)
+        dialog.setStyleSheet(
+            "QDialog { background: #f7f9f7; color: #24363a; }"
+            "QLabel { color: #24363a; background: transparent; }"
         )
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(24, 20, 24, 20)
+        layout.setSpacing(12)
+        image_path = Path(__file__).resolve().parents[1] / "assets" / "pendulum_cad.png"
+        if image_path.is_file():
+            from PySide6.QtGui import QPixmap
+            image_label = QLabel()
+            image_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            image_label.setPixmap(
+                QPixmap(str(image_path)).scaled(
+                    300, 330,
+                    Qt.AspectRatioMode.KeepAspectRatio,
+                    Qt.TransformationMode.SmoothTransformation,
+                )
+            )
+            layout.addWidget(image_label)
+        heading = QLabel("Pendulum Workbench")
+        heading.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        heading.setStyleSheet("font-size: 20px; font-weight: 700;")
+        layout.addWidget(heading)
+        description = QLabel("Experimental Control & Data Acquisition")
+        description.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(description)
+        ok_button = QPushButton("OK")
+        ok_button.clicked.connect(dialog.accept)
+        layout.addWidget(ok_button, alignment=Qt.AlignmentFlag.AlignRight)
+        dialog.exec()
 
     def closeEvent(self, event) -> None:
         if self.controller.maintenance.is_manual_motion_active:

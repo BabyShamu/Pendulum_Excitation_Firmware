@@ -1,4 +1,3 @@
-from collections import deque
 from datetime import datetime
 
 from PySide6.QtCore import Qt
@@ -28,20 +27,16 @@ from pendulum_workbench.domain.models import (
     HomeStatus,
     MotionState,
     RecordingState,
-    TelemetrySample,
 )
-from pendulum_workbench.experiments.repository import LoadedExperiment
 from pendulum_workbench.ui.hardware_status_card import HardwareStatusCard
 from pendulum_workbench.ui.home_status_control import HomeStatusControl
 from pendulum_workbench.ui.status_indicator import IndicatorTone
-from pendulum_workbench.ui.trend_plot import TrendPlot
 
 
 class MonitorPage(QWidget):
     def __init__(self, controller: WorkbenchController) -> None:
         super().__init__()
         self.controller = controller
-        self._samples: deque[TelemetrySample] = deque(maxlen=180)
         self._last_displayed_source: DataSourceMode | None = None
         self._last_connection_state: ConnectionState | None = None
 
@@ -149,27 +144,6 @@ class MonitorPage(QWidget):
             metrics.addWidget(metric[0], 1)
         layout.addLayout(metrics)
 
-        content = QHBoxLayout()
-        content.setSpacing(12)
-        charts = QFrame()
-        self.charts_panel = charts
-        charts.setObjectName("surface")
-        charts.setSizePolicy(
-            QSizePolicy.Policy.Expanding,
-            QSizePolicy.Policy.Preferred,
-        )
-        self._apply_card_depth(charts)
-        charts_layout = QVBoxLayout(charts)
-        charts_layout.setContentsMargins(12, 8, 12, 8)
-        charts_layout.setSpacing(2)
-        self.angle_plot = TrendPlot("Pendulum angle", "deg", "#277a68")
-        self.position_plot = TrendPlot("Pivot position", "mm", "#d36b42")
-        self.angle_plot.setMinimumHeight(220)
-        self.position_plot.setMinimumHeight(220)
-        charts_layout.addWidget(self.angle_plot, 1)
-        charts_layout.addWidget(self.position_plot, 1)
-        content.addWidget(charts, 3)
-
         events_panel = QFrame()
         events_panel.setObjectName("surface")
         self._apply_card_depth(events_panel)
@@ -185,13 +159,11 @@ class MonitorPage(QWidget):
         events_layout.addWidget(events_heading)
         events_layout.addWidget(events_hint)
         events_layout.addWidget(self.event_list, 1)
-        content.addWidget(events_panel, 2)
-        layout.addLayout(content, 1)
+        events_panel.setMinimumHeight(360)
+        layout.addWidget(events_panel, 1)
 
         self.controller.state.snapshot_changed.connect(self._update_snapshot)
-        self.controller.state.telemetry_received.connect(self._append_sample)
         self.controller.state.event_added.connect(self._append_event)
-        self.controller.experiment_loaded.connect(self._show_saved_experiment)
         self._update_snapshot(self.controller.state.snapshot)
         self._refresh_ports()
 
@@ -298,10 +270,11 @@ class MonitorPage(QWidget):
             snapshot.connection == ConnectionState.CONNECTING
             and self._last_connection_state != ConnectionState.CONNECTING
         )
+        if new_serial_session:
+            # Start each connection attempt with a fresh Events & Status view.
+            # The state model can still retain events for diagnostics.
+            self.clear_events()
         if new_source or new_serial_session:
-            self._samples.clear()
-            self.angle_plot.set_samples([])
-            self.position_plot.set_samples([])
             self.angle_value[1].setText("--")
             self.position_value[1].setText("--")
         self._last_displayed_source = snapshot.data_source
@@ -351,29 +324,6 @@ class MonitorPage(QWidget):
             None: ("Unknown", IndicatorTone.UNKNOWN),
         }
         card.set_state(*states[active])
-
-    def _show_saved_experiment(self, experiment: LoadedExperiment) -> None:
-        self._samples.clear()
-        self._samples.extend(experiment.telemetry[-self._samples.maxlen:])
-        self.angle_plot.set_samples(
-            [(sample.elapsed_s, sample.angle_deg) for sample in self._samples
-             if sample.angle_deg is not None]
-        )
-        self.position_plot.set_samples(
-            [(sample.elapsed_s, sample.position_mm) for sample in self._samples
-             if sample.position_mm is not None]
-        )
-
-    def _append_sample(self, sample: TelemetrySample) -> None:
-        if sample.angle_deg is None or sample.position_mm is None:
-            return
-        self._samples.append(sample)
-        self.angle_plot.set_samples(
-            [(item.elapsed_s, item.angle_deg) for item in self._samples]
-        )
-        self.position_plot.set_samples(
-            [(item.elapsed_s, item.position_mm) for item in self._samples]
-        )
 
     def _append_event(self, event: AppEvent) -> None:
         item_text = f"{event.timestamp.astimezone().strftime('%H:%M:%S')}  {event.message}"

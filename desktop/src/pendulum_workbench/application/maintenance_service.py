@@ -68,6 +68,8 @@ class MaintenanceService(QObject):
         self._operation_fault = False
         self._homing_failure_latched = False
         self._sensor_failure_latched = False
+        self._sensor_recheck_pending = False
+        self._latch_sync_needed = True
         self._current_angle_deg: float | None = None
         self._travel_span_steps: int | None = None
         self._position_steps: int | None = None
@@ -361,6 +363,12 @@ class MaintenanceService(QObject):
             self._status_sync_pending = False
             self._apply_status_fields(response.fields)
             self._emit_snapshot()
+            # Run the read-only maintenance checks once after a fresh connection.
+            # Defer until the status command has fully completed.
+            if self._bit_state == BitResultState.NOT_RUN:
+                QTimer.singleShot(0, self._auto_check_after_connect)
+            elif self._latch_sync_needed:
+                QTimer.singleShot(0, self._sync_latch_after_check)
             return
         if command == FirmwareCommand.MANUAL_STOP:
             self._finish_manual_stop(
@@ -732,6 +740,10 @@ class MaintenanceService(QObject):
         severity = EventSeverity.INFO if passed else EventSeverity.ERROR
         self.state.report_event(severity, self._operation_message)
         self._emit_snapshot()
+        if self._latch_sync_needed:
+            QTimer.singleShot(0, self._sync_latch_after_check)
+        if self._sensor_recheck_pending:
+            QTimer.singleShot(0, self._auto_recheck_recovered_sensor)
 
     def _fail_homing(self, message: str) -> None:
         message = self._user_facing_error(message)
@@ -948,8 +960,38 @@ class MaintenanceService(QObject):
         self._emit_snapshot()
         self._request_status_sync()
 
+    def _auto_recheck_recovered_sensor(self) -> None:
+        if not self._sensor_recheck_pending:
+            return
+        snapshot = self.state.snapshot
+        if (
+            snapshot.connection != ConnectionState.CONNECTED
+            or snapshot.data_source != DataSourceMode.REAL
+        ):
+            self._sensor_recheck_pending = False
+            return
+        if (
+            self.is_busy
+            or snapshot.motion in (MotionState.RUNNING, MotionState.HOMING, MotionState.STOPPING)
+            or snapshot.recording in (
+                RecordingState.STARTING, RecordingState.RECORDING, RecordingState.STOPPING
+            )
+        ):
+            # Keep the pending recheck alive until homing/recording/commands end.
+            QTimer.singleShot(1000, self._auto_recheck_recovered_sensor)
+            return
+        self._sensor_recheck_pending = False
+        try:
+            self.run_system_check()
+        except (RuntimeError, ValueError, OSError) as error:
+            self.state.report_event(
+                EventSeverity.WARNING,
+                f"Automatic AS5600 revalidation could not start: {error}",
+            )
+
     def _mark_angle_sensor_unavailable(self) -> None:
         self._sensor_failure_latched = True
+        self._sensor_recheck_pending = False
         self._bit_passed = False
         self._bit_state = BitResultState.FAILED
         self._operation_fault = True
@@ -963,16 +1005,27 @@ class MaintenanceService(QObject):
         self._emit_snapshot()
 
     def _mark_angle_sensor_restored(self) -> None:
+        # The firmware may emit both a text message and a structured recovery
+        # event. Do not overwrite a valid AS5600 PASS with a stale/duplicate
+        # recovery notification. A real failure still requires a fresh check.
+        if (
+            not self._sensor_failure_latched
+            and self._check_results[CheckName.ANGLE_SENSOR].state
+            not in (CheckState.FAIL, CheckState.WARNING)
+        ):
+            return
         self._sensor_failure_latched = False
+        self._sensor_recheck_pending = True
         self._bit_passed = False
         self._operation_fault = False
         self._set_check(
             CheckName.ANGLE_SENSOR,
             CheckState.WARNING,
-            "Communication restored; rerun System Check to validate the AS5600.",
+            "Communication restored; automatically rechecking AS5600.",
         )
-        self._operation_message = "AS5600 communication restored; System Check required."
+        self._operation_message = "AS5600 communication restored; revalidation queued."
         self._emit_snapshot()
+        QTimer.singleShot(500, self._auto_recheck_recovered_sensor)
 
     def _on_telemetry_sample(self, sample: TelemetrySample) -> None:
         if (
@@ -1019,6 +1072,39 @@ class MaintenanceService(QObject):
         if connection_changed and snapshot.connection == ConnectionState.CONNECTED:
             self._request_status_sync()
 
+    def _auto_check_after_connect(self) -> None:
+        if (
+            self.state.snapshot.connection != ConnectionState.CONNECTED
+            or self.state.snapshot.data_source != DataSourceMode.REAL
+            or self._bit_state != BitResultState.NOT_RUN
+            or self.is_busy
+        ):
+            return
+        try:
+            self.run_system_check()
+        except (RuntimeError, ValueError, OSError) as error:
+            self.state.report_event(
+                EventSeverity.WARNING,
+                f"Automatic post-connection system check skipped: {error}",
+            )
+
+    def _sync_latch_after_check(self) -> None:
+        # Query only: never command HOLD or OPEN on connection.
+        if (
+            not self._latch_sync_needed
+            or self.state.snapshot.connection != ConnectionState.CONNECTED
+            or self.is_busy
+        ):
+            return
+        self._latch_sync_needed = False
+        try:
+            self.request_latch_status()
+        except (RuntimeError, ValueError, OSError) as error:
+            self.state.report_event(
+                EventSeverity.WARNING,
+                f"Could not read latch state after connection: {error}",
+            )
+
     def _request_status_sync(self) -> None:
         if self.state.snapshot.connection != ConnectionState.CONNECTED:
             return
@@ -1059,6 +1145,8 @@ class MaintenanceService(QObject):
         self._operation_fault = False
         self._homing_failure_latched = False
         self._sensor_failure_latched = False
+        self._sensor_recheck_pending = False
+        self._latch_sync_needed = True
         self._travel_span_steps = None
         self._position_steps = None
         self._steps_per_mm = None

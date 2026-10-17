@@ -1,6 +1,8 @@
 import csv
 import json
+import math
 import os
+import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from importlib.metadata import PackageNotFoundError, version
@@ -9,6 +11,7 @@ from typing import Any
 from uuid import uuid4
 
 from pendulum_workbench.domain.models import DataSourceMode, TelemetrySample
+from pendulum_workbench.experiments.simscape_export import write_simscape_input
 
 TELEMETRY_CORE_COLUMNS = ("sample_index", "time_s", "angle_deg", "position_mm")
 TELEMETRY_PROVENANCE_COLUMNS = (
@@ -74,7 +77,38 @@ class ExperimentRepository:
                 f"got {type(data_source).__name__}"
             )
         experiment_id = experiment_id or str(uuid4())
-        directory = self.root / experiment_id
+        created_at = (created_at or datetime.now(timezone.utc)).astimezone(timezone.utc)
+        display_created_at = created_at.astimezone()
+        details = experiment_metadata or {}
+        mode = str(details.get("experiment_mode") or "Recording")
+        mode = {
+            "VERTICAL_SINUSOIDAL_EXCITATION": "Sinusoidal",
+            "AUTO_RESONANCE_PARAMETRIC": "AutoResonance",
+            "PHASE_TRACKED_SINE_AUTO_RESONANCE": "PhaseTracked",
+        }.get(mode, mode)
+        local_created_at = created_at.astimezone()
+        mode_short = {
+            "Sinusoidal": "VS",
+            "AutoResonance": "AR",
+            "PhaseTracked": "PT",
+        }.get(mode, mode)
+        tokens = [f"{local_created_at:%Y-%m-%d_%H-%M-%S}", mode_short]
+        amplitude = details.get("commanded_amplitude_mm")
+        frequency = details.get("commanded_frequency_hz")
+        phase = details.get("commanded_phase_deg")
+        if isinstance(amplitude, (int, float)):
+            tokens.append(f"A{amplitude:g}mm")
+        if isinstance(frequency, (int, float)):
+            tokens.append(f"F{frequency:g}Hz")
+        if isinstance(phase, (int, float)):
+            tokens.append(f"P{phase:g}deg")
+        label = "_".join(tokens)
+        label = re.sub(r"[^A-Za-z0-9._-]", "_", label)
+        directory = self.root / label
+        suffix = 2
+        while directory.exists():
+            directory = self.root / f"{label}_{suffix}"
+            suffix += 1
         directory.mkdir(parents=True, exist_ok=False)
         (directory / "derived").mkdir()
         (directory / "serial_capture.log").open("x", encoding="utf-8").close()
@@ -97,8 +131,8 @@ class ExperimentRepository:
             "telemetry_schema_version": TELEMETRY_SCHEMA_VERSION,
             "experiment_id": experiment_id,
             "name": name.strip() or experiment_id,
-            "created_at": created_at.isoformat(),
-            "started_at": created_at.isoformat(),
+            "created_at": display_created_at.isoformat(),
+            "started_at": display_created_at.isoformat(),
             "ended_at": None,
             "completion_status": "RECORDING",
             "interruption_reason": None,
@@ -174,12 +208,47 @@ class ExperimentRepository:
         manifest = dict(session.manifest)
         manifest.update(
             completion_status=completion_status,
-            ended_at=(ended_at or datetime.now(timezone.utc)).astimezone(timezone.utc).isoformat(),
+            ended_at=(ended_at or datetime.now(timezone.utc)).astimezone().isoformat(),
             interruption_reason=interruption_reason,
             sample_count=sample_count,
             raw_line_count=raw_line_count,
         )
+        # Compute the peak from the recorded samples, including samples received
+        # after excitation stopped but before the recorder was finalized.
+        peak_angle = None
+        peak_time = None
+        with (session.directory / "telemetry.csv").open(
+            "r", encoding="utf-8", newline=""
+        ) as telemetry_file:
+            for row in csv.DictReader(telemetry_file):
+                try:
+                    angle = float(row["angle_deg"])
+                    sample_time = float(row["time_s"])
+                except (KeyError, TypeError, ValueError):
+                    continue
+                if not (math.isfinite(angle) and math.isfinite(sample_time)):
+                    continue
+                if peak_angle is None or abs(angle) > abs(peak_angle):
+                    peak_angle = angle
+                    peak_time = sample_time
+        manifest["peak_absolute_angle_deg"] = abs(peak_angle) if peak_angle is not None else None
+        manifest["peak_signed_angle_deg"] = peak_angle
+        manifest["peak_angle_time_s"] = peak_time
+        experiment = manifest.get("experiment")
+        target_angle = experiment.get("target_angle_deg") if isinstance(experiment, dict) else None
+        if (
+            peak_angle is not None
+            and isinstance(target_angle, (int, float))
+            and math.isfinite(target_angle)
+            and target_angle > 0
+        ):
+            manifest["recorded_peak_above_target_deg"] = max(0.0, abs(peak_angle) - target_angle)
+        else:
+            manifest["recorded_peak_above_target_deg"] = None
+        # This is a whole-recording peak, not yet a post-stop-only peak.
+
         self.write_manifest(session.directory, manifest)
+        write_simscape_input(session.directory, manifest)
         return manifest
 
     def load(self, source: Path | str) -> LoadedExperiment:

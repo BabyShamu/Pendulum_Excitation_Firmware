@@ -54,9 +54,12 @@ class VerticalSineDefinition:
     duration_s: float
     label: str = ""
     notes: str = ""
+    target_angle_deg: float = 80.0
     mode: ExperimentMode = ExperimentMode.VERTICAL_SINUSOIDAL_EXCITATION
 
     def validate(self) -> None:
+        if not math.isfinite(self.target_angle_deg) or not 0.0 < self.target_angle_deg <= 80.0:
+            raise ValueError("target angle must be greater than 0 and at most 80 degrees")
         if self.mode != ExperimentMode.VERTICAL_SINUSOIDAL_EXCITATION:
             raise ValueError("VerticalSineDefinition requires Vertical Sinusoidal Excitation mode")
         values = (
@@ -105,6 +108,7 @@ class VerticalSineDefinition:
             "commanded_amplitude_mm": self.amplitude_mm,
             "commanded_frequency_hz": self.frequency_hz,
             "requested_duration_s": self.duration_s,
+            "target_angle_deg": self.target_angle_deg,
             "actual_elapsed_duration_s": actual_elapsed_duration_s,
             "measured_initial_angle_deg": measured_initial_angle_deg,
             "optional_label": self.label.strip(),
@@ -134,9 +138,12 @@ class AutoResonanceDefinition:
     duration_s: float
     label: str = ""
     notes: str = ""
+    target_angle_deg: float = 80.0
     mode: ExperimentMode = ExperimentMode.AUTO_RESONANCE_PARAMETRIC
 
     def validate(self) -> None:
+        if not math.isfinite(self.target_angle_deg) or not 0.0 < self.target_angle_deg <= 80.0:
+            raise ValueError("target angle must be greater than 0 and at most 80 degrees")
         if self.mode != ExperimentMode.AUTO_RESONANCE_PARAMETRIC:
             raise ValueError("AutoResonanceDefinition requires Auto-Resonance mode")
         for name, value in (
@@ -184,6 +191,7 @@ class AutoResonanceDefinition:
             "commanded_amplitude_mm": self.amplitude_mm,
             "commanded_phase_deg": self.phase_deg,
             "requested_duration_s": self.duration_s,
+            "target_angle_deg": self.target_angle_deg,
             "actual_elapsed_duration_s": actual_elapsed_duration_s,
             "measured_initial_angle_deg": measured_initial_angle_deg,
             "optional_label": self.label.strip(),
@@ -220,9 +228,12 @@ class PhaseTrackedSineDefinition:
     duration_s: float
     label: str = ""
     notes: str = ""
+    target_angle_deg: float = 80.0
     mode: ExperimentMode = ExperimentMode.PHASE_TRACKED_SINE_AUTO_RESONANCE
 
     def validate(self) -> None:
+        if not math.isfinite(self.target_angle_deg) or not 0.0 < self.target_angle_deg <= 80.0:
+            raise ValueError("target angle must be greater than 0 and at most 80 degrees")
         if self.mode != ExperimentMode.PHASE_TRACKED_SINE_AUTO_RESONANCE:
             raise ValueError("PhaseTrackedSineDefinition requires Phase-Tracked Sinusoidal Auto-Resonance mode")
         for name, value in (
@@ -270,6 +281,7 @@ class PhaseTrackedSineDefinition:
             "commanded_amplitude_mm": self.amplitude_mm,
             "commanded_phase_deg": self.phase_deg,
             "requested_duration_s": self.duration_s,
+            "target_angle_deg": self.target_angle_deg,
             "actual_elapsed_duration_s": actual_elapsed_duration_s,
             "measured_initial_angle_deg": measured_initial_angle_deg,
             "optional_label": self.label.strip(),

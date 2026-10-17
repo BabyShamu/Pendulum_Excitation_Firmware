@@ -136,14 +136,16 @@ class FirmwareCommandService(QObject):
             timeout_ms=self._SINE_STOP_TIMEOUT_MS,
         )
 
-    def start_parametric(self, amplitude_mm: float, phase_deg: float) -> int:
+    def start_parametric(self, amplitude_mm: float, phase_deg: float, target_angle_deg: float) -> int:
         if not math.isfinite(amplitude_mm) or amplitude_mm <= 0.0:
             raise ValueError("pivot amplitude must be finite and greater than zero")
         if not math.isfinite(phase_deg):
             raise ValueError("phase must be finite")
+        if not math.isfinite(target_angle_deg) or not 0.0 < target_angle_deg <= 85.0:
+            raise ValueError("firmware target angle must be greater than 0 and at most 85 degrees")
         return self._request(
             FirmwareCommand.PARAMETRIC_START,
-            arguments=f"{amplitude_mm:.9g} {phase_deg:.9g}",
+            arguments=f"{amplitude_mm:.9g} {phase_deg:.9g} {target_angle_deg:.9g}",
         )
 
     def stop_parametric(self) -> int:

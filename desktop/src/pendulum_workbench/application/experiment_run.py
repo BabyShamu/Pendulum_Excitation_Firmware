@@ -394,6 +394,7 @@ class ExperimentRunService(QObject):
                 self.commands.start_parametric(
                     definition.amplitude_mm,
                     definition.phase_deg,
+                    definition.target_angle_deg,
                 )
             elif isinstance(definition, PhaseTrackedSineDefinition):
                 self._phase = "phase_sine_start"
@@ -461,7 +462,7 @@ class ExperimentRunService(QObject):
                 self._timer.start()
                 self._set_snapshot(
                     state=ExperimentRunState.RUNNING,
-                    started_at=datetime.now(timezone.utc).isoformat(),
+                    started_at=datetime.now().astimezone().isoformat(),
                     completion_reason="Running.",
                 )
                 self.state.set_motion(MotionState.RUNNING)
@@ -486,10 +487,7 @@ class ExperimentRunService(QObject):
                     self._pending_final_state = ExperimentRunState.FAULT
                     self._pending_completion_reason = "sine_stop_unconfirmed"
             self._set_motion_after_sine_stop()
-            self._begin_recording_finalization(
-                self._pending_final_state,
-                self._pending_completion_reason,
-            )
+            self._observe_after_successful_stop()
 
     def _on_command_failed(self, failure: FirmwareCommandFailure) -> None:
         if self._experiment_id is None:
@@ -633,6 +631,29 @@ class ExperimentRunService(QObject):
             self._pending_completion_reason = f"metadata_write_failed: {error}"
             self._stop_recording_after_metadata()
 
+    def _finish_post_stop_observation(self) -> None:
+        if self._phase != "post_stop_observation":
+            return
+        self._begin_recording_finalization(
+            self._pending_final_state,
+            self._pending_completion_reason,
+        )
+
+    def _observe_after_successful_stop(self) -> None:
+        # Keep capturing telemetry after the motor stops. The pendulum can
+        # continue moving under its own momentum. This does not delay motor stop.
+        if self._pending_final_state != ExperimentRunState.COMPLETE:
+            self._begin_recording_finalization(
+                self._pending_final_state, self._pending_completion_reason
+            )
+            return
+        self._phase = "post_stop_observation"
+        self.state.report_event(
+            EventSeverity.INFO,
+            "Excitation stopped; recording 5 additional seconds of free swing.",
+        )
+        QTimer.singleShot(5000, self._finish_post_stop_observation)
+
     def _stop_recording_after_metadata(self) -> None:
         if not self.recorder.is_recording:
             self._publish_terminal(
@@ -686,6 +707,28 @@ class ExperimentRunService(QObject):
         )
 
     def _on_telemetry_sample(self, sample) -> None:
+        # A target is reached only by a valid, measured angle while actively running.
+        # Never reinterpret a firmware safety fault as a successful target event.
+        if (
+            self._phase == "running"
+            and self._snapshot.state == ExperimentRunState.RUNNING
+            and self._definition is not None
+            and sample.source == "real"
+            and sample.angle_deg is not None
+            and math.isfinite(sample.angle_deg)
+            and abs(sample.angle_deg) >= self._definition.target_angle_deg
+        ):
+            hardware = self.state.snapshot.hardware_status
+            if not (hardware.fault_known and hardware.fault):
+                self._pending_final_state = ExperimentRunState.COMPLETE
+                self._pending_completion_reason = "TARGET_REACHED"
+                self._stop_requested_monotonic = time.monotonic()
+                self._set_snapshot(
+                    state=ExperimentRunState.STOPPING,
+                    completion_reason="TARGET_REACHED",
+                )
+                self._issue_sine_stop()
+                return
         if (
             self._phase not in ("metadata_before_open", "latch_open", "sine_start", "running")
             or self._angle_predictor is None
@@ -815,6 +858,22 @@ class ExperimentRunService(QObject):
 
     def _on_device_event(self, event) -> None:
         if not self.is_active:
+            return
+        if event.name == "experiment_target_reached":
+            # Firmware can report the target after a telemetry sample has already
+            # initiated the desktop stop. Do not issue a duplicate stop request.
+            self.state.report_event(
+                EventSeverity.INFO,
+                "STM32 confirmed target angle reached"
+                + (f" at {event.fields['angle_deg']} deg" if event.fields.get("angle_deg") else "")
+                + ".",
+            )
+            if self._phase == "running" and self._snapshot.state == ExperimentRunState.RUNNING:
+                self._pending_final_state = ExperimentRunState.COMPLETE
+                self._pending_completion_reason = "TARGET_REACHED"
+                self._stop_requested_monotonic = time.monotonic()
+                self._set_snapshot(state=ExperimentRunState.STOPPING, completion_reason="TARGET_REACHED")
+                self._issue_sine_stop()
             return
         if event.name == "sine_motion_stopped":
             self._handle_safety_interruption(

@@ -88,10 +88,6 @@ class WorkbenchController(QObject):
         if mode == DataSourceMode.REAL:
             self.stop_mock()
             self.state.set_data_source(mode)
-            self.state.report_event(
-                EventSeverity.WARNING,
-                "REAL STM32 mode selected; no device connected.",
-            )
         elif mode == DataSourceMode.MOCK:
             self.state.set_data_source(mode)
             self.start_mock()
