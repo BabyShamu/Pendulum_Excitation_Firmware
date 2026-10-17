@@ -28,6 +28,6 @@ def main() -> int:
     if icon_path.is_file():
         window.setWindowIcon(QIcon(str(icon_path)))
     controller.select_data_source(DataSourceMode.REAL)
-    window.show()
+    window.showMaximized()
     app.aboutToQuit.connect(controller.shutdown)
     return app.exec()
