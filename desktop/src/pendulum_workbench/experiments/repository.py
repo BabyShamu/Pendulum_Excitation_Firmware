@@ -235,6 +235,19 @@ class ExperimentRepository:
         manifest["peak_absolute_angle_deg"] = abs(peak_angle) if peak_angle is not None else None
         manifest["peak_signed_angle_deg"] = peak_angle
         manifest["peak_angle_time_s"] = peak_time
+        experiment = manifest.get("experiment")
+        target_angle = experiment.get("target_angle_deg") if isinstance(experiment, dict) else None
+        if (
+            peak_angle is not None
+            and isinstance(target_angle, (int, float))
+            and math.isfinite(target_angle)
+            and target_angle > 0
+        ):
+            manifest["recorded_peak_above_target_deg"] = max(0.0, abs(peak_angle) - target_angle)
+        else:
+            manifest["recorded_peak_above_target_deg"] = None
+        # This is a whole-recording peak, not yet a post-stop-only peak.
+
         self.write_manifest(session.directory, manifest)
         write_simscape_input(session.directory, manifest)
         return manifest
