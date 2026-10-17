@@ -977,7 +977,7 @@ class MaintenanceService(QObject):
                 RecordingState.STARTING, RecordingState.RECORDING, RecordingState.STOPPING
             )
         ):
-            return  # A later snapshot or operation completion can retry.
+            # Keep the pending recheck alive until homing/recording/commands end.\n            QTimer.singleShot(1000, self._auto_recheck_recovered_sensor)\n            return
         self._sensor_recheck_pending = False
         try:
             self.run_system_check()
@@ -1143,6 +1143,7 @@ class MaintenanceService(QObject):
         self._operation_fault = False
         self._homing_failure_latched = False
         self._sensor_failure_latched = False
+        self._sensor_recheck_pending = False
         self._latch_sync_needed = True
         self._travel_span_steps = None
         self._position_steps = None
