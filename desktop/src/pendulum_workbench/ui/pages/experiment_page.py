@@ -427,6 +427,7 @@ class ExperimentPage(QWidget):
         self.run_recording_state_value.setText("Recording: Starting")
 
     def _on_recording_started(self, experiment_id: str, directory: str) -> None:
+        self._experiment_directory = Path(directory)
         self.run_recording_state_value.setText("Recording: Recording")
         self.current_experiment_path.setText(
             f"Experiment {experiment_id}; raw capture: {Path(directory) / 'serial_capture.log'}"
@@ -442,6 +443,7 @@ class ExperimentPage(QWidget):
                 f"Saved experiment metadata unavailable for {experiment_id}.",
             )
             return
+        self._experiment_directory = session.directory
         self._show_summary(
             experiment_id=session.experiment_id,
             directory=session.directory,
@@ -766,6 +768,7 @@ class ExperimentPage(QWidget):
         self.run_completion_reason_value.setText(
             str(experiment_metadata.get("completion_reason") or manifest.get("interruption_reason") or "-")
         )
+        self._experiment_directory = directory
         self.saved_experiment_summary.setVisible(True)
         self.open_recording_folder_button.setEnabled(directory.is_dir())
 
