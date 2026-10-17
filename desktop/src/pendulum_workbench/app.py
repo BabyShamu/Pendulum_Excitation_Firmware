@@ -25,6 +25,8 @@ def main() -> int:
 
     controller = WorkbenchController()
     window = MainWindow(controller)
+    if icon_path.is_file():
+        window.setWindowIcon(QIcon(str(icon_path)))
     controller.select_data_source(DataSourceMode.REAL)
     window.show()
     app.aboutToQuit.connect(controller.shutdown)
