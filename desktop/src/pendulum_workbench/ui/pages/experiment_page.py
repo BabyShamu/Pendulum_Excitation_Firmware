@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from PySide6.QtCore import QUrl, Qt
+from PySide6.QtCore import QSettings, QUrl, Qt
 from PySide6.QtGui import QColor, QDesktopServices
 from PySide6.QtWidgets import (
     QComboBox,
@@ -91,6 +91,23 @@ class ExperimentPage(QWidget):
         self.readiness_indicator = QLabel("CHECK REQUIRED")
         self.readiness_indicator.setObjectName("experimentReadinessIndicator")
         recording_layout.addWidget(self.readiness_indicator)
+
+        self.storage_settings = QSettings("PendulumWorkbench", "PendulumWorkbench")
+        self.storage_folder_label = QLabel()
+        self.storage_folder_label.setObjectName("experimentStorageFolder")
+        storage_row = QHBoxLayout()
+        storage_row.addWidget(self.storage_folder_label, 1)
+        self.choose_storage_button = QPushButton("CHOOSE EXPERIMENT FOLDER")
+        self.choose_storage_button.setObjectName("chooseExperimentStorageFolderButton")
+        self.choose_storage_button.clicked.connect(self._choose_storage_folder)
+        storage_row.addWidget(self.choose_storage_button)
+        recording_layout.addLayout(storage_row)
+        saved_root = self.storage_settings.value("experiment_storage_root", "", type=str)
+        if saved_root:
+            self.controller.experiment_recorder.repository.root = Path(saved_root)
+        self.storage_folder_label.setText(
+            str(self.controller.experiment_recorder.repository.root)
+        )
 
         latch_row = QHBoxLayout()
         self.latch_state_value = QLabel("Pendulum Latch: UNKNOWN")
@@ -373,6 +390,18 @@ class ExperimentPage(QWidget):
             label.setObjectName(object_name)
         return label
 
+    def _choose_storage_folder(self) -> None:
+        selected = QFileDialog.getExistingDirectory(
+            self, "Choose experiment storage folder",
+            str(self.controller.experiment_recorder.repository.root),
+        )
+        if not selected:
+            return
+        root = Path(selected)
+        self.controller.experiment_recorder.repository.root = root
+        self.storage_settings.setValue("experiment_storage_root", str(root))
+        self.storage_folder_label.setText(str(root))
+
     def open_experiment_dialog(self) -> None:
         source, _ = QFileDialog.getOpenFileName(
             self,
@@ -582,6 +611,7 @@ class ExperimentPage(QWidget):
             self.duration_input,
             self.experiment_name_input,
             self.experiment_notes_input,
+            self.choose_storage_button,
         ):
             widget.setEnabled(not locked)
 
