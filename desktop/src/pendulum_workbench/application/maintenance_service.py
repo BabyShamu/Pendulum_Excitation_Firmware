@@ -967,6 +967,15 @@ class MaintenanceService(QObject):
         self._emit_snapshot()
 
     def _mark_angle_sensor_restored(self) -> None:
+        # The firmware may emit both a text message and a structured recovery
+        # event. Do not overwrite a valid AS5600 PASS with a stale/duplicate
+        # recovery notification. A real failure still requires a fresh check.
+        if (
+            not self._sensor_failure_latched
+            and self._check_results[CheckName.ANGLE_SENSOR].state
+            not in (CheckState.FAIL, CheckState.WARNING)
+        ):
+            return
         self._sensor_failure_latched = False
         self._bit_passed = False
         self._operation_fault = False
