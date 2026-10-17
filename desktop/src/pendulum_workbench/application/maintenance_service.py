@@ -977,7 +977,9 @@ class MaintenanceService(QObject):
                 RecordingState.STARTING, RecordingState.RECORDING, RecordingState.STOPPING
             )
         ):
-            # Keep the pending recheck alive until homing/recording/commands end.\n            QTimer.singleShot(1000, self._auto_recheck_recovered_sensor)\n            return
+            # Keep the pending recheck alive until homing/recording/commands end.
+            QTimer.singleShot(1000, self._auto_recheck_recovered_sensor)
+            return
         self._sensor_recheck_pending = False
         try:
             self.run_system_check()
