@@ -3,6 +3,7 @@ import math
 import time
 from dataclasses import replace
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 from pathlib import Path
 
 from PySide6.QtCore import QObject, QTimer, Signal
@@ -462,7 +463,7 @@ class ExperimentRunService(QObject):
                 self._timer.start()
                 self._set_snapshot(
                     state=ExperimentRunState.RUNNING,
-                    started_at=datetime.now(timezone.utc).isoformat(),
+                    started_at=datetime.now(ZoneInfo("Asia/Jerusalem")).isoformat(),
                     completion_reason="Running.",
                 )
                 self.state.set_motion(MotionState.RUNNING)
