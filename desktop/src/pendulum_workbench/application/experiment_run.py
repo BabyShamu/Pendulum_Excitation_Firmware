@@ -488,10 +488,7 @@ class ExperimentRunService(QObject):
                     self._pending_final_state = ExperimentRunState.FAULT
                     self._pending_completion_reason = "sine_stop_unconfirmed"
             self._set_motion_after_sine_stop()
-            self._begin_recording_finalization(
-                self._pending_final_state,
-                self._pending_completion_reason,
-            )
+            self._observe_after_successful_stop()
 
     def _on_command_failed(self, failure: FirmwareCommandFailure) -> None:
         if self._experiment_id is None:
@@ -634,6 +631,29 @@ class ExperimentRunService(QObject):
             self._pending_final_state = ExperimentRunState.FAULT
             self._pending_completion_reason = f"metadata_write_failed: {error}"
             self._stop_recording_after_metadata()
+
+    def _finish_post_stop_observation(self) -> None:
+        if self._phase != "post_stop_observation":
+            return
+        self._begin_recording_finalization(
+            self._pending_final_state,
+            self._pending_completion_reason,
+        )
+
+    def _observe_after_successful_stop(self) -> None:
+        # Keep capturing telemetry after the motor stops. The pendulum can
+        # continue moving under its own momentum. This does not delay motor stop.
+        if self._pending_final_state != ExperimentRunState.COMPLETE:
+            self._begin_recording_finalization(
+                self._pending_final_state, self._pending_completion_reason
+            )
+            return
+        self._phase = "post_stop_observation"
+        self.state.report_event(
+            EventSeverity.INFO,
+            "Excitation stopped; recording 5 additional seconds of free swing.",
+        )
+        QTimer.singleShot(5000, self._finish_post_stop_observation)
 
     def _stop_recording_after_metadata(self) -> None:
         if not self.recorder.is_recording:
