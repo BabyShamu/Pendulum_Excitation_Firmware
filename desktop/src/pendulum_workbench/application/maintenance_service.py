@@ -68,6 +68,7 @@ class MaintenanceService(QObject):
         self._operation_fault = False
         self._homing_failure_latched = False
         self._sensor_failure_latched = False
+        self._sensor_recheck_pending = False
         self._latch_sync_needed = True
         self._current_angle_deg: float | None = None
         self._travel_span_steps: int | None = None
@@ -741,6 +742,8 @@ class MaintenanceService(QObject):
         self._emit_snapshot()
         if self._latch_sync_needed:
             QTimer.singleShot(0, self._sync_latch_after_check)
+        if self._sensor_recheck_pending:
+            QTimer.singleShot(0, self._auto_recheck_recovered_sensor)
 
     def _fail_homing(self, message: str) -> None:
         message = self._user_facing_error(message)
@@ -957,8 +960,36 @@ class MaintenanceService(QObject):
         self._emit_snapshot()
         self._request_status_sync()
 
+    def _auto_recheck_recovered_sensor(self) -> None:
+        if not self._sensor_recheck_pending:
+            return
+        snapshot = self.state.snapshot
+        if (
+            snapshot.connection != ConnectionState.CONNECTED
+            or snapshot.data_source != DataSourceMode.REAL
+        ):
+            self._sensor_recheck_pending = False
+            return
+        if (
+            self.is_busy
+            or snapshot.motion in (MotionState.RUNNING, MotionState.HOMING, MotionState.STOPPING)
+            or snapshot.recording in (
+                RecordingState.STARTING, RecordingState.RECORDING, RecordingState.STOPPING
+            )
+        ):
+            return  # A later snapshot or operation completion can retry.
+        self._sensor_recheck_pending = False
+        try:
+            self.run_system_check()
+        except (RuntimeError, ValueError, OSError) as error:
+            self.state.report_event(
+                EventSeverity.WARNING,
+                f"Automatic AS5600 revalidation could not start: {error}",
+            )
+
     def _mark_angle_sensor_unavailable(self) -> None:
         self._sensor_failure_latched = True
+        self._sensor_recheck_pending = False
         self._bit_passed = False
         self._bit_state = BitResultState.FAILED
         self._operation_fault = True
@@ -982,15 +1013,17 @@ class MaintenanceService(QObject):
         ):
             return
         self._sensor_failure_latched = False
+        self._sensor_recheck_pending = True
         self._bit_passed = False
         self._operation_fault = False
         self._set_check(
             CheckName.ANGLE_SENSOR,
             CheckState.WARNING,
-            "Communication restored; rerun System Check to validate the AS5600.",
+            "Communication restored; automatically rechecking AS5600.",
         )
-        self._operation_message = "AS5600 communication restored; System Check required."
+        self._operation_message = "AS5600 communication restored; revalidation queued."
         self._emit_snapshot()
+        QTimer.singleShot(500, self._auto_recheck_recovered_sensor)
 
     def _on_telemetry_sample(self, sample: TelemetrySample) -> None:
         if (
