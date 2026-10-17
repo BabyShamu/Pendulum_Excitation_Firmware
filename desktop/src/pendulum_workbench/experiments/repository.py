@@ -9,6 +9,7 @@ from typing import Any
 from uuid import uuid4
 
 from pendulum_workbench.domain.models import DataSourceMode, TelemetrySample
+from pendulum_workbench.experiments.simscape_export import write_simscape_input
 
 TELEMETRY_CORE_COLUMNS = ("sample_index", "time_s", "angle_deg", "position_mm")
 TELEMETRY_PROVENANCE_COLUMNS = (
@@ -180,6 +181,7 @@ class ExperimentRepository:
             raw_line_count=raw_line_count,
         )
         self.write_manifest(session.directory, manifest)
+        write_simscape_input(session.directory, manifest)
         return manifest
 
     def load(self, source: Path | str) -> LoadedExperiment:
