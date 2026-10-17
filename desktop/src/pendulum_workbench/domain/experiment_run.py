@@ -54,12 +54,12 @@ class VerticalSineDefinition:
     duration_s: float
     label: str = ""
     notes: str = ""
-    target_angle_deg: float = 90.0
+    target_angle_deg: float = 85.0
     mode: ExperimentMode = ExperimentMode.VERTICAL_SINUSOIDAL_EXCITATION
 
     def validate(self) -> None:
-        if not math.isfinite(self.target_angle_deg) or not 0.0 < self.target_angle_deg <= 90.0:
-            raise ValueError("target angle must be greater than 0 and at most 90 degrees")
+        if not math.isfinite(self.target_angle_deg) or not 0.0 < self.target_angle_deg <= 85.0:
+            raise ValueError("target angle must be greater than 0 and at most 85 degrees")
         if self.mode != ExperimentMode.VERTICAL_SINUSOIDAL_EXCITATION:
             raise ValueError("VerticalSineDefinition requires Vertical Sinusoidal Excitation mode")
         values = (
@@ -138,12 +138,12 @@ class AutoResonanceDefinition:
     duration_s: float
     label: str = ""
     notes: str = ""
-    target_angle_deg: float = 90.0
+    target_angle_deg: float = 85.0
     mode: ExperimentMode = ExperimentMode.AUTO_RESONANCE_PARAMETRIC
 
     def validate(self) -> None:
-        if not math.isfinite(self.target_angle_deg) or not 0.0 < self.target_angle_deg <= 90.0:
-            raise ValueError("target angle must be greater than 0 and at most 90 degrees")
+        if not math.isfinite(self.target_angle_deg) or not 0.0 < self.target_angle_deg <= 85.0:
+            raise ValueError("target angle must be greater than 0 and at most 85 degrees")
         if self.mode != ExperimentMode.AUTO_RESONANCE_PARAMETRIC:
             raise ValueError("AutoResonanceDefinition requires Auto-Resonance mode")
         for name, value in (
@@ -228,12 +228,12 @@ class PhaseTrackedSineDefinition:
     duration_s: float
     label: str = ""
     notes: str = ""
-    target_angle_deg: float = 90.0
+    target_angle_deg: float = 85.0
     mode: ExperimentMode = ExperimentMode.PHASE_TRACKED_SINE_AUTO_RESONANCE
 
     def validate(self) -> None:
-        if not math.isfinite(self.target_angle_deg) or not 0.0 < self.target_angle_deg <= 90.0:
-            raise ValueError("target angle must be greater than 0 and at most 90 degrees")
+        if not math.isfinite(self.target_angle_deg) or not 0.0 < self.target_angle_deg <= 85.0:
+            raise ValueError("target angle must be greater than 0 and at most 85 degrees")
         if self.mode != ExperimentMode.PHASE_TRACKED_SINE_AUTO_RESONANCE:
             raise ValueError("PhaseTrackedSineDefinition requires Phase-Tracked Sinusoidal Auto-Resonance mode")
         for name, value in (
