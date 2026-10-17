@@ -298,6 +298,10 @@ class MonitorPage(QWidget):
             snapshot.connection == ConnectionState.CONNECTING
             and self._last_connection_state != ConnectionState.CONNECTING
         )
+        if new_serial_session:
+            # Start each connection attempt with a fresh Events & Status view.
+            # The state model can still retain events for diagnostics.
+            self.clear_events()
         if new_source or new_serial_session:
             self._samples.clear()
             self.angle_plot.set_samples([])
