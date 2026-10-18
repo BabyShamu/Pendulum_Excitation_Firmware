@@ -55,6 +55,75 @@ Completed and interrupted records can be reopened through **Experiment > Open Ex
 
 On 2026-10-09, the app connected to `COM6` but received no telemetry until the NUCLEO reset button was pressed. This is an observed, unresolved startup/reconnection behavior, not the expected connection workflow. Investigate why telemetry does not begin after a normal connection and determine whether a reset should ever be required; do not treat manual reset as the normal operating procedure.
 
+## Building Windows EXE
+
+Build on Windows with 64-bit Python installed and available as `python` on PATH.
+The package requires Python >=3.10; Python 3.13 is recommended as the version used
+for local desktop testing. An internet connection is required on the build PC
+to install dependencies. PyInstaller is a build-only extra, not a runtime dependency.
+
+From this directory in CMD, run (or double-click the batch file):
+
+```bat
+build_exe.bat
+```
+
+The script creates/reuses `desktop/.venv-build`, installs the editable package and
+the pinned PyInstaller build extra, removes only `desktop/build` and `desktop/dist`,
+and builds the committed spec. It stops on errors and leaves the result visible.
+Close a previously running packaged app before rebuilding.
+
+Equivalent commands from this directory in CMD are:
+
+```bat
+python -m venv .venv-build
+.venv-build\Scripts\python.exe -m pip install -e ".[build]"
+.venv-build\Scripts\python.exe -m PyInstaller --clean --noconfirm --workpath build --distpath dist PendulumWorkbench.spec
+```
+
+The primary supported build is **ONEDIR**:
+`desktop/dist/Pendulum Workbench/Pendulum Workbench.exe`.
+Distribute the entire `Pendulum Workbench` folder, including `_internal`.
+Target PCs do not need Python installed. PyInstaller's PySide6 hooks bundle the
+Qt libraries/plugins required by the imported Qt modules, including the Windows
+platform plugin. The spec includes the application assets and Windows pyserial
+port-enumeration backend. Resource lookup is relative to the bundled module,
+not the current working directory.
+
+COM access still requires Windows to recognize the NUCLEO/ST-Link serial device
+and its driver. Packaging does not install that driver. Windows SmartScreen may
+warn about the unsigned EXE; unsigned local builds are expected until code
+signing is added. Build on a trusted machine and distribute trusted artifacts.
+
+**Optional ONEFILE** is secondary and not the canonical spec. It extracts Qt at
+startup and can launch more slowly. Build it with this CMD command from this directory:
+
+```bat
+.venv-build\Scripts\python.exe -m PyInstaller --clean --noconfirm --onefile --windowed --noupx --name "Pendulum Workbench Onefile" --specpath build --paths src --icon "src\pendulum_workbench\assets\pendulum_icon.ico" --add-data "src\pendulum_workbench\assets;pendulum_workbench/assets" --hidden-import serial.tools.list_ports_windows "src\pendulum_workbench\__main__.py"
+```
+
+Its EXE appears at `desktop/dist/Pendulum Workbench Onefile.exe`; the generated
+secondary spec stays under ignored `desktop/build`. Do not replace the committed
+ONEDIR spec with it.
+
+### Manual Smoke Test
+
+Use a disconnected device initially. Do not automatically drive the motor.
+
+1. Double-click the built EXE.
+2. Confirm no console window appears.
+3. Confirm the application icon appears in the window/taskbar.
+4. Confirm the window opens maximized.
+5. Confirm the Experiment page loads.
+6. Confirm COM ports can be refreshed/enumerated.
+7. Confirm REAL STM32 mode is selected/available.
+8. With hardware connected and motion idle, manually confirm connect/disconnect.
+9. Manually run System Check; do not run Home or excitation as a packaging test.
+10. Confirm experiment configuration UI loads.
+11. Confirm the recording directory can be created/written in the normal user data location.
+12. Confirm there are no missing Qt DLL/platform-plugin errors.
+13. Confirm there are no missing icon/assets errors.
+
 ## Test
 
 ```powershell

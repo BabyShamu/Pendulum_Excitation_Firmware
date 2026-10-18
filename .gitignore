@@ -26,6 +26,11 @@ __pycache__/
 .venv/
 venv/
 
+# Desktop Windows packaging (keep the canonical spec and build script tracked)
+desktop/.venv-build/
+desktop/build/
+desktop/dist/
+
 # Windows temporary files
 Thumbs.db
 desktop.ini
