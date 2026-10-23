@@ -8,7 +8,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QComboBox,
     QPushButton, QTableWidget, QTableWidgetItem, QMessageBox, QAbstractItemView,
-    QFormLayout, QGroupBox, QScrollArea, QGridLayout, QFrame,
+    QFormLayout, QGroupBox, QScrollArea, QGridLayout, QFrame, QHeaderView,
 )
 
 from pendulum_workbench.experiments.repository import ExperimentRepository
@@ -40,13 +40,32 @@ class ExperimentManagerPage(QWidget):
         export.clicked.connect(self.export_excel)
         toolbar.addWidget(export)
         layout.addLayout(toolbar)
-        self.table = QTableWidget(0, 6)
-        self.table.setHorizontalHeaderLabels(["Date", "Experiment", "Mode", "Duration", "Peak angle", "Status"])
+        self.table = QTableWidget(0, 7)
+        self.table.setHorizontalHeaderLabels(["Date", "Experiment", "Mode", "Duration", "Initial angle", "Peak angle", "Status"])
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.table.setSortingEnabled(False)
-        self.table.horizontalHeader().setStretchLastSection(True)
+        self.table.horizontalHeader().setStretchLastSection(False)
+        header = self.table.horizontalHeader()
+        header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        for index, width in enumerate((150, 280, 140, 100, 115, 105, 115)):
+            self.table.setColumnWidth(index, width)
+        self.table.verticalHeader().setVisible(False)
+        self.table.verticalHeader().setDefaultSectionSize(37)
+        self.table.setAlternatingRowColors(True)
+        self.table.setShowGrid(False)
+        self.table.setStyleSheet("""
+            QTableWidget { background: #ffffff; alternate-background-color: #f5f8f6;
+                border: 1px solid #d8e1dc; border-radius: 7px;
+                selection-background-color: #d4e9df; selection-color: #184c3c; }
+            QTableWidget::item { padding: 7px 10px; border-bottom: 1px solid #e7eee9; }
+            QTableWidget::item:selected { background: #d4e9df; color: #184c3c; }
+            QHeaderView::section { background: #e5eee9; color: #36584c;
+                font-weight: 700; padding: 9px; border: 0;
+                border-bottom: 2px solid #c5d8cd; }
+        """)
         self.table.setMinimumHeight(220)
         self.table.itemSelectionChanged.connect(self._show_details)
         layout.addWidget(self.table, 2)
@@ -64,7 +83,7 @@ class ExperimentManagerPage(QWidget):
                           ("Completion", "Archived"))),
             ("Excitation settings", (("Amplitude", "Frequency"), ("Phase", "Target angle"),
                                      ("Commanded duration", "Duration"))),
-            ("Recorded results", (("Peak angle", "Peak time"), ("Samples", "Raw lines"))),
+            ("Recorded results", (("Initial angle", "Peak angle"), ("Peak time", "Samples"), ("Raw lines",))),
             ("Storage & notes", (("Notes", "Folder"),)),
         )
         for section_title, rows in sections:
@@ -141,6 +160,7 @@ class ExperimentManagerPage(QWidget):
             if duration is None:
                 duration = details.get("duration_s")
             peak = manifest.get("peak_absolute_angle_deg")
+            initial = details.get("measured_initial_angle_deg")
             fields = [
                 str(manifest.get("created_at") or "")[:16].replace("T", " "),
                 str(manifest.get("name") or ""),
@@ -148,7 +168,8 @@ class ExperimentManagerPage(QWidget):
                  "AUTO_RESONANCE_PARAMETRIC": "Auto Resonance",
                  "PHASE_TRACKED_SINE_AUTO_RESONANCE": "Phase Tracked"}.get(kind, kind),
                 f"{duration:.1f} s" if isinstance(duration, (int, float)) else "—",
-                f"{peak:.2f}°" if isinstance(peak, (int, float)) else "—",
+                self._display_number(initial, "°"),
+                self._display_number(peak, "°"),
                 "Archived" if archived else str(manifest.get("completion_status") or ""),
             ]
             searchable = " ".join(fields + [params, str(manifest.get("experiment_id") or "")])
@@ -159,6 +180,10 @@ class ExperimentManagerPage(QWidget):
             for col, value in enumerate(fields):
                 item = QTableWidgetItem(value)
                 item.setData(Qt.ItemDataRole.UserRole, str(directory))
+                if col in (3, 4, 5):
+                    item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+                elif col == 6:
+                    item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
                 self.table.setItem(row, col, item)
         self.summary.setText(f"{self.table.rowCount()} experiments shown")
         self._show_details()
@@ -208,6 +233,7 @@ class ExperimentManagerPage(QWidget):
             "Target angle": self._display_number(details.get("target_angle_deg"), "°"),
             "Commanded duration": self._display_number(details.get("commanded_duration_s"), " s"),
             "Duration": self._display_number(duration, " s"),
+            "Initial angle": self._display_number(details.get("measured_initial_angle_deg"), "°"),
             "Peak angle": self._display_number(manifest.get("peak_absolute_angle_deg"), "°"),
             "Peak time": self._display_number(manifest.get("peak_angle_time_s"), " s"),
             "Samples": manifest.get("sample_count"),
