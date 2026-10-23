@@ -17,13 +17,19 @@ from pendulum_workbench.experiments.repository import ExperimentRepository
 
 
 class SortableExperimentItem(QTableWidgetItem):
-    """Sort numerical columns by their numeric value, not formatted text."""
+    """Compare stored sort keys without calling Qt's re-entrant comparator."""
+    SORT_ROLE = int(Qt.ItemDataRole.UserRole) + 1
+
     def __lt__(self, other):
-        left = self.data(int(Qt.ItemDataRole.UserRole) + 1)
-        right = other.data(Qt.ItemDataRole.UserRole + 1)
-        if isinstance(left, (int, float)) and isinstance(right, (int, float)):
+        left = self.data(self.SORT_ROLE)
+        right = other.data(self.SORT_ROLE)
+        if left is not None and right is not None:
             return left < right
-        return super().__lt__(other)
+        if left is not None:
+            return False
+        if right is not None:
+            return True
+        return self.text().casefold() < other.text().casefold()
 
 
 class ExperimentManagerPage(QWidget):
