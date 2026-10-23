@@ -16,6 +16,16 @@ from PySide6.QtWidgets import (
 from pendulum_workbench.experiments.repository import ExperimentRepository
 
 
+class SortableExperimentItem(QTableWidgetItem):
+    """Sort numerical columns by their numeric value, not formatted text."""
+    def __lt__(self, other):
+        left = self.data(Qt.ItemDataRole.UserRole + 1)
+        right = other.data(Qt.ItemDataRole.UserRole + 1)
+        if isinstance(left, (int, float)) and isinstance(right, (int, float)):
+            return left < right
+        return super().__lt__(other)
+
+
 class ExperimentManagerPage(QWidget):
     def __init__(self, controller):
         super().__init__()
@@ -184,7 +194,7 @@ class ExperimentManagerPage(QWidget):
             row = self.table.rowCount()
             self.table.insertRow(row)
             for col, value in enumerate(fields):
-                item = QTableWidgetItem(value)
+                item = SortableExperimentItem(value)
                 item.setData(Qt.ItemDataRole.UserRole, str(directory))
                 if col in (3, 4, 5):
                     item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
@@ -193,8 +203,7 @@ class ExperimentManagerPage(QWidget):
                 if col in (3, 4, 5):
                     numeric = (duration, initial, peak)[col - 3]
                     if isinstance(numeric, (int, float)) and math.isfinite(numeric):
-                        item.setData(Qt.ItemDataRole.EditRole, float(numeric))
-                        item.setData(Qt.ItemDataRole.DisplayRole, value)
+                        item.setData(Qt.ItemDataRole.UserRole + 1, float(numeric))
                 self.table.setItem(row, col, item)
         self.table.setSortingEnabled(True)
         self.summary.setText(f"{self.table.rowCount()} experiments shown")
