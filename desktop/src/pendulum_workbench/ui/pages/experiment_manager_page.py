@@ -46,11 +46,9 @@ class ExperimentManagerPage(QWidget):
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.table.setSortingEnabled(False)
         self.table.horizontalHeader().setStretchLastSection(True)
-        self.table.doubleClicked.connect(self.open_selected)
         layout.addWidget(self.table)
         actions = QHBoxLayout()
         for label, callback in [
-            ("Open", self.open_selected),
             ("Archive / Restore", self.toggle_archive),
             ("Delete Permanently", self.delete_selected),
         ]:
