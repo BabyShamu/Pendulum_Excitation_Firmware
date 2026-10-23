@@ -8,6 +8,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QComboBox,
     QPushButton, QTableWidget, QTableWidgetItem, QMessageBox, QAbstractItemView,
+    QFormLayout, QGroupBox, QScrollArea,
 )
 
 from pendulum_workbench.experiments.repository import ExperimentRepository
@@ -20,7 +21,7 @@ class ExperimentManagerPage(QWidget):
         self.repository = controller.experiment_recorder.repository
         self._records = []
         layout = QVBoxLayout(self)
-        heading = QLabel("Experiments")
+        heading = QLabel("Experiment Manager")
         heading.setStyleSheet("font-size: 22px; font-weight: 700;")
         layout.addWidget(heading)
         toolbar = QHBoxLayout()
@@ -40,13 +41,29 @@ class ExperimentManagerPage(QWidget):
         toolbar.addWidget(export)
         layout.addLayout(toolbar)
         self.table = QTableWidget(0, 6)
-        self.table.setHorizontalHeaderLabels(["Date", "Name", "Type", "Parameters", "Status", "ID"])
+        self.table.setHorizontalHeaderLabels(["Date", "Experiment", "Mode", "Duration", "Peak angle", "Status"])
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.table.setSortingEnabled(False)
         self.table.horizontalHeader().setStretchLastSection(True)
-        layout.addWidget(self.table)
+        self.table.setMinimumHeight(220)
+        self.table.itemSelectionChanged.connect(self._show_details)
+        layout.addWidget(self.table, 2)
+        detail_group = QGroupBox("Selected Experiment Details")
+        detail_form = QFormLayout(detail_group)
+        self.detail_labels = {}
+        for key in ("Name", "Experiment ID", "Created", "Mode", "Completion", "Archived",
+                    "Duration", "Peak angle", "Samples", "Parameters", "Notes", "Folder"):
+            value = QLabel("—")
+            value.setWordWrap(True)
+            value.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+            detail_form.addRow(key + ":", value)
+            self.detail_labels[key] = value
+        detail_scroll = QScrollArea()
+        detail_scroll.setWidgetResizable(True)
+        detail_scroll.setWidget(detail_group)
+        layout.addWidget(detail_scroll, 2)
         actions = QHBoxLayout()
         for label, callback in [
             ("Archive / Restore", self.toggle_archive),
@@ -81,14 +98,24 @@ class ExperimentManagerPage(QWidget):
             kind = str(details.get("experiment_mode") or "Recording")
             params = ", ".join(f"{k}={v}" for k, v in details.items()
                                if k != "experiment_mode" and isinstance(v, (str, int, float, bool)))
+            duration = details.get("actual_elapsed_duration_s")
+            if duration is None:
+                duration = details.get("commanded_duration_s")
+            if duration is None:
+                duration = details.get("duration_s")
+            peak = manifest.get("peak_absolute_angle_deg")
             fields = [
-                str(manifest.get("created_at") or ""),
+                str(manifest.get("created_at") or "")[:16].replace("T", " "),
                 str(manifest.get("name") or ""),
-                kind, params,
+                {"VERTICAL_SINUSOIDAL_EXCITATION": "Sinusoidal",
+                 "AUTO_RESONANCE_PARAMETRIC": "Auto Resonance",
+                 "PHASE_TRACKED_SINE_AUTO_RESONANCE": "Phase Tracked"}.get(kind, kind),
+                f"{duration:.1f} s" if isinstance(duration, (int, float)) else "—",
+                f"{peak:.2f}°" if isinstance(peak, (int, float)) else "—",
                 "Archived" if archived else str(manifest.get("completion_status") or ""),
-                str(manifest.get("experiment_id") or ""),
             ]
-            if query and query not in " ".join(fields).casefold():
+            searchable = " ".join(fields + [params, str(manifest.get("experiment_id") or "")])
+            if query and query not in searchable.casefold():
                 continue
             row = self.table.rowCount()
             self.table.insertRow(row)
@@ -97,6 +124,7 @@ class ExperimentManagerPage(QWidget):
                 item.setData(Qt.ItemDataRole.UserRole, str(directory))
                 self.table.setItem(row, col, item)
         self.summary.setText(f"{self.table.rowCount()} experiments shown")
+        self._show_details()
 
     def _selected(self):
         row = self.table.currentRow()
@@ -111,14 +139,38 @@ class ExperimentManagerPage(QWidget):
                 return directory, manifest
         return None
 
-    def open_selected(self, *_):
+    def _show_details(self):
         selected = self._selected()
         if selected is None:
+            for label in self.detail_labels.values():
+                label.setText("—")
             return
-        try:
-            self.controller.open_experiment(selected[0])
-        except (OSError, ValueError, RuntimeError, KeyError) as exc:
-            QMessageBox.warning(self, "Open experiment", str(exc))
+        directory, manifest = selected
+        details = manifest.get("experiment") or {}
+        if not isinstance(details, dict):
+            details = {}
+        duration = details.get("actual_elapsed_duration_s")
+        if duration is None:
+            duration = details.get("commanded_duration_s")
+        peak = manifest.get("peak_absolute_angle_deg")
+        values = {
+            "Name": manifest.get("name"),
+            "Experiment ID": manifest.get("experiment_id"),
+            "Created": manifest.get("created_at"),
+            "Mode": details.get("experiment_mode", "Recording"),
+            "Completion": manifest.get("completion_status"),
+            "Archived": "Yes" if manifest.get("archived") else "No",
+            "Duration": f"{duration:.2f} s" if isinstance(duration, (int, float)) else None,
+            "Peak angle": f"{peak:.2f}°" if isinstance(peak, (int, float)) else None,
+            "Samples": manifest.get("sample_count"),
+            "Parameters": "\n".join(f"{k}: {v}" for k, v in details.items()
+                                      if k != "experiment_mode"),
+            "Notes": manifest.get("notes"),
+            "Folder": str(directory),
+        }
+        for key, label in self.detail_labels.items():
+            value = values.get(key)
+            label.setText(str(value) if value is not None and value != "" else "—")
 
     def toggle_archive(self):
         selected = self._selected()
