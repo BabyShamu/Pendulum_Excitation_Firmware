@@ -19,7 +19,7 @@ from pendulum_workbench.experiments.repository import ExperimentRepository
 class SortableExperimentItem(QTableWidgetItem):
     """Sort numerical columns by their numeric value, not formatted text."""
     def __lt__(self, other):
-        left = self.data(Qt.ItemDataRole.UserRole + 1)
+        left = self.data(int(Qt.ItemDataRole.UserRole) + 1)
         right = other.data(Qt.ItemDataRole.UserRole + 1)
         if isinstance(left, (int, float)) and isinstance(right, (int, float)):
             return left < right
@@ -279,6 +279,9 @@ class ExperimentManagerPage(QWidget):
     @staticmethod
     def _peak_elapsed_time(directory, manifest):
         """Rebase recorded peak time against the first valid telemetry timestamp."""
+        saved_elapsed = manifest.get("peak_angle_elapsed_s")
+        if isinstance(saved_elapsed, (int, float)) and math.isfinite(saved_elapsed):
+            return saved_elapsed
         raw_peak = manifest.get("peak_angle_time_s")
         if not isinstance(raw_peak, (int, float)) or not math.isfinite(raw_peak):
             return None
