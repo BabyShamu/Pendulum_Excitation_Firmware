@@ -182,6 +182,30 @@ class ExperimentRepository:
         self.write_manifest(directory, manifest)
         return ExperimentSession(experiment_id, directory, manifest)
 
+    def list_manifests(self) -> list[tuple[Path, dict[str, Any]]]:
+        """List saved experiment metadata without loading large telemetry CSV files.
+
+        Invalid or unreadable manifests are skipped so one damaged recording
+        does not prevent the experiment browser from opening.
+        """
+        if not self.root.is_dir():
+            return []
+        records: list[tuple[Path, dict[str, Any]]] = []
+        for manifest_path in self.root.glob("*/manifest.json"):
+            try:
+                with manifest_path.open("r", encoding="utf-8") as source:
+                    manifest = json.load(source)
+                if not isinstance(manifest, dict) or not manifest.get("experiment_id"):
+                    continue
+                records.append((manifest_path.parent, manifest))
+            except (OSError, ValueError, TypeError):
+                continue
+        records.sort(
+            key=lambda item: str(item[1].get("created_at") or ""),
+            reverse=True,
+        )
+        return records
+
     @staticmethod
     def write_manifest(directory: Path, manifest: dict[str, Any]) -> None:
         manifest_path = directory / "manifest.json"
