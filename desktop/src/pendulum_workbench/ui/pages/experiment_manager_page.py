@@ -8,7 +8,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QComboBox,
     QPushButton, QTableWidget, QTableWidgetItem, QMessageBox, QAbstractItemView,
-    QFormLayout, QGroupBox, QScrollArea,
+    QFormLayout, QGroupBox, QScrollArea, QGridLayout, QFrame,
 )
 
 from pendulum_workbench.experiments.repository import ExperimentRepository
@@ -50,20 +50,57 @@ class ExperimentManagerPage(QWidget):
         self.table.setMinimumHeight(220)
         self.table.itemSelectionChanged.connect(self._show_details)
         layout.addWidget(self.table, 2)
-        detail_group = QGroupBox("Selected Experiment Details")
-        detail_form = QFormLayout(detail_group)
-        self.detail_labels = {}
-        for key in ("Name", "Experiment ID", "Created", "Mode", "Completion", "Archived",
-                    "Duration", "Peak angle", "Samples", "Parameters", "Notes", "Folder"):
-            value = QLabel("—")
-            value.setWordWrap(True)
-            value.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-            detail_form.addRow(key + ":", value)
-            self.detail_labels[key] = value
+        # Read-only dashboard: small, grouped fields rather than a long metadata dump.
         detail_scroll = QScrollArea()
         detail_scroll.setWidgetResizable(True)
-        detail_scroll.setWidget(detail_group)
-        layout.addWidget(detail_scroll, 2)
+        detail_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        detail_content = QWidget()
+        detail_layout = QVBoxLayout(detail_content)
+        detail_layout.setContentsMargins(4, 8, 4, 8)
+        detail_layout.setSpacing(12)
+        self.detail_labels = {}
+        sections = (
+            ("Overview", (("Name", "Experiment ID"), ("Created", "Mode"),
+                          ("Completion", "Archived"))),
+            ("Excitation settings", (("Amplitude", "Frequency"), ("Phase", "Target angle"),
+                                     ("Commanded duration", "Duration"))),
+            ("Recorded results", (("Peak angle", "Peak time"), ("Samples", "Raw lines"))),
+            ("Storage & notes", (("Notes", "Folder"),)),
+        )
+        for section_title, rows in sections:
+            group = QGroupBox(section_title)
+            group.setStyleSheet(
+                "QGroupBox { background: #ffffff; border: 1px solid #d8e1dc;"
+                " border-radius: 8px; margin-top: 13px; padding: 12px 8px 8px 8px;"
+                " font-weight: 700; color: #287b68; }"
+                "QGroupBox::title { subcontrol-origin: margin; left: 12px;"
+                " padding: 0 5px; }"
+            )
+            grid = QGridLayout(group)
+            grid.setHorizontalSpacing(24)
+            grid.setVerticalSpacing(12)
+            for row_index, pair in enumerate(rows):
+                for col_index, key in enumerate(pair):
+                    cell = QWidget()
+                    cell_layout = QVBoxLayout(cell)
+                    cell_layout.setContentsMargins(3, 2, 3, 2)
+                    cell_layout.setSpacing(3)
+                    caption = QLabel(key.upper())
+                    caption.setStyleSheet("color: #74847d; font-size: 10px; font-weight: 600;")
+                    value = QLabel("—")
+                    value.setWordWrap(True)
+                    value.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+                    value.setStyleSheet("color: #24363a; font-size: 13px; font-weight: 600;")
+                    cell_layout.addWidget(caption)
+                    cell_layout.addWidget(value)
+                    grid.addWidget(cell, row_index, col_index)
+                    self.detail_labels[key] = value
+            grid.setColumnStretch(0, 1)
+            grid.setColumnStretch(1, 1)
+            detail_layout.addWidget(group)
+        detail_layout.addStretch()
+        detail_scroll.setWidget(detail_content)
+        layout.addWidget(detail_scroll, 3)
         actions = QHBoxLayout()
         for label, callback in [
             ("Archive / Restore", self.toggle_archive),
@@ -139,6 +176,12 @@ class ExperimentManagerPage(QWidget):
                 return directory, manifest
         return None
 
+    @staticmethod
+    def _display_number(value, unit="", precision=2):
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            return f"{value:.{precision}f}{unit}"
+        return "—"
+
     def _show_details(self):
         selected = self._selected()
         if selected is None:
@@ -151,8 +194,7 @@ class ExperimentManagerPage(QWidget):
             details = {}
         duration = details.get("actual_elapsed_duration_s")
         if duration is None:
-            duration = details.get("commanded_duration_s")
-        peak = manifest.get("peak_absolute_angle_deg")
+            duration = details.get("duration_s")
         values = {
             "Name": manifest.get("name"),
             "Experiment ID": manifest.get("experiment_id"),
@@ -160,17 +202,23 @@ class ExperimentManagerPage(QWidget):
             "Mode": details.get("experiment_mode", "Recording"),
             "Completion": manifest.get("completion_status"),
             "Archived": "Yes" if manifest.get("archived") else "No",
-            "Duration": f"{duration:.2f} s" if isinstance(duration, (int, float)) else None,
-            "Peak angle": f"{peak:.2f}°" if isinstance(peak, (int, float)) else None,
+            "Amplitude": self._display_number(details.get("commanded_amplitude_mm"), " mm"),
+            "Frequency": self._display_number(details.get("commanded_frequency_hz"), " Hz", 3),
+            "Phase": self._display_number(details.get("commanded_phase_deg"), "°"),
+            "Target angle": self._display_number(details.get("target_angle_deg"), "°"),
+            "Commanded duration": self._display_number(details.get("commanded_duration_s"), " s"),
+            "Duration": self._display_number(duration, " s"),
+            "Peak angle": self._display_number(manifest.get("peak_absolute_angle_deg"), "°"),
+            "Peak time": self._display_number(manifest.get("peak_angle_time_s"), " s"),
             "Samples": manifest.get("sample_count"),
-            "Parameters": "\n".join(f"{k}: {v}" for k, v in details.items()
-                                      if k != "experiment_mode"),
+            "Raw lines": manifest.get("raw_line_count"),
             "Notes": manifest.get("notes"),
             "Folder": str(directory),
         }
         for key, label in self.detail_labels.items():
             value = values.get(key)
             label.setText(str(value) if value is not None and value != "" else "—")
+            label.setToolTip(str(value) if value is not None else "")
 
     def toggle_archive(self):
         selected = self._selected()
