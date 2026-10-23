@@ -1,5 +1,7 @@
 """Experiment browser with reversible archive and Excel index export."""
 import os
+import csv
+import math
 import shutil
 from datetime import datetime
 from pathlib import Path
@@ -8,7 +10,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QComboBox,
     QPushButton, QTableWidget, QTableWidgetItem, QMessageBox, QAbstractItemView,
-    QFormLayout, QGroupBox, QScrollArea, QGridLayout, QFrame, QHeaderView,
+    QFormLayout, QGroupBox, QScrollArea, QGridLayout, QFrame, QHeaderView, QSplitter,
 )
 
 from pendulum_workbench.experiments.repository import ExperimentRepository
@@ -45,7 +47,7 @@ class ExperimentManagerPage(QWidget):
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
-        self.table.setSortingEnabled(False)
+        self.table.setSortingEnabled(True)
         self.table.horizontalHeader().setStretchLastSection(False)
         header = self.table.horizontalHeader()
         header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
@@ -68,7 +70,9 @@ class ExperimentManagerPage(QWidget):
         """)
         self.table.setMinimumHeight(220)
         self.table.itemSelectionChanged.connect(self._show_details)
-        layout.addWidget(self.table, 2)
+        splitter = QSplitter(Qt.Orientation.Vertical)
+        splitter.setChildrenCollapsible(False)
+        splitter.addWidget(self.table)
         # Read-only dashboard: small, grouped fields rather than a long metadata dump.
         detail_scroll = QScrollArea()
         detail_scroll.setWidgetResizable(True)
@@ -79,11 +83,9 @@ class ExperimentManagerPage(QWidget):
         detail_layout.setSpacing(12)
         self.detail_labels = {}
         sections = (
-            ("Overview", (("Name", "Experiment ID"), ("Created", "Mode"),
-                          ("Completion", "Archived"))),
-            ("Excitation settings", (("Amplitude", "Frequency"), ("Phase", "Target angle"),
-                                     ("Commanded duration", "Duration"))),
-            ("Recorded results", (("Initial angle", "Peak angle"), ("Peak time", "Samples"), ("Raw lines",))),
+            ("Overview", (("Name", "Experiment ID", "Created"), ("Mode", "Completion", "Archived"))),
+            ("Excitation settings", (("Amplitude", "Frequency", "Phase"), ("Target angle", "Commanded duration", "Duration"))),
+            ("Recorded results", (("Initial angle", "Peak angle", "Amplification"), ("Peak time", "Samples", "Raw lines"))),
             ("Storage & notes", (("Notes", "Folder"),)),
         )
         for section_title, rows in sections:
@@ -109,17 +111,20 @@ class ExperimentManagerPage(QWidget):
                     value = QLabel("—")
                     value.setWordWrap(True)
                     value.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-                    value.setStyleSheet("color: #24363a; font-size: 13px; font-weight: 600;")
+                    value.setStyleSheet("color: #176c55; font-size: 19px; font-weight: 700;" if key in ("Initial angle", "Peak angle", "Amplification") else "color: #24363a; font-size: 13px; font-weight: 600;")
                     cell_layout.addWidget(caption)
                     cell_layout.addWidget(value)
                     grid.addWidget(cell, row_index, col_index)
                     self.detail_labels[key] = value
             grid.setColumnStretch(0, 1)
             grid.setColumnStretch(1, 1)
+            grid.setColumnStretch(2, 1)
             detail_layout.addWidget(group)
         detail_layout.addStretch()
         detail_scroll.setWidget(detail_content)
-        layout.addWidget(detail_scroll, 3)
+        splitter.addWidget(detail_scroll)
+        splitter.setSizes([340, 340])
+        layout.addWidget(splitter, 1)
         actions = QHBoxLayout()
         for label, callback in [
             ("Archive / Restore", self.toggle_archive),
@@ -143,6 +148,7 @@ class ExperimentManagerPage(QWidget):
     def _filter(self, *_):
         query = self.search.text().casefold().strip()
         visibility = self.visibility.currentText()
+        self.table.setSortingEnabled(False)
         self.table.setRowCount(0)
         for directory, manifest in self._records:
             archived = bool(manifest.get("archived", False))
@@ -184,7 +190,13 @@ class ExperimentManagerPage(QWidget):
                     item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
                 elif col == 6:
                     item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                if col in (3, 4, 5):
+                    numeric = (duration, initial, peak)[col - 3]
+                    if isinstance(numeric, (int, float)) and math.isfinite(numeric):
+                        item.setData(Qt.ItemDataRole.EditRole, float(numeric))
+                        item.setData(Qt.ItemDataRole.DisplayRole, value)
                 self.table.setItem(row, col, item)
+        self.table.setSortingEnabled(True)
         self.summary.setText(f"{self.table.rowCount()} experiments shown")
         self._show_details()
 
@@ -220,6 +232,14 @@ class ExperimentManagerPage(QWidget):
         duration = details.get("actual_elapsed_duration_s")
         if duration is None:
             duration = details.get("duration_s")
+        initial_angle = details.get("measured_initial_angle_deg")
+        peak_angle = manifest.get("peak_absolute_angle_deg")
+        amplification = (abs(peak_angle) / abs(initial_angle)
+                         if isinstance(initial_angle, (int, float)) and not isinstance(initial_angle, bool)
+                         and isinstance(peak_angle, (int, float)) and not isinstance(peak_angle, bool)
+                         and math.isfinite(initial_angle) and math.isfinite(peak_angle)
+                         and abs(initial_angle) > 1e-6 else None)
+        peak_elapsed = self._peak_elapsed_time(directory, manifest)
         values = {
             "Name": manifest.get("name"),
             "Experiment ID": manifest.get("experiment_id"),
@@ -235,7 +255,8 @@ class ExperimentManagerPage(QWidget):
             "Duration": self._display_number(duration, " s"),
             "Initial angle": self._display_number(details.get("measured_initial_angle_deg"), "°"),
             "Peak angle": self._display_number(manifest.get("peak_absolute_angle_deg"), "°"),
-            "Peak time": self._display_number(manifest.get("peak_angle_time_s"), " s"),
+            "Amplification": self._display_number(amplification, "×"),
+            "Peak time": self._display_number(peak_elapsed, " s"),
             "Samples": manifest.get("sample_count"),
             "Raw lines": manifest.get("raw_line_count"),
             "Notes": manifest.get("notes"),
@@ -245,6 +266,30 @@ class ExperimentManagerPage(QWidget):
             value = values.get(key)
             label.setText(str(value) if value is not None and value != "" else "—")
             label.setToolTip(str(value) if value is not None else "")
+
+    @staticmethod
+    def _peak_elapsed_time(directory, manifest):
+        """Rebase recorded peak time against the first valid telemetry timestamp."""
+        raw_peak = manifest.get("peak_angle_time_s")
+        if not isinstance(raw_peak, (int, float)) or not math.isfinite(raw_peak):
+            return None
+        path = directory / "telemetry.csv"
+        try:
+            with path.open("r", encoding="utf-8", newline="") as source:
+                reader = csv.DictReader(source)
+                for row in reader:
+                    value = row.get("time_s") or row.get("device_time_s")
+                    try:
+                        first_time = float(value)
+                    except (TypeError, ValueError):
+                        continue
+                    if not math.isfinite(first_time):
+                        continue
+                    elapsed = raw_peak - first_time
+                    return elapsed if elapsed >= -0.001 else None
+        except OSError:
+            return None
+        return None
 
     def toggle_archive(self):
         selected = self._selected()
