@@ -108,7 +108,7 @@ class ExperimentManagerPage(QWidget):
             ("Overview", (("Name", "Experiment ID", "Created"), ("Mode", "Completion", "Archived"))),
             ("Excitation settings", (("Amplitude", "Frequency", "Phase"), ("Target angle", "Commanded duration", "Duration"))),
             ("Recorded results", (("Initial angle", "Peak angle", "Amplification"), ("Peak time", "Samples", "Raw lines"))),
-            ("Simulation", (("Simulation status", "Simulation files"),)),
+            ("Simulation", (("Simulation status", "Comparison status", "Simulation files"),)),
             ("Storage & notes", (("Notes", "Folder"),)),
         )
         for section_title, rows in sections:
@@ -285,6 +285,18 @@ class ExperimentManagerPage(QWidget):
                          and math.isfinite(initial_angle) and math.isfinite(peak_angle)
                          and abs(initial_angle) > 1e-6 else None)
         peak_elapsed = self._peak_elapsed_time(directory, manifest)
+        simulation_status = inspect_simulation(directory)
+        comparison_path = directory / "simulation" / "comparison_summary.json"
+        comparison_status = "Not compared"
+        if comparison_path.is_file():
+            try:
+                import json
+                summary = json.loads(comparison_path.read_text(encoding="utf-8"))
+                comparison_status = str(summary.get("status") or "Preliminary")
+                if simulation_status.state != "ready":
+                    comparison_status = "Stale"
+            except (OSError, ValueError, TypeError):
+                comparison_status = "Incomplete"
         values = {
             "Name": manifest.get("name"),
             "Experiment ID": manifest.get("experiment_id"),
@@ -306,8 +318,9 @@ class ExperimentManagerPage(QWidget):
             "Raw lines": manifest.get("raw_line_count"),
             "Notes": manifest.get("notes"),
             "Folder": str(directory),
-            "Simulation status": inspect_simulation(directory).message,
-            "Simulation files": str(inspect_simulation(directory).folder),
+            "Simulation status": simulation_status.message,
+            "Comparison status": comparison_status,
+            "Simulation files": str(simulation_status.folder),
         }
         for key, label in self.detail_labels.items():
             value = values.get(key)
