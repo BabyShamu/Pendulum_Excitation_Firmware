@@ -294,7 +294,9 @@ class ExperimentManagerPage(QWidget):
                          and abs(initial_angle) > 1e-6 else None)
         peak_elapsed = self._peak_elapsed_time(directory, manifest)
         simulation_status = inspect_simulation(directory)
-        comparison_path = directory / "simulation" / "comparison_summary.json"
+        comparison_path = directory / "simulation" / "ar_comparison_summary.json"
+        if not comparison_path.is_file():
+            comparison_path = directory / "simulation" / "comparison_summary.json"
         comparison_status = "Not compared"
         if comparison_path.is_file():
             try:
