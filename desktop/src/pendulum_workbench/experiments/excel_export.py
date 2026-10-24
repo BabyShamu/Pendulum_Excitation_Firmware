@@ -27,7 +27,8 @@ SIMULATION_COLUMNS = [
 COMPARISON_COLUMNS = [
     "Experiment ID", "Name", "Comparison Status", "Angle RMSE (deg)",
     "Pivot RMSE (mm)", "Measured Peak (deg)", "Simulated Peak (deg)",
-    "Alignment Note", "Comparison Folder",
+    "Alignment Note", "AR Measured Target Time (s)", "AR Simulated Target Time (s)",
+    "AR Target Time Difference (s)", "AR Flagged Samples", "Comparison Folder",
 ]
 
 
@@ -50,9 +51,9 @@ def _read_json(path: Path):
 
 
 def _comparison(directory: Path):
-    # The comparison summary is deliberately independent of cache validity.
-    # A change to the model makes both simulation and comparison stale.
-    return _read_json(directory / "simulation" / "comparison_summary.json")
+    # Prefer dedicated feedback-controller analysis when present.
+    dedicated = _read_json(directory / "simulation" / "ar_comparison_summary.json")
+    return dedicated or _read_json(directory / "simulation" / "comparison_summary.json")
 
 
 def export_experiment_workbook(records, root: Path) -> Path:
@@ -140,6 +141,10 @@ def export_experiment_workbook(records, root: Path) -> Path:
             _number(comparison.get("measured_peak_absolute_angle_deg")),
             _number(comparison.get("simulated_peak_absolute_angle_deg")),
             comparison.get("alignment_note"),
+            _number(comparison.get("measured_time_to_target_s")),
+            _number(comparison.get("simulated_time_to_target_s")),
+            _number(comparison.get("target_time_difference_s")),
+            _number(comparison.get("flagged_angle_samples")),
             str(simulation),
         ])
 

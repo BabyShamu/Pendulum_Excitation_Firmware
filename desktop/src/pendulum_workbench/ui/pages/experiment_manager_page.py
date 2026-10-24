@@ -294,7 +294,9 @@ class ExperimentManagerPage(QWidget):
                          and abs(initial_angle) > 1e-6 else None)
         peak_elapsed = self._peak_elapsed_time(directory, manifest)
         simulation_status = inspect_simulation(directory)
-        comparison_path = directory / "simulation" / "comparison_summary.json"
+        comparison_path = directory / "simulation" / "ar_comparison_summary.json"
+        if not comparison_path.is_file():
+            comparison_path = directory / "simulation" / "comparison_summary.json"
         comparison_status = "Not compared"
         if comparison_path.is_file():
             try:
@@ -498,6 +500,11 @@ class ExperimentManagerPage(QWidget):
             "cd(project.RootFolder);"
             "fprintf('Project loaded: %s\\n',project.Name);"
             "runExperimentSimulation(" + quote(experiment_dir) + ");"
+            "arManifest=jsondecode(fileread(fullfile(" + quote(experiment_dir) + ","
+            + quote("manifest.json") + ")));"
+            "if strcmp(string(arManifest.experiment.experiment_mode),'AUTO_RESONANCE_PARAMETRIC');"
+            "compareExperiment(" + quote(experiment_dir) + ",Plot=false,SaveResults=true);"
+            "end;"
         )
         # The process is asynchronous. MATLAB can take substantial time
         # to initialize Simulink and compile a physical model.
