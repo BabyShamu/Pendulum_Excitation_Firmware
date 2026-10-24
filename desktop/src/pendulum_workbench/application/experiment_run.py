@@ -834,7 +834,12 @@ class ExperimentRunService(QObject):
             self._pending_completion_reason = f"recording_failed: {message}"
             self._stop_requested_monotonic = time.monotonic()
             self._set_snapshot(state=ExperimentRunState.STOPPING, error_message=message)
-            self._issue_sine_stop()
+            if isinstance(self._definition, FreeSwingDefinition):
+                self._begin_recording_finalization(
+                    ExperimentRunState.FAULT, self._pending_completion_reason
+                )
+            else:
+                self._issue_sine_stop()
             return
         if self._phase in ("sine_start", "parametric_start", "phase_sine_start"):
             self._stop_requested = True
@@ -936,7 +941,10 @@ class ExperimentRunService(QObject):
         if self._phase == "running":
             self._stop_requested_monotonic = time.monotonic()
             self._set_snapshot(state=ExperimentRunState.STOPPING, completion_reason=reason)
-            self._issue_sine_stop()
+            if isinstance(self._definition, FreeSwingDefinition):
+                self._begin_recording_finalization(final_state, reason)
+            else:
+                self._issue_sine_stop()
         elif self._phase in (
             "metadata_before_open",
             "latch_open",
