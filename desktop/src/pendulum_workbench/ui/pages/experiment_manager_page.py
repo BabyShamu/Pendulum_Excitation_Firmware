@@ -6,14 +6,15 @@ import shutil
 from datetime import datetime
 from pathlib import Path
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QProcess, QSettings
 from PySide6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QComboBox,
+    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QComboBox, QFileDialog,
     QPushButton, QTableWidget, QTableWidgetItem, QMessageBox, QAbstractItemView,
     QFormLayout, QGroupBox, QScrollArea, QGridLayout, QFrame, QHeaderView, QSplitter,
 )
 
 from pendulum_workbench.experiments.repository import ExperimentRepository
+from pendulum_workbench.experiments.simulation_cache import inspect_simulation
 
 
 class SortableExperimentItem(QTableWidgetItem):
@@ -38,6 +39,8 @@ class ExperimentManagerPage(QWidget):
         self.controller = controller
         self.repository = controller.experiment_recorder.repository
         self._records = []
+        self._matlab_process = None
+        self._settings = QSettings('PendulumWorkbench', 'PendulumWorkbench')
         layout = QVBoxLayout(self)
         heading = QLabel("Experiment Manager")
         heading.setStyleSheet("font-size: 22px; font-weight: 700;")
@@ -58,8 +61,8 @@ class ExperimentManagerPage(QWidget):
         export.clicked.connect(self.export_excel)
         toolbar.addWidget(export)
         layout.addLayout(toolbar)
-        self.table = QTableWidget(0, 7)
-        self.table.setHorizontalHeaderLabels(["Date", "Experiment", "Mode", "Duration", "Initial angle", "Peak angle", "Status"])
+        self.table = QTableWidget(0, 8)
+        self.table.setHorizontalHeaderLabels(["Date", "Experiment", "Mode", "Duration", "Initial angle", "Peak angle", "Status", "Simulation"])
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
@@ -68,7 +71,7 @@ class ExperimentManagerPage(QWidget):
         header = self.table.horizontalHeader()
         header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
         header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
-        for index, width in enumerate((150, 280, 140, 100, 115, 105, 115)):
+        for index, width in enumerate((150, 280, 140, 100, 115, 105, 115, 140)):
             self.table.setColumnWidth(index, width)
         self.table.verticalHeader().setVisible(False)
         self.table.verticalHeader().setDefaultSectionSize(37)
@@ -102,6 +105,7 @@ class ExperimentManagerPage(QWidget):
             ("Overview", (("Name", "Experiment ID", "Created"), ("Mode", "Completion", "Archived"))),
             ("Excitation settings", (("Amplitude", "Frequency", "Phase"), ("Target angle", "Commanded duration", "Duration"))),
             ("Recorded results", (("Initial angle", "Peak angle", "Amplification"), ("Peak time", "Samples", "Raw lines"))),
+            ("Simulation", (("Simulation status", "Simulation files"),)),
             ("Storage & notes", (("Notes", "Folder"),)),
         )
         for section_title, rows in sections:
@@ -143,6 +147,8 @@ class ExperimentManagerPage(QWidget):
         layout.addWidget(splitter, 1)
         actions = QHBoxLayout()
         for label, callback in [
+            ("Open Simulation Folder", self.open_simulation_folder),
+            ("Run / Reuse Simscape", self.run_simscape),
             ("Archive / Restore", self.toggle_archive),
             ("Delete Permanently", self.delete_selected),
         ]:
@@ -160,6 +166,16 @@ class ExperimentManagerPage(QWidget):
         self.repository = self.controller.experiment_recorder.repository
         self._records = self.repository.list_manifests()
         self._filter()
+
+    @staticmethod
+    def _friendly_mode(mode: object) -> str:
+        raw = str(mode or "Recording")
+        return {
+            "FREE_SWING": "Free Swing",
+            "VERTICAL_SINUSOIDAL_EXCITATION": "Sinusoidal",
+            "AUTO_RESONANCE_PARAMETRIC": "Auto Resonance",
+            "PHASE_TRACKED_SINE_AUTO_RESONANCE": "Phase Tracked",
+        }.get(raw, raw)
 
     def _filter(self, *_):
         query = self.search.text().casefold().strip()
@@ -186,13 +202,13 @@ class ExperimentManagerPage(QWidget):
             fields = [
                 str(manifest.get("created_at") or "")[:16].replace("T", " "),
                 str(manifest.get("name") or ""),
-                {"VERTICAL_SINUSOIDAL_EXCITATION": "Sinusoidal",
-                 "AUTO_RESONANCE_PARAMETRIC": "Auto Resonance",
-                 "PHASE_TRACKED_SINE_AUTO_RESONANCE": "Phase Tracked"}.get(kind, kind),
+                self._friendly_mode(kind),
                 f"{duration:.1f} s" if isinstance(duration, (int, float)) else "—",
                 self._display_number(initial, "°"),
                 self._display_number(peak, "°"),
                 "Archived" if archived else str(manifest.get("completion_status") or ""),
+                {"ready": "Saved", "stale": "Stale", "incomplete": "Incomplete",
+                 "missing": "Not simulated"}[inspect_simulation(directory).state],
             ]
             searchable = " ".join(fields + [params, str(manifest.get("experiment_id") or "")])
             if query and query not in searchable.casefold():
@@ -204,7 +220,7 @@ class ExperimentManagerPage(QWidget):
                 item.setData(Qt.ItemDataRole.UserRole, str(directory))
                 if col in (3, 4, 5):
                     item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-                elif col == 6:
+                elif col in (6, 7):
                     item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
                 if col in (3, 4, 5):
                     numeric = (duration, initial, peak)[col - 3]
@@ -259,7 +275,7 @@ class ExperimentManagerPage(QWidget):
             "Name": manifest.get("name"),
             "Experiment ID": manifest.get("experiment_id"),
             "Created": manifest.get("created_at"),
-            "Mode": details.get("experiment_mode", "Recording"),
+            "Mode": self._friendly_mode(details.get("experiment_mode", "Recording")),
             "Completion": manifest.get("completion_status"),
             "Archived": "Yes" if manifest.get("archived") else "No",
             "Amplitude": self._display_number(details.get("commanded_amplitude_mm"), " mm"),
@@ -276,6 +292,8 @@ class ExperimentManagerPage(QWidget):
             "Raw lines": manifest.get("raw_line_count"),
             "Notes": manifest.get("notes"),
             "Folder": str(directory),
+            "Simulation status": inspect_simulation(directory).message,
+            "Simulation files": str(inspect_simulation(directory).folder),
         }
         for key, label in self.detail_labels.items():
             value = values.get(key)
@@ -308,6 +326,91 @@ class ExperimentManagerPage(QWidget):
         except OSError:
             return None
         return None
+
+    def open_simulation_folder(self):
+        selected = self._selected()
+        if selected is None:
+            return
+        folder = inspect_simulation(selected[0]).folder
+        if not folder.is_dir():
+            QMessageBox.information(self, "Simscape", "No simulation folder exists yet.")
+            return
+        from PySide6.QtGui import QDesktopServices
+        from PySide6.QtCore import QUrl
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(folder)))
+
+    def run_simscape(self):
+        """Run MATLAB asynchronously. MATLAB decides whether cache is reusable."""
+        selected = self._selected()
+        if selected is None:
+            return
+        if self._matlab_process is not None and self._matlab_process.state() != QProcess.ProcessState.NotRunning:
+            QMessageBox.information(self, "Simscape", "MATLAB simulation is already running.")
+            return
+        experiment_dir, manifest = selected
+        mode = (manifest.get("experiment") or {}).get("experiment_mode")
+        if mode not in ("FREE_SWING", "VERTICAL_SINUSOIDAL_EXCITATION", "AUTO_RESONANCE_PARAMETRIC"):
+            QMessageBox.information(self, "Simscape", "This experiment mode has no MATLAB simulation wrapper yet.")
+            return
+        matlab_exe = str(self._settings.value("simscape/matlab_executable", "") or "")
+        if not matlab_exe or not Path(matlab_exe).is_file():
+            matlab_exe = shutil.which("matlab") or ""
+        if not matlab_exe:
+            matlab_exe, _ = QFileDialog.getOpenFileName(
+                self, "Choose matlab.exe", "", "MATLAB executable (matlab.exe);;All files (*)"
+            )
+            if not matlab_exe:
+                return
+        self._settings.setValue("simscape/matlab_executable", matlab_exe)
+        thesis_root = str(self._settings.value("simscape/thesis_root", "") or "")
+        simulation_dir = Path(thesis_root) / "03_MATLAB" / "Simulation"
+        model_dir = Path(thesis_root) / "04_Simscape" / "Models"
+        if not (simulation_dir / "runExperimentSimulation.m").is_file() or not (model_dir / "Pendulum_Simscape_Model.slx").is_file():
+            thesis_root = QFileDialog.getExistingDirectory(
+                self, "Select your Thesis repository root (containing 03_MATLAB and 04_Simscape)",
+                str(Path.home())
+            )
+            if not thesis_root:
+                return
+            simulation_dir = Path(thesis_root) / "03_MATLAB" / "Simulation"
+            model_dir = Path(thesis_root) / "04_Simscape" / "Models"
+            if not (simulation_dir / "runExperimentSimulation.m").is_file() or not (model_dir / "Pendulum_Simscape_Model.slx").is_file():
+                QMessageBox.warning(self, "Simscape", "The chosen folder does not contain the MATLAB runner and Simscape model.")
+                return
+            self._settings.setValue("simscape/thesis_root", thesis_root)
+
+        def quote(value):
+            # MATLAB single quoted string with doubled embedded apostrophes.
+            return "'" + str(value).replace("'", "''") + "'"
+
+        matlab_batch = (
+            "addpath(genpath(" + quote(Path(thesis_root) / "03_MATLAB") + "));"
+            "addpath(genpath(" + quote(Path(thesis_root) / "04_Simscape") + "));"
+            "runExperimentSimulation(" + quote(experiment_dir) + ");"
+        )
+        self._matlab_process = QProcess(self)
+        self._matlab_process.setProgram(matlab_exe)
+        self._matlab_process.setArguments(["-batch", matlab_batch])
+        self._matlab_process.setProcessChannelMode(QProcess.ProcessChannelMode.MergedChannels)
+        self._matlab_process.finished.connect(self._on_matlab_finished)
+        self._matlab_process.errorOccurred.connect(self._on_matlab_error)
+        self._matlab_process.start()
+        QMessageBox.information(
+            self, "Simscape", "MATLAB started in the background. A matching simulation "
+            "will be reused; otherwise a new simulation will be saved to simulation/."
+        )
+
+    def _on_matlab_finished(self, exit_code, _exit_status):
+        output = bytes(self._matlab_process.readAllStandardOutput()).decode("utf-8", errors="replace") if self._matlab_process else ""
+        self.refresh()
+        if exit_code == 0:
+            QMessageBox.information(self, "Simscape", "MATLAB finished. Simulation status refreshed.\\n" + output[-1400:])
+        else:
+            QMessageBox.warning(self, "Simscape", "MATLAB exited with code " + str(exit_code) + "\\n" + output[-2500:])
+
+    def _on_matlab_error(self, error):
+        if error == QProcess.ProcessError.FailedToStart:
+            QMessageBox.warning(self, "Simscape", "Could not start MATLAB. Verify the matlab.exe location.")
 
     def toggle_archive(self):
         selected = self._selected()
