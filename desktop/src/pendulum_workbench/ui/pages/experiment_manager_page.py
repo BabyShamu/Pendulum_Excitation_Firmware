@@ -384,8 +384,8 @@ class ExperimentManagerPage(QWidget):
             return "'" + str(value).replace("'", "''") + "'"
 
         matlab_batch = (
-            "addpath(" + quote(simulation_dir) + ");"
-            "addpath(" + quote(model_dir) + ");"
+            "addpath(genpath(" + quote(Path(thesis_root) / "03_MATLAB") + "));"
+            "addpath(genpath(" + quote(Path(thesis_root) / "04_Simscape") + "));"
             "runExperimentSimulation(" + quote(experiment_dir) + ");"
         )
         self._matlab_process = QProcess(self)
