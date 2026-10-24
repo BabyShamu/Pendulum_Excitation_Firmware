@@ -169,8 +169,16 @@ class ExperimentManagerPage(QWidget):
 
     def refresh(self):
         self.repository = self.controller.experiment_recorder.repository
+        selected = self._selected()
+        selected_path = selected[0] if selected else None
         self._records = self.repository.list_manifests()
         self._filter()
+        if selected_path is not None:
+            for row in range(self.table.rowCount()):
+                item = self.table.item(row, 0)
+                if item is not None and Path(item.data(Qt.ItemDataRole.UserRole)) == selected_path:
+                    self.table.selectRow(row)
+                    break
 
     @staticmethod
     def _friendly_mode(mode: object) -> str:
@@ -332,13 +340,37 @@ class ExperimentManagerPage(QWidget):
             return None
         return None
 
+    def _simscape_dialog(self, title, message, icon=QMessageBox.Icon.Information):
+        """Use a readable light dialog independent of the app's dark QSS."""
+        dialog = QMessageBox(self)
+        dialog.setWindowTitle(title)
+        dialog.setIcon(icon)
+        dialog.setText(message)
+        dialog.setStyleSheet(
+            "QMessageBox { background-color: #f8faf9; color: #24363a; }"
+            "QMessageBox QLabel { background: transparent; color: #24363a; "
+            "font-size: 13px; min-width: 340px; max-width: 540px; }"
+            "QMessageBox QPushButton { color: #24363a; background: #edf2ef;"
+            " border: 1px solid #aebdb4; padding: 7px 12px; border-radius: 5px; }"
+        )
+        return dialog
+
+    def _show_simscape_message(self, title, message, warning=False):
+        kind = QMessageBox.Icon.Warning if warning else QMessageBox.Icon.Information
+        dialog = self._simscape_dialog(title, message, kind)
+        dialog.addButton("OK", QMessageBox.ButtonRole.AcceptRole)
+        dialog.exec()
+
     def open_simulation_folder(self):
         selected = self._selected()
         if selected is None:
             return
         folder = inspect_simulation(selected[0]).folder
         if not folder.is_dir():
-            QMessageBox.information(self, "Simscape", "No simulation results are saved yet. Select the experiment and click Run / Reuse Simscape first. If MATLAB was started, wait for it to finish.")
+            self._show_simscape_message(
+                "No simulation saved",
+                "This experiment has no saved simulation yet. Use Run / Reuse Simscape first."
+            )
             return
         from PySide6.QtGui import QDesktopServices
         from PySide6.QtCore import QUrl
@@ -350,9 +382,35 @@ class ExperimentManagerPage(QWidget):
         if selected is None:
             return
         if self._matlab_process is not None and self._matlab_process.state() != QProcess.ProcessState.NotRunning:
-            QMessageBox.information(self, "Simscape", "MATLAB is still running. Please wait for completion; its output is saved in the experiment derived/matlab_run.log file.")
+            self._show_simscape_message(
+                "MATLAB is running",
+                "The simulation process is still active. Progress appears below the buttons; "
+                "the complete output is in derived/matlab_run.log."
+            )
             return
         experiment_dir, manifest = selected
+        cache = inspect_simulation(experiment_dir)
+        if cache.state == "ready":
+            # Saved results can be opened without MATLAB startup. Only MATLAB
+            # can verify full model/dictionary/source-code freshness.
+            dialog = self._simscape_dialog(
+                "Existing simulation",
+                "Saved simulation results exist for this experiment.\n\n"
+                "Open saved files instantly, or launch MATLAB to verify "
+                "model and code changes.",
+                QMessageBox.Icon.Question,
+            )
+            open_button = dialog.addButton("Open Saved Results", QMessageBox.ButtonRole.AcceptRole)
+            revalidate_button = dialog.addButton("Revalidate in MATLAB", QMessageBox.ButtonRole.ActionRole)
+            dialog.addButton("Cancel", QMessageBox.ButtonRole.RejectRole)
+            dialog.exec()
+            clicked = dialog.clickedButton()
+            if clicked is open_button:
+                self.open_simulation_folder()
+                self.simulation_progress.setText("MATLAB: saved simulation reused without startup")
+                return
+            if clicked is not revalidate_button:
+                return
         mode = (manifest.get("experiment") or {}).get("experiment_mode")
         if mode not in ("FREE_SWING", "VERTICAL_SINUSOIDAL_EXCITATION", "AUTO_RESONANCE_PARAMETRIC"):
             QMessageBox.information(self, "Simscape", "This experiment mode has no MATLAB simulation wrapper yet.")
@@ -443,27 +501,37 @@ class ExperimentManagerPage(QWidget):
 
     def _on_matlab_finished(self, exit_code, _exit_status):
         self._on_matlab_output()
-        output = "".join(self._matlab_output)
         log_path = self._matlab_log_path
         self._matlab_process = None
         self.refresh()
+        selected = self._selected()
+        status = inspect_simulation(selected[0]).state if selected else "unknown"
         if exit_code == 0:
-            self.simulation_progress.setText("MATLAB: finished — simulation list refreshed")
-            QMessageBox.information(self, "Simscape",
-                "MATLAB finished successfully.\\nLog: " + str(log_path)
-                + "\\n\\n" + output[-1200:])
+            self.simulation_progress.setText("MATLAB: finished — simulation " + status)
+            self._show_simscape_message(
+                "Simscape completed",
+                "MATLAB finished successfully.\n"
+                "Simulation status: " + status.capitalize() + "\n\n"
+                "Results are in the selected experiment's simulation/ folder.\n"
+                "The complete diagnostic output was saved to:\n" + str(log_path),
+            )
         else:
             self.simulation_progress.setText("MATLAB: failed — inspect " + str(log_path))
-            QMessageBox.warning(self, "Simscape",
-                "MATLAB failed (exit " + str(exit_code) + ").\\nLog: "
-                + str(log_path) + "\\n\\n" + output[-1800:])
+            self._show_simscape_message(
+                "Simscape failed",
+                "MATLAB exited with code " + str(exit_code) +
+                ".\n\nSee the full diagnostic log:\n" + str(log_path),
+                warning=True,
+            )
 
     def _on_matlab_error(self, error):
         if error == QProcess.ProcessError.FailedToStart:
             self.simulation_progress.setText("MATLAB: failed to launch")
-            QMessageBox.warning(self, "Simscape",
-                "Could not launch MATLAB. Verify matlab.exe.\\nSee "
-                + str(self._matlab_log_path))
+            self._show_simscape_message(
+                "Unable to start MATLAB",
+                "Check matlab.exe. See diagnostic log:\n" + str(self._matlab_log_path),
+                warning=True,
+            )
 
     def toggle_archive(self):
         selected = self._selected()
