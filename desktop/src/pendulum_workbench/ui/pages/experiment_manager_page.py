@@ -500,8 +500,9 @@ class ExperimentManagerPage(QWidget):
             "cd(project.RootFolder);"
             "fprintf('Project loaded: %s\\n',project.Name);"
             "runExperimentSimulation(" + quote(experiment_dir) + ");"
-            "if strcmp(string(jsondecode(fileread(fullfile(" + quote(experiment_dir) + ","
-            + quote("manifest.json") + "))).experiment.experiment_mode),'AUTO_RESONANCE_PARAMETRIC');"
+            "arManifest=jsondecode(fileread(fullfile(" + quote(experiment_dir) + ","
+            + quote("manifest.json") + ")));"
+            "if strcmp(string(arManifest.experiment.experiment_mode),'AUTO_RESONANCE_PARAMETRIC');"
             "compareExperiment(" + quote(experiment_dir) + ",Plot=false,SaveResults=true);"
             "end;"
         )
