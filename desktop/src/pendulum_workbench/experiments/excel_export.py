@@ -7,12 +7,13 @@ import os
 from pathlib import Path
 
 from pendulum_workbench.experiments.simulation_cache import inspect_simulation
+from pendulum_workbench.experiments.target_metrics import target_metrics
 
 EXPERIMENT_COLUMNS = [
     "Experiment ID", "Date", "Name", "Type", "Completion", "Archived",
     "Initial Angle (deg)", "Initial Omega (rad/s)",
     "Amplitude (mm)", "Frequency (Hz)", "Feedback Phase (deg)",
-    "Target Angle (deg)", "Requested Duration (s)", "Actual Duration (s)",
+    "Target Angle (deg)", "Target Achieved", "Target Time (s)", "Requested Duration (s)", "Actual Duration (s)",
     "Measured Peak Angle (deg)", "Measured Peak Time (s)",
     "Time to Target (s)", "Samples", "Raw Lines",
     "Simulation Status", "Comparison Status", "Angle RMSE (deg)",
@@ -84,6 +85,7 @@ def export_experiment_workbook(records, root: Path) -> Path:
             "AUTO_RESONANCE_PARAMETRIC": "Auto Resonance",
             "PHASE_TRACKED_SINE_AUTO_RESONANCE": "Phase Tracked",
         }.get(details.get("experiment_mode"), str(details.get("experiment_mode") or "Recording"))
+        target = target_metrics(directory, manifest)
         status = inspect_simulation(directory)
         metadata = status.metadata
         simulation = directory / "simulation"
@@ -102,7 +104,9 @@ def export_experiment_workbook(records, root: Path) -> Path:
             _number(details.get("commanded_amplitude_mm")),
             _number(details.get("commanded_frequency_hz")),
             _number(details.get("commanded_phase_deg")),
-            _number(details.get("target_angle_deg")),
+            _number(target["target_angle_deg"]),
+            ("Yes" if target["target_achieved"] else "No") if target["target_achieved"] is not None else None,
+            _number(target["target_time_s"]),
             _number(details.get("requested_duration_s") or details.get("commanded_duration_s")),
             _number(details.get("actual_elapsed_duration_s")),
             _number(manifest.get("peak_absolute_angle_deg")),
