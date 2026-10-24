@@ -47,6 +47,20 @@ class MainWindow(QMainWindow):
             """
             QMainWindow { background: #e9eeeb; color: #24363a; }
             QWidget { background: transparent; color: #24363a; }
+            /* Override the Windows dark dialog palette. Without an explicit
+               background, transparent children inherit near-black surfaces. */
+            QDialog, QMessageBox { background-color: #f8faf9; color: #24363a; }
+            QDialog QLabel, QMessageBox QLabel {
+                background-color: transparent; color: #24363a; font-size: 12px;
+            }
+            QDialog QPushButton, QMessageBox QPushButton {
+                background-color: #f4f7f5; color: #28463b;
+                border: 1px solid #cbd8d0; border-radius: 6px;
+                padding: 7px 12px; min-width: 64px;
+            }
+            QDialog QPushButton:hover, QMessageBox QPushButton:hover {
+                background-color: #e6eee8;
+            }
             QWidget#centralContent { background: #e9eeeb; }
             QLabel { background: transparent; }
             QLabel#eyebrow { color: #287b68; font-size: 10px; font-weight: 700; }
@@ -119,7 +133,7 @@ class MainWindow(QMainWindow):
         workspace.setSpacing(12)
         navigation = QFrame()
         navigation.setObjectName("navRail")
-        navigation.setFixedWidth(148)
+        navigation.setFixedWidth(173)
         self.navigation_rail = navigation
         nav_layout = QVBoxLayout(navigation)
         self.navigation_layout = nav_layout
@@ -134,10 +148,10 @@ class MainWindow(QMainWindow):
         self.monitor_navigation_button = self._navigation_button("Monitor", "monitorNavigationButton", 0)
         self.live_navigation_button = self.monitor_navigation_button
         self.experiment_navigation_button = self._navigation_button(
-            "Experiment", "experimentNavigationButton", 1
+            "Run Experiment", "experimentNavigationButton", 1
         )
         self.manager_navigation_button = self._navigation_button(
-            "Experiments", "managerNavigationButton", 3
+            "Experiment Library", "managerNavigationButton", 3
         )
         for index, button in (
             (0, self.monitor_navigation_button),
