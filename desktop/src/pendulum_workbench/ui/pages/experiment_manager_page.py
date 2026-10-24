@@ -3,6 +3,7 @@ import os
 import csv
 import math
 import shutil
+import sys
 from datetime import datetime
 from pathlib import Path
 
@@ -15,6 +16,7 @@ from PySide6.QtWidgets import (
 
 from pendulum_workbench.experiments.repository import ExperimentRepository
 from pendulum_workbench.experiments.simulation_cache import inspect_simulation
+from pendulum_workbench.experiments.target_metrics import target_metrics
 
 
 class SortableExperimentItem(QTableWidgetItem):
@@ -64,8 +66,8 @@ class ExperimentManagerPage(QWidget):
         export.clicked.connect(self.export_excel)
         toolbar.addWidget(export)
         layout.addLayout(toolbar)
-        self.table = QTableWidget(0, 8)
-        self.table.setHorizontalHeaderLabels(["Date", "Experiment", "Mode", "Duration", "Initial angle", "Peak angle", "Status", "Simulation"])
+        self.table = QTableWidget(0, 11)
+        self.table.setHorizontalHeaderLabels(["Date", "Experiment", "Mode", "Duration", "Initial angle", "Peak angle", "Target angle", "Target achieved", "Target time", "Status", "Simulation"])
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
@@ -74,7 +76,7 @@ class ExperimentManagerPage(QWidget):
         header = self.table.horizontalHeader()
         header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
         header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
-        for index, width in enumerate((150, 280, 140, 100, 115, 105, 115, 140)):
+        for index, width in enumerate((145, 290, 132, 91, 106, 98, 103, 115, 108, 109, 130)):
             self.table.setColumnWidth(index, width)
         self.table.verticalHeader().setVisible(False)
         self.table.verticalHeader().setDefaultSectionSize(37)
@@ -107,7 +109,7 @@ class ExperimentManagerPage(QWidget):
         sections = (
             ("Overview", (("Name", "Experiment ID", "Created"), ("Mode", "Completion", "Archived"))),
             ("Excitation settings", (("Amplitude", "Frequency", "Phase"), ("Target angle", "Commanded duration", "Duration"))),
-            ("Recorded results", (("Initial angle", "Peak angle", "Amplification"), ("Peak time", "Samples", "Raw lines"))),
+            ("Recorded results", (("Initial angle", "Peak angle", "Amplification"), ("Peak time", "Samples", "Raw lines"), ("Target achieved", "Target time", "Target angle"))),
             ("Simulation", (("Simulation status", "Comparison status", "Simulation files"),)),
             ("Storage & notes", (("Notes", "Folder"),)),
         )
@@ -213,6 +215,7 @@ class ExperimentManagerPage(QWidget):
                 duration = details.get("duration_s")
             peak = manifest.get("peak_absolute_angle_deg")
             initial = details.get("measured_initial_angle_deg")
+            targets = target_metrics(directory, manifest)
             fields = [
                 str(manifest.get("created_at") or "")[:16].replace("T", " "),
                 str(manifest.get("name") or ""),
@@ -220,6 +223,10 @@ class ExperimentManagerPage(QWidget):
                 f"{duration:.1f} s" if isinstance(duration, (int, float)) else "—",
                 self._display_number(initial, "°"),
                 self._display_number(peak, "°"),
+                self._display_number(targets["target_angle_deg"], "°"),
+                ("Yes" if targets["target_achieved"] else "No")
+                    if targets["target_achieved"] is not None else "—",
+                self._display_number(targets["target_time_s"], " s"),
                 "Archived" if archived else str(manifest.get("completion_status") or ""),
                 {"ready": "Saved", "stale": "Stale", "incomplete": "Incomplete",
                  "missing": "Not simulated"}[inspect_simulation(directory).state],
@@ -232,12 +239,13 @@ class ExperimentManagerPage(QWidget):
             for col, value in enumerate(fields):
                 item = SortableExperimentItem(value)
                 item.setData(Qt.ItemDataRole.UserRole, str(directory))
-                if col in (3, 4, 5):
+                if col in (3, 4, 5, 6, 8):
                     item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-                elif col in (6, 7):
+                elif col in (7, 9, 10):
                     item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-                if col in (3, 4, 5):
-                    numeric = (duration, initial, peak)[col - 3]
+                if col in (3, 4, 5, 6, 8):
+                    numeric = {3: duration, 4: initial, 5: peak,
+                               6: targets["target_angle_deg"], 8: targets["target_time_s"]}[col]
                     if isinstance(numeric, (int, float)) and math.isfinite(numeric):
                         item.setData(Qt.ItemDataRole.UserRole + 1, float(numeric))
                 self.table.setItem(row, col, item)
@@ -297,6 +305,7 @@ class ExperimentManagerPage(QWidget):
                     comparison_status = "Stale"
             except (OSError, ValueError, TypeError):
                 comparison_status = "Incomplete"
+        targets = target_metrics(directory, manifest)
         values = {
             "Name": manifest.get("name"),
             "Experiment ID": manifest.get("experiment_id"),
@@ -307,7 +316,10 @@ class ExperimentManagerPage(QWidget):
             "Amplitude": self._display_number(details.get("commanded_amplitude_mm"), " mm"),
             "Frequency": self._display_number(details.get("commanded_frequency_hz"), " Hz", 3),
             "Phase": self._display_number(details.get("commanded_phase_deg"), "°"),
-            "Target angle": self._display_number(details.get("target_angle_deg"), "°"),
+            "Target angle": self._display_number(targets["target_angle_deg"], "°"),
+            "Target achieved": ("Yes" if targets["target_achieved"] else "No")
+                if targets["target_achieved"] is not None else "—",
+            "Target time": self._display_number(targets["target_time_s"], " s"),
             "Commanded duration": self._display_number(details.get("commanded_duration_s"), " s"),
             "Duration": self._display_number(duration, " s"),
             "Initial angle": self._display_number(details.get("measured_initial_angle_deg"), "°"),
