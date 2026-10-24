@@ -24,6 +24,7 @@ from pendulum_workbench.domain.angle_prediction import (
 )
 from pendulum_workbench.domain.experiment_run import (
     AutoResonanceDefinition,
+    FreeSwingDefinition,
     ExperimentMode,
     ExperimentDefinition,
     ExperimentRunSnapshot,
@@ -227,13 +228,18 @@ class ExperimentRunService(QObject):
         if self._phase == "recording_start":
             self._stop_pending_recording()
         elif self._phase == "running":
-            self._issue_sine_stop()
+            if isinstance(self._definition, FreeSwingDefinition):
+                self._begin_recording_finalization(
+                    self._pending_final_state, self._pending_completion_reason
+                )
+            else:
+                self._issue_sine_stop()
 
     def _validate_start_conditions(self, definition: ExperimentDefinition) -> None:
         snapshot = self.state.snapshot
         maintenance = self.maintenance.snapshot
         if snapshot.data_source != DataSourceMode.REAL:
-            raise RuntimeError("Vertical sinusoidal excitation requires a connected real STM32")
+            raise RuntimeError("Experiments require a connected real STM32")
         if snapshot.connection != ConnectionState.CONNECTED:
             raise RuntimeError("Connect to the STM32 before running an experiment")
         if any(
@@ -263,9 +269,12 @@ class ExperimentRunService(QObject):
             raise RuntimeError("Command Pendulum Latch HOLD and wait for confirmation before RUN")
         span_steps = snapshot.hardware_status.travel_span_steps
         steps_per_mm = snapshot.hardware_status.steps_per_mm
-        if span_steps is None or steps_per_mm is None or steps_per_mm <= 0.0:
-            raise RuntimeError("Homed travel is not available to validate pivot amplitude")
-        if isinstance(definition, VerticalSineDefinition):
+        if not isinstance(definition, FreeSwingDefinition):
+            if span_steps is None or steps_per_mm is None or steps_per_mm <= 0.0:
+                raise RuntimeError("Homed travel is not available to validate pivot amplitude")
+        if isinstance(definition, FreeSwingDefinition):
+            pass  # Stationary pivot: no commanded excursion.
+        elif isinstance(definition, VerticalSineDefinition):
             if definition.frequency_hz > FIRMWARE_MAX_SINE_FREQUENCY_HZ:
                 raise ValueError(
                     f"Frequency exceeds the current firmware command limit of "
@@ -425,7 +434,17 @@ class ExperimentRunService(QObject):
                     self._pending_completion_reason,
                 )
             else:
-                self._issue_sine_start()
+                if isinstance(self._definition, FreeSwingDefinition):
+                    self._sine_started_monotonic = time.monotonic()
+                    self._phase = "running"
+                    self._timer.start()
+                    self._set_snapshot(
+                        state=ExperimentRunState.RUNNING,
+                        started_at=datetime.now().astimezone().isoformat(),
+                        completion_reason="Free swing recording; motor remains idle.",
+                    )
+                else:
+                    self._issue_sine_start()
             return
 
         start_command = (
@@ -713,6 +732,7 @@ class ExperimentRunService(QObject):
             self._phase == "running"
             and self._snapshot.state == ExperimentRunState.RUNNING
             and self._definition is not None
+            and not isinstance(self._definition, FreeSwingDefinition)
             and sample.source == "real"
             and sample.angle_deg is not None
             and math.isfinite(sample.angle_deg)
@@ -868,7 +888,9 @@ class ExperimentRunService(QObject):
                 + (f" at {event.fields['angle_deg']} deg" if event.fields.get("angle_deg") else "")
                 + ".",
             )
-            if self._phase == "running" and self._snapshot.state == ExperimentRunState.RUNNING:
+            if (self._phase == "running"
+                    and self._snapshot.state == ExperimentRunState.RUNNING
+                    and not isinstance(self._definition, FreeSwingDefinition)):
                 self._pending_final_state = ExperimentRunState.COMPLETE
                 self._pending_completion_reason = "TARGET_REACHED"
                 self._stop_requested_monotonic = time.monotonic()
@@ -944,7 +966,12 @@ class ExperimentRunService(QObject):
             self._pending_completion_reason = "duration_elapsed"
             self._stop_requested_monotonic = time.monotonic()
             self._set_snapshot(state=ExperimentRunState.STOPPING)
-            self._issue_sine_stop()
+            if isinstance(definition, FreeSwingDefinition):
+                self._begin_recording_finalization(
+                    self._pending_final_state, self._pending_completion_reason
+                )
+            else:
+                self._issue_sine_stop()
 
     def _publish_terminal(
         self,
@@ -968,7 +995,7 @@ class ExperimentRunService(QObject):
 
     def _require_definition(self) -> ExperimentDefinition:
         if self._definition is None:
-            raise RuntimeError("No vertical sine definition is active")
+            raise RuntimeError("No experiment definition is active")
         return self._definition
 
     def _set_snapshot(self, **changes: object) -> None:
