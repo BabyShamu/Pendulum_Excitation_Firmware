@@ -161,6 +161,16 @@ class ExperimentManagerPage(QWidget):
         self._records = self.repository.list_manifests()
         self._filter()
 
+    @staticmethod
+    def _friendly_mode(mode: object) -> str:
+        raw = str(mode or "Recording")
+        return {
+            "FREE_SWING": "Free Swing",
+            "VERTICAL_SINUSOIDAL_EXCITATION": "Sinusoidal",
+            "AUTO_RESONANCE_PARAMETRIC": "Auto Resonance",
+            "PHASE_TRACKED_SINE_AUTO_RESONANCE": "Phase Tracked",
+        }.get(raw, raw)
+
     def _filter(self, *_):
         query = self.search.text().casefold().strip()
         visibility = self.visibility.currentText()
@@ -186,9 +196,7 @@ class ExperimentManagerPage(QWidget):
             fields = [
                 str(manifest.get("created_at") or "")[:16].replace("T", " "),
                 str(manifest.get("name") or ""),
-                {"VERTICAL_SINUSOIDAL_EXCITATION": "Sinusoidal",
-                 "AUTO_RESONANCE_PARAMETRIC": "Auto Resonance",
-                 "PHASE_TRACKED_SINE_AUTO_RESONANCE": "Phase Tracked"}.get(kind, kind),
+                self._friendly_mode(kind),
                 f"{duration:.1f} s" if isinstance(duration, (int, float)) else "—",
                 self._display_number(initial, "°"),
                 self._display_number(peak, "°"),
@@ -259,7 +267,7 @@ class ExperimentManagerPage(QWidget):
             "Name": manifest.get("name"),
             "Experiment ID": manifest.get("experiment_id"),
             "Created": manifest.get("created_at"),
-            "Mode": details.get("experiment_mode", "Recording"),
+            "Mode": self._friendly_mode(details.get("experiment_mode", "Recording")),
             "Completion": manifest.get("completion_status"),
             "Archived": "Yes" if manifest.get("archived") else "No",
             "Amplitude": self._display_number(details.get("commanded_amplitude_mm"), " mm"),
