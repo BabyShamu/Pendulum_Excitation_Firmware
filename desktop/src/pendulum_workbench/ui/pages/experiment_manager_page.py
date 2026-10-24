@@ -388,9 +388,14 @@ class ExperimentManagerPage(QWidget):
             # MATLAB single quoted string with doubled embedded apostrophes.
             return "'" + str(value).replace("'", "''") + "'"
 
+        # Match the interactive MATLAB environment: the Thesis MATLAB
+        # Project owns the path configuration for CAD/Simscape assets.
+        # Opening a separate -batch MATLAB process without its project
+        # causes imported-geometry blocks to fail with missing files.
         matlab_batch = (
-            "addpath(genpath(" + quote(Path(thesis_root) / "03_MATLAB") + "));"
-            "addpath(genpath(" + quote(Path(thesis_root) / "04_Simscape") + "));"
+            "project=openProject(" + quote(thesis_root) + ");"
+            "cd(project.RootFolder);"
+            "fprintf('Project loaded: %s\\n',project.Name);"
             "runExperimentSimulation(" + quote(experiment_dir) + ");"
         )
         # The process is asynchronous. MATLAB can take substantial time
