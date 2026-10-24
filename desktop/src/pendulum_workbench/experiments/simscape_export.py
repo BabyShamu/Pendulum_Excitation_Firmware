@@ -13,6 +13,7 @@ def write_simscape_input(directory: Path, manifest: dict[str, Any]) -> Path:
     experiment = manifest.get("experiment") or {}
     mode = experiment.get("experiment_mode")
     mode_names = {
+        "FREE_SWING": "free_swing",
         "VERTICAL_SINUSOIDAL_EXCITATION": "sinusoidal",
         "AUTO_RESONANCE_PARAMETRIC": "auto_resonance",
         "PHASE_TRACKED_SINE_AUTO_RESONANCE": "phase_tracked_sine",
