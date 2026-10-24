@@ -49,6 +49,11 @@ def main() -> int:
             f"project=openProject({_quote(thesis)});"
             "cd(project.RootFolder);"
             f"runExperimentSimulation({_quote(folder)});"
+            f"if exist(fullfile({_quote(folder)},'simulation_input.json'),'file');"
+            f"manifest=jsondecode(fileread(fullfile({_quote(folder)},'manifest.json')));"
+            "if strcmp(string(manifest.experiment.experiment_mode),'AUTO_RESONANCE_PARAMETRIC');"
+            f"compareExperiment({_quote(folder)},Plot=false,SaveResults=true);"
+            "end;end;"
         )
         engine.eval(commands, nargout=0, stdout=output, stderr=errors)
         print(output.getvalue(), flush=True)
