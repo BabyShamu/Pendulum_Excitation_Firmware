@@ -34,6 +34,7 @@ from pendulum_workbench.domain.models import (
 )
 from pendulum_workbench.domain.experiment_run import (
     AutoResonanceDefinition,
+    FreeSwingDefinition,
     ExperimentDefinition,
     ExperimentMode,
     ExperimentRunState,
@@ -133,6 +134,7 @@ class ExperimentPage(QWidget):
         self.experiment_mode_selector = QComboBox()
         self.experiment_mode_selector.addItem("Vertical Sinusoidal Excitation")
         self.experiment_mode_selector.addItem("Auto-Resonance")
+        self.experiment_mode_selector.addItem("Free Swing")
         self.experiment_mode_selector.setMinimumHeight(38)
         mode_row.addWidget(mode_label)
         mode_row.addWidget(self.experiment_mode_selector, 1)
@@ -142,6 +144,7 @@ class ExperimentPage(QWidget):
         fields.setHorizontalSpacing(12)
         fields.setVerticalSpacing(12)
         amplitude_label = QLabel("PIVOT AMPLITUDE [mm]")
+        self.amplitude_label = amplitude_label
         amplitude_label.setObjectName("sectionTitle")
         self.amplitude_input = QLineEdit()
         self.amplitude_input.setObjectName("experimentAmplitudeInput")
@@ -179,6 +182,7 @@ class ExperimentPage(QWidget):
         fields.addWidget(duration_label, 0, 2)
         fields.addWidget(self.duration_input, 1, 2)
         target_label = QLabel("TARGET ANGLE [deg]")
+        self.target_angle_label = target_label
         target_label.setObjectName("sectionTitle")
         self.target_angle_input = QLineEdit("80")
         self.target_angle_input.setObjectName("experimentTargetAngleInput")
@@ -513,6 +517,17 @@ class ExperimentPage(QWidget):
         self.current_experiment_path.setToolTip(message)
 
     def _definition_from_fields(self) -> ExperimentDefinition:
+        if self.experiment_mode_selector.currentIndex() == 2:
+            try:
+                duration = float(self.duration_input.text().strip())
+            except ValueError as error:
+                raise ValueError("Enter a numeric Free Swing duration") from error
+            definition = FreeSwingDefinition(
+                duration, label=self.experiment_name_input.text(),
+                notes=self.experiment_notes_input.text()
+            )
+            definition.validate()
+            return definition
         try:
             target_angle = float(self.target_angle_input.text().strip())
         except ValueError as error:
@@ -564,6 +579,12 @@ class ExperimentPage(QWidget):
             self.frequency_input.hide()
             self.phase_label.show()
             self.phase_input.show()
+        elif index == 2:
+            self._active_experiment_mode = ExperimentMode.FREE_SWING
+            self.frequency_label.hide()
+            self.frequency_input.hide()
+            self.phase_label.hide()
+            self.phase_input.hide()
         else:
             self._active_experiment_mode = ExperimentMode.VERTICAL_SINUSOIDAL_EXCITATION
             self.amplitude_input.setText(self._vertical_amplitude_text)
@@ -572,6 +593,12 @@ class ExperimentPage(QWidget):
             self.phase_input.hide()
             self.frequency_label.show()
             self.frequency_input.show()
+        is_free = index == 2
+        self.amplitude_input.setVisible(not is_free)
+        # Amplitude label must also be hidden in Free Swing.
+        self.amplitude_label.setVisible(not is_free)
+        self.target_angle_input.setVisible(not is_free)
+        self.target_angle_label.setVisible(not is_free)
         self._update_setup_validity()
 
     def _on_primary_run_button(self) -> None:
@@ -695,7 +722,9 @@ class ExperimentPage(QWidget):
         except ValueError:
             self.run_name_preview.setText("Enter setup values; final name will include the measured initial angle.")
             return
-        baseline_hint = "Stationary pivot baseline. " if definition.amplitude_mm == 0.0 else ""
+        baseline_hint = ("Stationary pivot free-swing baseline. "
+                         if isinstance(definition, FreeSwingDefinition)
+                         else "Stationary pivot baseline. " if definition.amplitude_mm == 0.0 else "")
         self.run_name_preview.setText(
             f"{baseline_hint}Run name preview: {definition.partial_name()} (initial angle added at start)"
         )

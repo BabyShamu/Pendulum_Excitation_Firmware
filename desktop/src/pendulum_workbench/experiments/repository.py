@@ -82,12 +82,14 @@ class ExperimentRepository:
         details = experiment_metadata or {}
         mode = str(details.get("experiment_mode") or "Recording")
         mode = {
+            "FREE_SWING": "FreeSwing",
             "VERTICAL_SINUSOIDAL_EXCITATION": "Sinusoidal",
             "AUTO_RESONANCE_PARAMETRIC": "AutoResonance",
             "PHASE_TRACKED_SINE_AUTO_RESONANCE": "PhaseTracked",
         }.get(mode, mode)
         local_created_at = created_at.astimezone()
         mode_short = {
+            "FreeSwing": "FS",
             "Sinusoidal": "VS",
             "AutoResonance": "AR",
             "PhaseTracked": "PT",
