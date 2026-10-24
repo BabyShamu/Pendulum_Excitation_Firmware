@@ -40,6 +40,8 @@ class ExperimentManagerPage(QWidget):
         self.repository = controller.experiment_recorder.repository
         self._records = []
         self._matlab_process = None
+        self._matlab_output = []
+        self._matlab_log_path = None
         self._settings = QSettings('PendulumWorkbench', 'PendulumWorkbench')
         layout = QVBoxLayout(self)
         heading = QLabel("Experiment Manager")
@@ -157,6 +159,9 @@ class ExperimentManagerPage(QWidget):
             actions.addWidget(button)
         actions.addStretch()
         layout.addLayout(actions)
+        self.simulation_progress = QLabel('MATLAB: idle')
+        self.simulation_progress.setWordWrap(True)
+        layout.addWidget(self.simulation_progress)
         self.summary = QLabel()
         layout.addWidget(self.summary)
         controller.experiment_recorder.recording_finished.connect(lambda *_: self.refresh())
@@ -333,7 +338,7 @@ class ExperimentManagerPage(QWidget):
             return
         folder = inspect_simulation(selected[0]).folder
         if not folder.is_dir():
-            QMessageBox.information(self, "Simscape", "No simulation folder exists yet.")
+            QMessageBox.information(self, "Simscape", "No simulation results are saved yet. Select the experiment and click Run / Reuse Simscape first. If MATLAB was started, wait for it to finish.")
             return
         from PySide6.QtGui import QDesktopServices
         from PySide6.QtCore import QUrl
@@ -345,7 +350,7 @@ class ExperimentManagerPage(QWidget):
         if selected is None:
             return
         if self._matlab_process is not None and self._matlab_process.state() != QProcess.ProcessState.NotRunning:
-            QMessageBox.information(self, "Simscape", "MATLAB simulation is already running.")
+            QMessageBox.information(self, "Simscape", "MATLAB is still running. Please wait for completion; its output is saved in the experiment derived/matlab_run.log file.")
             return
         experiment_dir, manifest = selected
         mode = (manifest.get("experiment") or {}).get("experiment_mode")
@@ -383,34 +388,82 @@ class ExperimentManagerPage(QWidget):
             # MATLAB single quoted string with doubled embedded apostrophes.
             return "'" + str(value).replace("'", "''") + "'"
 
+        # Match the interactive MATLAB environment: the Thesis MATLAB
+        # Project owns the path configuration for CAD/Simscape assets.
+        # Opening a separate -batch MATLAB process without its project
+        # causes imported-geometry blocks to fail with missing files.
         matlab_batch = (
-            "addpath(genpath(" + quote(Path(thesis_root) / "03_MATLAB") + "));"
-            "addpath(genpath(" + quote(Path(thesis_root) / "04_Simscape") + "));"
+            "project=openProject(" + quote(thesis_root) + ");"
+            "cd(project.RootFolder);"
+            "fprintf('Project loaded: %s\\n',project.Name);"
             "runExperimentSimulation(" + quote(experiment_dir) + ");"
         )
-        self._matlab_process = QProcess(self)
-        self._matlab_process.setProgram(matlab_exe)
-        self._matlab_process.setArguments(["-batch", matlab_batch])
-        self._matlab_process.setProcessChannelMode(QProcess.ProcessChannelMode.MergedChannels)
-        self._matlab_process.finished.connect(self._on_matlab_finished)
-        self._matlab_process.errorOccurred.connect(self._on_matlab_error)
-        self._matlab_process.start()
-        QMessageBox.information(
-            self, "Simscape", "MATLAB started in the background. A matching simulation "
-            "will be reused; otherwise a new simulation will be saved to simulation/."
+        # The process is asynchronous. MATLAB can take substantial time
+        # to initialize Simulink and compile a physical model.
+        log_dir = experiment_dir / "derived"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        self._matlab_log_path = log_dir / "matlab_run.log"
+        self._matlab_log_path.write_text(
+            "MATLAB -batch launched for: " + str(experiment_dir) + "\\n"
+            + "Command: runExperimentSimulation(experiment folder)\\n",
+            encoding="utf-8",
         )
+        self._matlab_output = []
+        process = QProcess(self)
+        self._matlab_process = process
+        process.setProgram(matlab_exe)
+        process.setArguments(["-batch", matlab_batch])
+        process.setWorkingDirectory(str(thesis_root))
+        process.setProcessChannelMode(QProcess.ProcessChannelMode.MergedChannels)
+        process.readyReadStandardOutput.connect(self._on_matlab_output)
+        process.started.connect(self._on_matlab_started)
+        process.finished.connect(self._on_matlab_finished)
+        process.errorOccurred.connect(self._on_matlab_error)
+        self.simulation_progress.setText("MATLAB: launching for " + experiment_dir.name)
+        process.start()
+
+    def _on_matlab_started(self):
+        self.simulation_progress.setText("MATLAB: running — monitor derived/matlab_run.log")
+
+    def _on_matlab_output(self):
+        if self._matlab_process is None:
+            return
+        output = bytes(self._matlab_process.readAllStandardOutput()).decode(
+            "utf-8", errors="replace"
+        )
+        if not output:
+            return
+        self._matlab_output.append(output)
+        if self._matlab_log_path is not None:
+            with self._matlab_log_path.open("a", encoding="utf-8") as log:
+                log.write(output)
+        messages = [line.strip() for line in output.splitlines() if line.strip()]
+        if messages:
+            self.simulation_progress.setText("MATLAB: " + messages[-1][:150])
 
     def _on_matlab_finished(self, exit_code, _exit_status):
-        output = bytes(self._matlab_process.readAllStandardOutput()).decode("utf-8", errors="replace") if self._matlab_process else ""
+        self._on_matlab_output()
+        output = "".join(self._matlab_output)
+        log_path = self._matlab_log_path
+        self._matlab_process = None
         self.refresh()
         if exit_code == 0:
-            QMessageBox.information(self, "Simscape", "MATLAB finished. Simulation status refreshed.\\n" + output[-1400:])
+            self.simulation_progress.setText("MATLAB: finished — simulation list refreshed")
+            QMessageBox.information(self, "Simscape",
+                "MATLAB finished successfully.\\nLog: " + str(log_path)
+                + "\\n\\n" + output[-1200:])
         else:
-            QMessageBox.warning(self, "Simscape", "MATLAB exited with code " + str(exit_code) + "\\n" + output[-2500:])
+            self.simulation_progress.setText("MATLAB: failed — inspect " + str(log_path))
+            QMessageBox.warning(self, "Simscape",
+                "MATLAB failed (exit " + str(exit_code) + ").\\nLog: "
+                + str(log_path) + "\\n\\n" + output[-1800:])
 
     def _on_matlab_error(self, error):
         if error == QProcess.ProcessError.FailedToStart:
-            QMessageBox.warning(self, "Simscape", "Could not start MATLAB. Verify the matlab.exe location.")
+            self.simulation_progress.setText("MATLAB: failed to launch")
+            QMessageBox.warning(self, "Simscape",
+                "Could not launch MATLAB. Verify matlab.exe.\\nSee "
+                + str(self._matlab_log_path))
 
     def toggle_archive(self):
         selected = self._selected()
