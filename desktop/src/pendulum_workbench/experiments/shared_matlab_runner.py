@@ -16,12 +16,13 @@ def _quote(value: Path | str) -> str:
     return "'" + str(value).replace("'", "''") + "'"
 
 
-def main() -> int:
-    if len(sys.argv) != 3:
+def main(argv: list[str] | None = None) -> int:
+    args = sys.argv[1:] if argv is None else argv
+    if len(args) != 2:
         print("Usage: shared_matlab_runner <thesis_root> <experiment_folder>", flush=True)
         return 2
-    thesis = Path(sys.argv[1]).resolve()
-    folder = Path(sys.argv[2]).resolve()
+    thesis = Path(args[0]).resolve()
+    folder = Path(args[1]).resolve()
     try:
         import matlab.engine
     except ImportError:

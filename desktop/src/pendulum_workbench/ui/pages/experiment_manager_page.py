@@ -522,10 +522,15 @@ class ExperimentManagerPage(QWidget):
         self._matlab_process = process
         if use_shared:
             process.setProgram(sys.executable)
-            process.setArguments([
-                "-m", "pendulum_workbench.experiments.shared_matlab_runner",
-                str(thesis_root), str(experiment_dir),
-            ])
+            if getattr(sys, "frozen", False):
+                process.setArguments([
+                    "--shared-matlab-runner", str(thesis_root), str(experiment_dir),
+                ])
+            else:
+                process.setArguments([
+                    "-m", "pendulum_workbench.experiments.shared_matlab_runner",
+                    str(thesis_root), str(experiment_dir),
+                ])
         else:
             process.setProgram(matlab_exe)
             process.setArguments(["-batch", matlab_batch])
