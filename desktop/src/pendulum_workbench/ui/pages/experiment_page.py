@@ -54,7 +54,7 @@ class ExperimentPage(QWidget):
         self._recording_name = ""
         self._recording_notes = ""
         self._experiment_directory: Path | None = None
-        self._active_experiment_mode = ExperimentMode.VERTICAL_SINUSOIDAL_EXCITATION
+        self._active_experiment_mode = ExperimentMode.FREE_SWING
         self._vertical_amplitude_text = ""
         self._vertical_frequency_text = ""
         self._plot_samples: deque[TelemetrySample] = deque(maxlen=180)
@@ -132,15 +132,16 @@ class ExperimentPage(QWidget):
         mode_label = QLabel("EXPERIMENT MODE")
         mode_label.setObjectName("sectionTitle")
         self.experiment_mode_selector = QComboBox()
-        self.experiment_mode_selector.addItem("Vertical Sinusoidal Excitation")
-        self.experiment_mode_selector.addItem("Auto-Resonance")
-        self.experiment_mode_selector.addItem("Free Swing")
+        self.experiment_mode_selector.addItem("Free Swing", ExperimentMode.FREE_SWING)
+        self.experiment_mode_selector.addItem("Sinusoidal Excitation", ExperimentMode.VERTICAL_SINUSOIDAL_EXCITATION)
+        self.experiment_mode_selector.addItem("Auto-Resonance", ExperimentMode.AUTO_RESONANCE_PARAMETRIC)
         self.experiment_mode_selector.setMinimumHeight(38)
         mode_row.addWidget(mode_label)
         mode_row.addWidget(self.experiment_mode_selector, 1)
         recording_layout.addLayout(mode_row)
 
         fields = QGridLayout()
+        self.experiment_fields_layout = fields
         fields.setHorizontalSpacing(12)
         fields.setVerticalSpacing(12)
         amplitude_label = QLabel("PIVOT AMPLITUDE [mm]")
@@ -168,8 +169,9 @@ class ExperimentPage(QWidget):
         self.phase_label.hide()
         self.phase_input.hide()
         duration_label = QLabel("DURATION [s]")
+        self.duration_label = duration_label
         duration_label.setObjectName("sectionTitle")
-        self.duration_input = QLineEdit()
+        self.duration_input = QLineEdit("20")
         self.duration_input.setObjectName("experimentDurationInput")
         self.duration_input.setPlaceholderText("Required")
         self.duration_input.setMinimumHeight(38)
@@ -392,6 +394,7 @@ class ExperimentPage(QWidget):
         self.phase_input.textChanged.connect(self._update_setup_validity)
         self.experiment_name_input.textChanged.connect(self._update_name_preview)
         self.experiment_mode_selector.currentIndexChanged.connect(self._on_experiment_mode_changed)
+        self._on_experiment_mode_changed(self.experiment_mode_selector.currentIndex())
         self.controller.experiment_loaded.connect(self._show_saved_experiment)
         self.controller.maintenance.snapshot_changed.connect(self._update_readiness)
         self._update_snapshot(self.controller.state.snapshot)
@@ -517,7 +520,7 @@ class ExperimentPage(QWidget):
         self.current_experiment_path.setToolTip(message)
 
     def _definition_from_fields(self) -> ExperimentDefinition:
-        if self.experiment_mode_selector.currentIndex() == 2:
+        if self.experiment_mode_selector.currentData() == ExperimentMode.FREE_SWING:
             try:
                 duration = float(self.duration_input.text().strip())
             except ValueError as error:
@@ -532,7 +535,7 @@ class ExperimentPage(QWidget):
             target_angle = float(self.target_angle_input.text().strip())
         except ValueError as error:
             raise ValueError("Enter a numeric target angle") from error
-        if self.experiment_mode_selector.currentIndex() == 1:
+        if self.experiment_mode_selector.currentData() == ExperimentMode.AUTO_RESONANCE_PARAMETRIC:
             try:
                 amplitude = float(self.amplitude_input.text().strip())
                 phase = float(self.phase_input.text().strip())
@@ -567,38 +570,45 @@ class ExperimentPage(QWidget):
         return definition
 
     def _on_experiment_mode_changed(self, index: int) -> None:
+        mode = self.experiment_mode_selector.itemData(index)
         if self._active_experiment_mode == ExperimentMode.VERTICAL_SINUSOIDAL_EXCITATION:
             self._vertical_amplitude_text = self.amplitude_input.text()
             self._vertical_frequency_text = self.frequency_input.text()
 
-        if index == 1:
-            self._active_experiment_mode = ExperimentMode.AUTO_RESONANCE_PARAMETRIC
+        is_free = mode == ExperimentMode.FREE_SWING
+        is_resonance = mode == ExperimentMode.AUTO_RESONANCE_PARAMETRIC
+        self._active_experiment_mode = mode
+
+        if is_resonance:
             self.amplitude_input.setText("7.5")
             self.phase_input.setText("22.5")
-            self.frequency_label.hide()
-            self.frequency_input.hide()
-            self.phase_label.show()
-            self.phase_input.show()
-        elif index == 2:
-            self._active_experiment_mode = ExperimentMode.FREE_SWING
-            self.frequency_label.hide()
-            self.frequency_input.hide()
-            self.phase_label.hide()
-            self.phase_input.hide()
-        else:
-            self._active_experiment_mode = ExperimentMode.VERTICAL_SINUSOIDAL_EXCITATION
+        elif mode == ExperimentMode.VERTICAL_SINUSOIDAL_EXCITATION:
             self.amplitude_input.setText(self._vertical_amplitude_text)
             self.frequency_input.setText(self._vertical_frequency_text)
-            self.phase_label.hide()
-            self.phase_input.hide()
-            self.frequency_label.show()
-            self.frequency_input.show()
-        is_free = index == 2
-        self.amplitude_input.setVisible(not is_free)
-        # Amplitude label must also be hidden in Free Swing.
+
         self.amplitude_label.setVisible(not is_free)
-        self.target_angle_input.setVisible(not is_free)
+        self.amplitude_input.setVisible(not is_free)
+        self.frequency_label.setVisible(not is_free and not is_resonance)
+        self.frequency_input.setVisible(not is_free and not is_resonance)
+        self.phase_label.setVisible(is_resonance)
+        self.phase_input.setVisible(is_resonance)
         self.target_angle_label.setVisible(not is_free)
+        self.target_angle_input.setVisible(not is_free)
+
+        # Keep the one relevant Free Swing field left-aligned, with no empty
+        # amplitude/frequency columns ahead of it.
+        fields = self.experiment_fields_layout
+        fields.removeWidget(self.duration_label)
+        fields.removeWidget(self.duration_input)
+        duration_col = 0 if is_free else 2
+        fields.addWidget(self.duration_label, 0, duration_col)
+        fields.addWidget(self.duration_input, 1, duration_col)
+        if is_free:
+            self.duration_input.setPlaceholderText("e.g. 20")
+            self.duration_input.setToolTip("Recording duration after confirmed latch release.")
+        else:
+            self.duration_input.setPlaceholderText("Required")
+            self.duration_input.setToolTip("")
         self._update_setup_validity()
 
     def _on_primary_run_button(self) -> None:
