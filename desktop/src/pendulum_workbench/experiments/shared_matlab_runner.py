@@ -46,9 +46,8 @@ def main() -> int:
         output = io.StringIO()
         errors = io.StringIO()
         commands = (
-            "if isempty(matlab.project.currentProject); "
-            f"openProject({_quote(thesis)}); end;"
-            f"cd({_quote(thesis)});"
+            f"project=openProject({_quote(thesis)});"
+            "cd(project.RootFolder);"
             f"runExperimentSimulation({_quote(folder)});"
         )
         engine.eval(commands, nargout=0, stdout=output, stderr=errors)
