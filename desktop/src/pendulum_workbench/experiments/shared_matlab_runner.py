@@ -1,0 +1,66 @@
+"""Run a Simscape experiment in a shared, already-open MATLAB session.
+
+Invoked as a subprocess by the PySide6 Workbench to avoid freezing its UI.
+The user must run matlab.engine.shareEngine in the open MATLAB session.
+The matching MATLAB Engine for Python package must be installed into the
+same Workbench virtual environment.
+"""
+from __future__ import annotations
+
+import io
+import sys
+from pathlib import Path
+
+
+def _quote(value: Path | str) -> str:
+    return "'" + str(value).replace("'", "''") + "'"
+
+
+def main() -> int:
+    if len(sys.argv) != 3:
+        print("Usage: shared_matlab_runner <thesis_root> <experiment_folder>", flush=True)
+        return 2
+    thesis = Path(sys.argv[1]).resolve()
+    folder = Path(sys.argv[2]).resolve()
+    try:
+        import matlab.engine
+    except ImportError:
+        print(
+            "MATLAB Engine for Python is not installed in this virtual environment. "
+            "Install the version matching your MATLAB installation; then run "
+            "matlab.engine.shareEngine in the open MATLAB Command Window.",
+            flush=True,
+        )
+        return 3
+    sessions = matlab.engine.find_matlab()
+    if not sessions:
+        print(
+            "No shared MATLAB session found. In the already-open MATLAB "
+            "Command Window, run: matlab.engine.shareEngine",
+            flush=True,
+        )
+        return 4
+    print("Connecting to shared MATLAB session: " + sessions[0], flush=True)
+    try:
+        engine = matlab.engine.connect_matlab(sessions[0])
+        output = io.StringIO()
+        errors = io.StringIO()
+        commands = (
+            "if isempty(matlab.project.currentProject); "
+            f"openProject({_quote(thesis)}); end;"
+            f"cd({_quote(thesis)});"
+            f"runExperimentSimulation({_quote(folder)});"
+        )
+        engine.eval(commands, nargout=0, stdout=output, stderr=errors)
+        print(output.getvalue(), flush=True)
+        if errors.getvalue().strip():
+            print(errors.getvalue(), file=sys.stderr, flush=True)
+        print("Shared MATLAB simulation completed.", flush=True)
+        return 0
+    except Exception as exc:
+        print("Shared MATLAB error: " + str(exc), file=sys.stderr, flush=True)
+        return 5
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
