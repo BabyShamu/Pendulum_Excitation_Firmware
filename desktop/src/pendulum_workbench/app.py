@@ -22,6 +22,31 @@ def main() -> int:
     if icon_path.is_file():
         app.setWindowIcon(QIcon(str(icon_path)))
     app.setFont(QFont("Bahnschrift", 10))
+    # Apply a consistent readable light palette to ALL popups. These
+    # top-level windows otherwise inherit the Windows dark-mode background
+    # while retaining the Workbench's dark text.
+    app.setStyleSheet("""
+        QDialog, QMessageBox, QInputDialog, QFileDialog {
+            background-color: #f8faf9;
+            color: #24363a;
+        }
+        QDialog QLabel, QMessageBox QLabel, QInputDialog QLabel, QFileDialog QLabel {
+            color: #24363a;
+            background-color: transparent;
+        }
+        QDialog QPushButton, QMessageBox QPushButton {
+            color: #28463b;
+            background-color: #f4f7f5;
+            border: 1px solid #cbd8d0;
+            padding: 7px 12px;
+            border-radius: 6px;
+        }
+        QDialog QLineEdit, QDialog QComboBox, QDialog QTextEdit {
+            color: #24363a;
+            background-color: #ffffff;
+            border: 1px solid #ccd8d1;
+        }
+    """)
 
     controller = WorkbenchController()
     window = MainWindow(controller)

@@ -45,7 +45,7 @@ class ExperimentManagerPage(QWidget):
         self._active_simulation_folder = None
         self._settings = QSettings('PendulumWorkbench', 'PendulumWorkbench')
         layout = QVBoxLayout(self)
-        heading = QLabel("Experiment Manager")
+        heading = QLabel("Experiment Library")
         heading.setStyleSheet("font-size: 22px; font-weight: 700;")
         layout.addWidget(heading)
         toolbar = QHBoxLayout()
