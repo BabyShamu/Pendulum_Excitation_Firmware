@@ -42,6 +42,7 @@ class ExperimentManagerPage(QWidget):
         self._matlab_process = None
         self._matlab_output = []
         self._matlab_log_path = None
+        self._active_simulation_folder = None
         self._settings = QSettings('PendulumWorkbench', 'PendulumWorkbench')
         layout = QVBoxLayout(self)
         heading = QLabel("Experiment Manager")
@@ -461,6 +462,7 @@ class ExperimentManagerPage(QWidget):
         log_dir = experiment_dir / "derived"
         log_dir.mkdir(parents=True, exist_ok=True)
         self._matlab_log_path = log_dir / "matlab_run.log"
+        self._active_simulation_folder = experiment_dir
         self._matlab_log_path.write_text(
             "MATLAB -batch launched for: " + str(experiment_dir) + "\\n"
             + "Command: runExperimentSimulation(experiment folder)\\n",
@@ -504,8 +506,8 @@ class ExperimentManagerPage(QWidget):
         log_path = self._matlab_log_path
         self._matlab_process = None
         self.refresh()
-        selected = self._selected()
-        status = inspect_simulation(selected[0]).state if selected else "unknown"
+        status = (inspect_simulation(self._active_simulation_folder).state
+                  if self._active_simulation_folder is not None else "unknown")
         if exit_code == 0:
             self.simulation_progress.setText("MATLAB: finished — simulation " + status)
             self._show_simscape_message(
