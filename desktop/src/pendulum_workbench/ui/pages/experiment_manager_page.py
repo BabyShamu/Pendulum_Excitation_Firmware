@@ -441,16 +441,33 @@ class ExperimentManagerPage(QWidget):
         if mode not in ("FREE_SWING", "VERTICAL_SINUSOIDAL_EXCITATION", "AUTO_RESONANCE_PARAMETRIC"):
             QMessageBox.information(self, "Simscape", "This experiment mode has no MATLAB simulation wrapper yet.")
             return
-        matlab_exe = str(self._settings.value("simscape/matlab_executable", "") or "")
-        if not matlab_exe or not Path(matlab_exe).is_file():
-            matlab_exe = shutil.which("matlab") or ""
-        if not matlab_exe:
-            matlab_exe, _ = QFileDialog.getOpenFileName(
-                self, "Choose matlab.exe", "", "MATLAB executable (matlab.exe);;All files (*)"
-            )
+        choice = self._simscape_dialog(
+            "MATLAB connection",
+            "Choose how to run this simulation:\n"
+            "Use Open MATLAB connects to a shared existing session.\n"
+            "Start New MATLAB launches a separate process.",
+            QMessageBox.Icon.Question,
+        )
+        shared_button = choice.addButton("Use Open MATLAB", QMessageBox.ButtonRole.AcceptRole)
+        separate_button = choice.addButton("Start New MATLAB", QMessageBox.ButtonRole.ActionRole)
+        choice.addButton("Cancel", QMessageBox.ButtonRole.RejectRole)
+        choice.exec()
+        chosen = choice.clickedButton()
+        if chosen not in (shared_button, separate_button):
+            return
+        use_shared = chosen is shared_button
+
+        if not use_shared:
+            matlab_exe = str(self._settings.value("simscape/matlab_executable", "") or "")
+            if not matlab_exe or not Path(matlab_exe).is_file():
+                matlab_exe = shutil.which("matlab") or ""
             if not matlab_exe:
-                return
-        self._settings.setValue("simscape/matlab_executable", matlab_exe)
+                matlab_exe, _ = QFileDialog.getOpenFileName(
+                    self, "Choose matlab.exe", "", "MATLAB executable (matlab.exe);;All files (*)"
+                )
+                if not matlab_exe:
+                    return
+            self._settings.setValue("simscape/matlab_executable", matlab_exe)
         thesis_root = str(self._settings.value("simscape/thesis_root", "") or "")
         simulation_dir = Path(thesis_root) / "03_MATLAB" / "Simulation"
         model_dir = Path(thesis_root) / "04_Simscape" / "Models"
@@ -489,15 +506,22 @@ class ExperimentManagerPage(QWidget):
         self._matlab_log_path = log_dir / "matlab_run.log"
         self._active_simulation_folder = experiment_dir
         self._matlab_log_path.write_text(
-            "MATLAB -batch launched for: " + str(experiment_dir) + "\\n"
+            ("Shared MATLAB Engine" if use_shared else "New MATLAB -batch") + " run for: " + str(experiment_dir) + "\\n"
             + "Command: runExperimentSimulation(experiment folder)\\n",
             encoding="utf-8",
         )
         self._matlab_output = []
         process = QProcess(self)
         self._matlab_process = process
-        process.setProgram(matlab_exe)
-        process.setArguments(["-batch", matlab_batch])
+        if use_shared:
+            process.setProgram(sys.executable)
+            process.setArguments([
+                "-m", "pendulum_workbench.experiments.shared_matlab_runner",
+                str(thesis_root), str(experiment_dir),
+            ])
+        else:
+            process.setProgram(matlab_exe)
+            process.setArguments(["-batch", matlab_batch])
         process.setWorkingDirectory(str(thesis_root))
         process.setProcessChannelMode(QProcess.ProcessChannelMode.MergedChannels)
         process.readyReadStandardOutput.connect(self._on_matlab_output)
