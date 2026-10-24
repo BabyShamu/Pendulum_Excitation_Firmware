@@ -592,43 +592,7 @@ class ExperimentManagerPage(QWidget):
         QMessageBox.information(self, "Excel sync", f"Updated:\n{target}")
 
     def _write_excel(self):
-        from openpyxl import Workbook
-        root = self.repository.root
-        root.mkdir(parents=True, exist_ok=True)
-        workbook = Workbook()
-        sheet = workbook.active
-        sheet.title = "Experiments"
-        sheet.append(["Experiment ID", "Date", "Name", "Type", "Parameters",
-                      "Completion", "Archived", "Notes", "Directory"])
-        for directory, manifest in self.repository.list_manifests():
-            details = manifest.get("experiment") or {}
-            if not isinstance(details, dict):
-                details = {}
-            params = ", ".join(f"{k}={v}" for k, v in details.items() if k != "experiment_mode")
-            sheet.append([
-                str(manifest.get("experiment_id") or ""),
-                str(manifest.get("created_at") or ""),
-                str(manifest.get("name") or ""),
-                str(details.get("experiment_mode") or "Recording"),
-                params,
-                str(manifest.get("completion_status") or ""),
-                "Yes" if manifest.get("archived", False) else "No",
-                str(manifest.get("notes") or ""),
-                str(directory),
-            ])
-        sheet.freeze_panes = "A2"
-        sheet.auto_filter.ref = sheet.dimensions
-        for column in sheet.columns:
-            letter = column[0].column_letter
-            sheet.column_dimensions[letter].width = min(
-                60, max(14, max(len(str(cell.value or "")) for cell in column) + 2)
-            )
-        target = root / "Pendulum_Experiments.xlsx"
-        temporary = root / ".Pendulum_Experiments.tmp.xlsx"
-        try:
-            workbook.save(temporary)
-            os.replace(temporary, target)
-        finally:
-            if temporary.exists():
-                temporary.unlink()
-        return target
+        from pendulum_workbench.experiments.excel_export import export_experiment_workbook
+        return export_experiment_workbook(
+            self.repository.list_manifests(), self.repository.root
+        )
