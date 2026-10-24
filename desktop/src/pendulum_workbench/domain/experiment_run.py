@@ -7,6 +7,7 @@ from pendulum_workbench.domain.angle_prediction import AngleSource
 
 
 class ExperimentMode(str, Enum):
+    FREE_SWING = "Free Swing"
     VERTICAL_SINUSOIDAL_EXCITATION = "Vertical Sinusoidal Excitation"
     AUTO_RESONANCE_PARAMETRIC = "Auto-Resonance"
     AUTO_RESONANCE_PARAMETRIC_CLOSED_LOOP = "Auto-Resonance"
@@ -45,6 +46,56 @@ class ExperimentRunSnapshot:
     recording_state: str = "Off"
     completion_reason: str = ""
     error_message: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class FreeSwingDefinition:
+    duration_s: float
+    label: str = ""
+    notes: str = ""
+    mode: ExperimentMode = ExperimentMode.FREE_SWING
+
+    def validate(self) -> None:
+        if self.mode != ExperimentMode.FREE_SWING:
+            raise ValueError("FreeSwingDefinition requires Free Swing mode")
+        if not math.isfinite(self.duration_s) or self.duration_s <= 0:
+            raise ValueError("Free Swing duration must be positive and finite")
+
+    def partial_name(self) -> str:
+        return f"{self._prefix()}FS_T{self.duration_s:g}s"
+
+    def final_name(self, measured_initial_angle_deg: float) -> str:
+        if not math.isfinite(measured_initial_angle_deg):
+            raise ValueError("Measured initial angle must be finite")
+        sign = "m" if measured_initial_angle_deg < 0 else "p"
+        return f"{self._prefix()}FS_Theta{sign}{abs(measured_initial_angle_deg):g}deg_T{self.duration_s:g}s"
+
+    def manifest_values(
+        self, *, measured_initial_angle_deg: float | None,
+        actual_elapsed_duration_s: float | None = None,
+        completion_reason: str | None = None,
+    ) -> dict[str, object]:
+        return {
+            "experiment_mode": self.mode.name,
+            "commanded_amplitude_mm": None,
+            "commanded_frequency_hz": None,
+            "commanded_phase_deg": None,
+            "requested_duration_s": self.duration_s,
+            "target_angle_deg": None,
+            "actual_elapsed_duration_s": actual_elapsed_duration_s,
+            "measured_initial_angle_deg": measured_initial_angle_deg,
+            "optional_label": self.label.strip(),
+            "notes": self.notes.strip(),
+            "generated_run_name": (
+                self.partial_name() if measured_initial_angle_deg is None
+                else self.final_name(measured_initial_angle_deg)
+            ),
+            "completion_reason": completion_reason,
+        }
+
+    def _prefix(self) -> str:
+        label = re.sub(r"[^A-Za-z0-9._-]+", "_", self.label.strip()).strip("._-")
+        return f"{label}_" if label else ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -311,4 +362,4 @@ class PhaseTrackedSineDefinition:
         return text if text not in ("", "-0") else "0"
 
 
-ExperimentDefinition = VerticalSineDefinition | AutoResonanceDefinition | PhaseTrackedSineDefinition
+ExperimentDefinition = FreeSwingDefinition | VerticalSineDefinition | AutoResonanceDefinition | PhaseTrackedSineDefinition
