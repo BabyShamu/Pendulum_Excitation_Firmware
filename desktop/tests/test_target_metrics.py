@@ -30,6 +30,42 @@ class TargetMetricsTests(unittest.TestCase):
         self.assertIsNone(result["target_achieved"])
         self.assertIsNone(result["target_time_s"])
 
+    def test_recorded_monotonic_target_overrides_post_stop_telemetry(self):
+        manifest = {"experiment": {
+            "target_angle_deg": 30,
+            "actual_elapsed_duration_s": 14.3,
+            "target_time_source": "workbench_monotonic_motor_start_ack",
+            "target_achieved": True,
+            "target_time_s": 14.27,
+        }}
+        result = target_metrics(self.path, manifest)
+        self.assertTrue(result["target_achieved"])
+        self.assertAlmostEqual(result["target_time_s"], 14.27)
+
+    def test_post_stop_angle_does_not_create_target(self):
+        manifest = {"experiment": {
+            "target_angle_deg": 30,
+            "actual_elapsed_duration_s": 10.0,
+            "target_time_source": "workbench_monotonic_motor_start_ack",
+            "target_achieved": False,
+            "target_time_s": None,
+        }}
+        result = target_metrics(self.path, manifest)
+        self.assertFalse(result["target_achieved"])
+        self.assertIsNone(result["target_time_s"])
+
+    def test_inconsistent_recorded_target_is_not_silently_accepted(self):
+        manifest = {"experiment": {
+            "target_angle_deg": 30,
+            "actual_elapsed_duration_s": 14.3,
+            "target_time_source": "workbench_monotonic_motor_start_ack",
+            "target_achieved": True,
+            "target_time_s": 14.83,
+        }}
+        result = target_metrics(self.path, manifest)
+        self.assertIsNone(result["target_achieved"])
+        self.assertEqual(result["time_source"], "invalid_recorded_event")
+
     def test_unreached_target(self):
         result = target_metrics(self.path, {"experiment": {"target_angle_deg": 65}})
         self.assertFalse(result["target_achieved"])
