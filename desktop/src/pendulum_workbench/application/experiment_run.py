@@ -45,6 +45,7 @@ from pendulum_workbench.domain.models import (
     MotionState,
     RecordingState,
 )
+from pendulum_workbench.experiments.target_crossing import TargetCrossingDetector
 from pendulum_workbench.infrastructure.serial_client import TELEMETRY_STALE_AFTER_S
 
 
@@ -79,7 +80,7 @@ class ExperimentRunService(QObject):
         self._sine_started_monotonic: float | None = None
         self._stop_requested_monotonic: float | None = None
         self._target_reached_monotonic: float | None = None
-        self._target_crossing_candidate: tuple[float, float] | None = None
+        self._target_detector: TargetCrossingDetector | None = None
         self._samples_at_start = 0
         self._angle_predictor: AngleDropoutPredictor | None = None
         self._angle_prediction_rows: list[dict[str, object]] = []
@@ -163,7 +164,8 @@ class ExperimentRunService(QObject):
         self._sine_started_monotonic = None
         self._stop_requested_monotonic = None
         self._target_reached_monotonic = None
-        self._target_crossing_candidate = None
+        self._target_detector = (None if isinstance(definition, FreeSwingDefinition)
+                                 else TargetCrossingDetector(definition.target_angle_deg))
         self._angle_predictor = AngleDropoutPredictor(
             max_prediction_age_s=definition.duration_s
         )
@@ -747,9 +749,9 @@ class ExperimentRunService(QObject):
     def _on_telemetry_sample(self, sample) -> None:
         # A target is reached only by a valid, measured angle while actively running.
         # Never reinterpret a firmware safety fault as a successful target event.
-        # Confirm a threshold crossing on consecutive fresh angle samples.
-        # This avoids treating one isolated AS5600 spike as target success.
-        # Firmware safety limits and faults remain independent.
+        # A genuine turning-point peak may exceed the target for only one
+        # telemetry sample. Validate it against the samples immediately
+        # before and after; firmware safety stopping remains independent.
         running = (
             self._phase == "running"
             and self._snapshot.state == ExperimentRunState.RUNNING
@@ -757,7 +759,7 @@ class ExperimentRunService(QObject):
             and not isinstance(self._definition, FreeSwingDefinition)
             and self._sine_started_monotonic is not None
         )
-        if running:
+        if running and self._target_detector is not None:
             valid_angle = (
                 sample.source == "real"
                 and sample.angle_deg is not None
@@ -766,25 +768,20 @@ class ExperimentRunService(QObject):
             hardware = self.state.snapshot.hardware_status
             if valid_angle and not (hardware.fault_known and hardware.fault):
                 now = time.monotonic()
-                if abs(sample.angle_deg) >= self._definition.target_angle_deg:
-                    candidate = self._target_crossing_candidate
-                    if candidate is not None and 0 <= now - candidate[0] <= 0.25:
-                        self._target_reached_monotonic = candidate[0]
-                        self._pending_final_state = ExperimentRunState.COMPLETE
-                        self._pending_completion_reason = "TARGET_REACHED"
-                        self._stop_requested_monotonic = now
-                        self._target_crossing_candidate = None
-                        self._set_snapshot(
-                            state=ExperimentRunState.STOPPING,
-                            completion_reason="TARGET_REACHED",
-                        )
-                        self._issue_sine_stop()
-                        return
-                    self._target_crossing_candidate = (now, abs(sample.angle_deg))
-                else:
-                    self._target_crossing_candidate = None
+                crossing = self._target_detector.observe(now, sample.angle_deg)
+                if crossing is not None:
+                    self._target_reached_monotonic = crossing
+                    self._pending_final_state = ExperimentRunState.COMPLETE
+                    self._pending_completion_reason = "TARGET_REACHED"
+                    self._stop_requested_monotonic = now
+                    self._set_snapshot(
+                        state=ExperimentRunState.STOPPING,
+                        completion_reason="TARGET_REACHED",
+                    )
+                    self._issue_sine_stop()
+                    return
             else:
-                self._target_crossing_candidate = None
+                self._target_detector.reset()
         if (
             self._phase not in ("metadata_before_open", "latch_open", "sine_start", "running")
             or self._angle_predictor is None
