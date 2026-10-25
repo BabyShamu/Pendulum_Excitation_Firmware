@@ -19,6 +19,28 @@ def target_metrics(directory: Path, manifest: dict) -> dict:
     except (TypeError, ValueError):
         return {"target_angle_deg": None, "target_achieved": None,
                 "target_time_s": None}
+    # New recordings persist a verified target event using exactly the same
+    # monotonic reference as actual_elapsed_duration_s. Never recalculate
+    # these from telemetry, including five seconds of post-stop observation.
+    if details.get("target_time_source") == "workbench_monotonic_motor_start_ack":
+        achieved = details.get("target_achieved")
+        event_time = details.get("target_time_s")
+        duration = details.get("actual_elapsed_duration_s")
+        if not isinstance(achieved, bool):
+            achieved = False
+        if achieved:
+            try:
+                event_time = float(event_time)
+                duration = float(duration)
+                if not (math.isfinite(event_time) and math.isfinite(duration)
+                        and 0 <= event_time <= duration + 0.001):
+                    raise ValueError()
+            except (TypeError, ValueError):
+                return {"target_angle_deg": target, "target_achieved": None,
+                        "target_time_s": None, "time_source": "invalid_recorded_event"}
+        return {"target_angle_deg": target, "target_achieved": achieved,
+                "target_time_s": event_time if achieved else None,
+                "time_source": "workbench_monotonic_motor_start_ack"}
     path = Path(directory) / "telemetry.csv"
     baseline = None
     previous = None
@@ -49,4 +71,5 @@ def target_metrics(directory: Path, manifest: dict) -> dict:
         return {"target_angle_deg": target, "target_achieved": None,
                 "target_time_s": None}
     return {"target_angle_deg": target, "target_achieved": crossing is not None,
-            "target_time_s": (crossing - baseline) if crossing is not None else None}
+            "target_time_s": (crossing - baseline) if crossing is not None else None,
+            "time_source": "legacy_first_telemetry_sample_estimate"}
