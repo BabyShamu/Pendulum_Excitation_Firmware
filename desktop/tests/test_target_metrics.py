@@ -3,6 +3,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from pendulum_workbench.domain.models import DataSourceMode
+from pendulum_workbench.experiments.repository import ExperimentRepository
 from pendulum_workbench.experiments.target_metrics import target_metrics
 
 
@@ -65,6 +67,47 @@ class TargetMetricsTests(unittest.TestCase):
         result = target_metrics(self.path, manifest)
         self.assertIsNone(result["target_achieved"])
         self.assertEqual(result["time_source"], "invalid_recorded_event")
+
+    def test_completed_51_15_degree_run_persists_target_status_after_reload(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            repository = ExperimentRepository(Path(temporary_directory))
+            session = repository.create(
+                name="completed target",
+                notes="",
+                data_source=DataSourceMode.REAL,
+                serial_port="COM6",
+                experiment_metadata={
+                    "target_angle_deg": 50.0,
+                    "actual_elapsed_duration_s": 12.1,
+                    "target_time_source": "workbench_monotonic_motor_start_ack",
+                    "target_achieved": True,
+                    "target_time_s": 12.075,
+                    "measured_initial_angle_deg": 16.35,
+                },
+            )
+            with (session.directory / "telemetry.csv").open(
+                "a", encoding="utf-8", newline=""
+            ) as telemetry_file:
+                telemetry_file.write(
+                    "1,0.0,16.35,0,,,,valid\n"
+                    "2,12.075,51.15,0,,,,valid\n"
+                )
+            repository.finalize(
+                session,
+                completion_status="COMPLETED",
+                sample_count=2,
+                raw_line_count=2,
+            )
+
+            reloaded = repository.load(session.directory)
+            result = target_metrics(session.directory, reloaded.manifest)
+            self.assertTrue(result["target_achieved"])
+            self.assertAlmostEqual(result["target_time_s"], 12.075)
+            self.assertEqual(reloaded.manifest["completion_status"], "COMPLETED")
+
+            listed = repository.list_manifests()
+            self.assertEqual(len(listed), 1)
+            self.assertTrue(target_metrics(listed[0][0], listed[0][1])["target_achieved"])
 
     def test_unreached_target(self):
         result = target_metrics(self.path, {"experiment": {"target_angle_deg": 65}})

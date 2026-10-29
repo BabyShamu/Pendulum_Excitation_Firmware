@@ -654,7 +654,6 @@ class ExperimentRunService(QObject):
                 metadata["target_time_source"] = "workbench_monotonic_motor_start_ack"
                 metadata["target_achieved"] = (
                     final_state == ExperimentRunState.COMPLETE
-                    and reason == "TARGET_REACHED"
                     and self._target_reached_monotonic is not None
                 )
                 metadata["target_time_s"] = (
@@ -752,9 +751,17 @@ class ExperimentRunService(QObject):
         # A genuine turning-point peak may exceed the target for only one
         # telemetry sample. Validate it against the samples immediately
         # before and after; firmware safety stopping remains independent.
-        running = (
+        target_observation_active = (
             self._phase == "running"
             and self._snapshot.state == ExperimentRunState.RUNNING
+        ) or (
+            self._phase == "sine_stop"
+            and self._snapshot.state == ExperimentRunState.STOPPING
+            and self._pending_final_state == ExperimentRunState.COMPLETE
+            and self._pending_completion_reason == "duration_elapsed"
+        )
+        running = (
+            target_observation_active
             and self._definition is not None
             and not isinstance(self._definition, FreeSwingDefinition)
             and self._sine_started_monotonic is not None
@@ -773,12 +780,14 @@ class ExperimentRunService(QObject):
                     self._target_reached_monotonic = crossing
                     self._pending_final_state = ExperimentRunState.COMPLETE
                     self._pending_completion_reason = "TARGET_REACHED"
-                    self._stop_requested_monotonic = now
-                    self._set_snapshot(
-                        state=ExperimentRunState.STOPPING,
-                        completion_reason="TARGET_REACHED",
-                    )
-                    self._issue_sine_stop()
+                    if self._stop_requested_monotonic is None:
+                        self._stop_requested_monotonic = now
+                    if self._phase == "running":
+                        self._set_snapshot(
+                            state=ExperimentRunState.STOPPING,
+                            completion_reason="TARGET_REACHED",
+                        )
+                        self._issue_sine_stop()
                     return
             else:
                 self._target_detector.reset()

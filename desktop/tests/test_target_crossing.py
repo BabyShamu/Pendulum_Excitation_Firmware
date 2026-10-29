@@ -29,6 +29,21 @@ class TargetCrossingDetectorTests(unittest.TestCase):
         self.assertIsNone(detector.observe(1.02, 70.08))
         self.assertAlmostEqual(detector.observe(1.04, 69.5), 1.02)
 
+    def test_completed_run_peak_is_recorded_as_target_crossing(self):
+        detector = TargetCrossingDetector(50.0)
+        observed = [
+            detector.observe(12.055, 49.4),
+            detector.observe(12.075, 51.15),
+            detector.observe(12.095, 50.8),
+        ]
+        self.assertEqual([value for value in observed if value is not None], [12.075])
+
+    def test_crossing_at_stopping_boundary_is_not_lost(self):
+        detector = TargetCrossingDetector(50.0)
+        self.assertIsNone(detector.observe(12.055, 49.4))
+        self.assertIsNone(detector.observe(12.075, 51.15))
+        self.assertEqual(detector.observe(12.095, 50.8), 12.075)
+
     def test_gap_cannot_validate_old_crossing(self):
         detector = TargetCrossingDetector(70.0)
         self.assertIsNone(detector.observe(1.0, 69.9))
