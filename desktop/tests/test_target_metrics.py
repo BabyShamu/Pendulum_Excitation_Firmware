@@ -3,12 +3,20 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from PySide6.QtWidgets import QApplication
+
+from pendulum_workbench.application.controller import WorkbenchController
 from pendulum_workbench.domain.models import DataSourceMode
 from pendulum_workbench.experiments.repository import ExperimentRepository
 from pendulum_workbench.experiments.target_metrics import target_metrics
+from pendulum_workbench.ui.pages.experiment_manager_page import ExperimentManagerPage
 
 
 class TargetMetricsTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.qt_app = QApplication.instance() or QApplication([])
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
@@ -108,6 +116,13 @@ class TargetMetricsTests(unittest.TestCase):
             listed = repository.list_manifests()
             self.assertEqual(len(listed), 1)
             self.assertTrue(target_metrics(listed[0][0], listed[0][1])["target_achieved"])
+
+            controller = WorkbenchController(experiment_repository=repository)
+            page = ExperimentManagerPage(controller)
+            self.addCleanup(controller.shutdown)
+            self.addCleanup(page.close)
+            self.assertEqual(page.table.item(0, 7).text(), "Yes")
+            self.assertEqual(page.table.item(0, 8).text(), "12.07 s")
 
     def test_unreached_target(self):
         result = target_metrics(self.path, {"experiment": {"target_angle_deg": 65}})
