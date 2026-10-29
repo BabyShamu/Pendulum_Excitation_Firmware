@@ -38,6 +38,56 @@ class TargetCrossingDetectorTests(unittest.TestCase):
         ]
         self.assertEqual([value for value in observed if value is not None], [12.075])
 
+    def test_firmware_reported_80_degree_peak_is_validated_from_telemetry(self):
+        detector = TargetCrossingDetector(80.0)
+        observed = [
+            detector.observe(20.00, 80.07),
+            detector.observe(20.02, 80.42),
+            detector.observe(20.04, 79.72),
+        ]
+        self.assertEqual([value for value in observed if value is not None], [20.02])
+
+    def test_sustained_crossing_is_validated(self):
+        detector = TargetCrossingDetector(80.0)
+        observed = [
+            detector.observe(20.00, 79.6),
+            detector.observe(20.02, 80.1),
+            detector.observe(20.04, 80.4),
+        ]
+        self.assertEqual([value for value in observed if value is not None], [20.02])
+
+    def test_negative_angle_peak_is_validated(self):
+        detector = TargetCrossingDetector(80.0)
+        observed = [
+            detector.observe(20.00, -80.07),
+            detector.observe(20.02, -80.42),
+            detector.observe(20.04, -79.72),
+        ]
+        self.assertEqual([value for value in observed if value is not None], [20.02])
+
+    def test_missing_sample_breaks_peak_continuity(self):
+        detector = TargetCrossingDetector(80.0)
+        self.assertIsNone(detector.observe(20.00, 80.07))
+        self.assertIsNone(detector.observe(20.02, 80.42))
+        self.assertIsNone(detector.observe(20.40, 79.72))
+
+    def test_small_threshold_noise_is_validated_but_large_spike_is_rejected(self):
+        detector = TargetCrossingDetector(80.0)
+        noisy = [
+            detector.observe(20.00, 79.8),
+            detector.observe(20.02, 80.1),
+            detector.observe(20.04, 79.7),
+        ]
+        self.assertEqual([value for value in noisy if value is not None], [20.02])
+
+        detector.reset()
+        spike = [
+            detector.observe(21.00, 40.0),
+            detector.observe(21.02, 80.42),
+            detector.observe(21.04, 40.5),
+        ]
+        self.assertTrue(all(value is None for value in spike))
+
     def test_crossing_at_stopping_boundary_is_not_lost(self):
         detector = TargetCrossingDetector(50.0)
         self.assertIsNone(detector.observe(12.055, 49.4))

@@ -5,8 +5,12 @@ is relative to the first valid telemetry timestamp. Never substitute the
 experiment start timestamp or pretend a missing target is a failed attempt.
 """
 import csv
+import logging
 import math
 from pathlib import Path
+
+
+_LOGGER = logging.getLogger(__name__)
 
 
 def target_metrics(directory: Path, manifest: dict) -> dict:
@@ -19,15 +23,25 @@ def target_metrics(directory: Path, manifest: dict) -> dict:
     except (TypeError, ValueError):
         return {"target_angle_deg": None, "target_achieved": None,
                 "target_time_s": None}
-    # New recordings persist a verified target event using exactly the same
-    # monotonic reference as actual_elapsed_duration_s. Never recalculate
-    # these from telemetry, including five seconds of post-stop observation.
-    if details.get("target_time_source") == "workbench_monotonic_motor_start_ack":
+    _LOGGER.info(
+        "Calculating target metrics: experiment_id=%s target_angle=%s "
+        "target_achieved=%s target_time=%s actual_duration=%s target_source=%s",
+        manifest.get("experiment_id"),
+        target,
+        details.get("target_achieved"),
+        details.get("target_time_s"),
+        details.get("actual_elapsed_duration_s"),
+        details.get("target_time_source"),
+    )
+    # Prefer the saved validation result whenever it is present. The source
+    # marker is optional for manifests written by intermediate Workbench builds.
+    if "target_achieved" in details:
         achieved = details.get("target_achieved")
         event_time = details.get("target_time_s")
         duration = details.get("actual_elapsed_duration_s")
         if not isinstance(achieved, bool):
-            achieved = False
+            return {"target_angle_deg": target, "target_achieved": None,
+                    "target_time_s": None, "time_source": "invalid_recorded_event"}
         if achieved:
             try:
                 event_time = float(event_time)
@@ -36,11 +50,22 @@ def target_metrics(directory: Path, manifest: dict) -> dict:
                         and 0 <= event_time <= duration + 0.001):
                     raise ValueError()
             except (TypeError, ValueError):
+                _LOGGER.warning(
+                    "Invalid saved target event: experiment_id=%s target_angle=%s "
+                    "target_achieved=%s target_time=%s actual_duration=%s",
+                    manifest.get("experiment_id"),
+                    target,
+                    achieved,
+                    event_time,
+                    duration,
+                )
                 return {"target_angle_deg": target, "target_achieved": None,
                         "target_time_s": None, "time_source": "invalid_recorded_event"}
         return {"target_angle_deg": target, "target_achieved": achieved,
                 "target_time_s": event_time if achieved else None,
-                "time_source": "workbench_monotonic_motor_start_ack"}
+                "time_source": details.get(
+                    "target_time_source", "saved_target_event"
+                )}
     path = Path(directory) / "telemetry.csv"
     baseline = None
     previous = None

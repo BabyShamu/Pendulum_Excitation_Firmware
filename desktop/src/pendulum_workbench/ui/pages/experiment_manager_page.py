@@ -1,6 +1,7 @@
 """Experiment browser with reversible archive and Excel index export."""
 import os
 import csv
+import logging
 import math
 import shutil
 import sys
@@ -17,6 +18,9 @@ from PySide6.QtWidgets import (
 from pendulum_workbench.experiments.repository import ExperimentRepository
 from pendulum_workbench.experiments.simulation_cache import inspect_simulation
 from pendulum_workbench.experiments.target_metrics import target_metrics
+
+
+_LOGGER = logging.getLogger(__name__)
 
 
 class SortableExperimentItem(QTableWidgetItem):
@@ -216,6 +220,17 @@ class ExperimentManagerPage(QWidget):
             peak = manifest.get("peak_absolute_angle_deg")
             initial = details.get("measured_initial_angle_deg")
             targets = target_metrics(directory, manifest)
+            _LOGGER.info(
+                "Experiment Library record: experiment_id=%s target_angle=%s "
+                "target_achieved=%s target_time=%s completion_reason=%s "
+                "recording_state=%s",
+                manifest.get("experiment_id"),
+                targets["target_angle_deg"],
+                targets["target_achieved"],
+                targets["target_time_s"],
+                details.get("completion_reason"),
+                manifest.get("completion_status"),
+            )
             fields = [
                 str(manifest.get("created_at") or "")[:16].replace("T", " "),
                 str(manifest.get("name") or ""),

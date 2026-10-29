@@ -1,4 +1,5 @@
 import csv
+import logging
 import math
 import time
 from dataclasses import replace
@@ -51,6 +52,7 @@ from pendulum_workbench.infrastructure.serial_client import TELEMETRY_STALE_AFTE
 
 FIRMWARE_MAX_SINE_FREQUENCY_HZ = 10.0
 PENDULUM_ANGLE_LIMIT_COMPLETION_REASON = "fault_appeared:pendulum_angle_limit"
+_LOGGER = logging.getLogger(__name__)
 
 
 class ExperimentRunService(QObject):
@@ -615,6 +617,11 @@ class ExperimentRunService(QObject):
         if self._sine_started_monotonic is not None:
             actual_duration = self._stop_requested_monotonic or time.monotonic()
             actual_duration = max(0.0, actual_duration - self._sine_started_monotonic)
+            if self._target_reached_monotonic is not None:
+                actual_duration = max(
+                    actual_duration,
+                    self._target_reached_monotonic - self._sine_started_monotonic,
+                )
         else:
             actual_duration = 0.0
         self._set_snapshot(
@@ -758,7 +765,7 @@ class ExperimentRunService(QObject):
             self._phase == "sine_stop"
             and self._snapshot.state == ExperimentRunState.STOPPING
             and self._pending_final_state == ExperimentRunState.COMPLETE
-            and self._pending_completion_reason == "duration_elapsed"
+            and self._pending_completion_reason in ("duration_elapsed", "TARGET_REACHED")
         )
         running = (
             target_observation_active
@@ -778,6 +785,17 @@ class ExperimentRunService(QObject):
                 crossing = self._target_detector.observe(now, sample.angle_deg)
                 if crossing is not None:
                     self._target_reached_monotonic = crossing
+                    _LOGGER.info(
+                        "Validated target crossing: experiment_id=%s target_angle=%s "
+                        "target_achieved=%s target_time_monotonic=%s "
+                        "completion_reason=%s recording_state=%s",
+                        self._experiment_id,
+                        self._definition.target_angle_deg if self._definition is not None else None,
+                        True,
+                        crossing,
+                        self._pending_completion_reason,
+                        self.state.snapshot.recording.value,
+                    )
                     self._pending_final_state = ExperimentRunState.COMPLETE
                     self._pending_completion_reason = "TARGET_REACHED"
                     if self._stop_requested_monotonic is None:

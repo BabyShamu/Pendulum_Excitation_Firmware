@@ -1,5 +1,6 @@
 import csv
 import json
+import logging
 import math
 import os
 import re
@@ -32,6 +33,7 @@ LEGACY_TELEMETRY_CORE_COLUMNS = (
 )
 LEGACY_TELEMETRY_COLUMNS = LEGACY_TELEMETRY_CORE_COLUMNS + ("received_at_utc",)
 TELEMETRY_SCHEMA_VERSION = 3
+_LOGGER = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -280,7 +282,35 @@ class ExperimentRepository:
             manifest["recorded_peak_above_target_deg"] = None
         # This is a whole-recording peak, not yet a post-stop-only peak.
 
+        target_details = manifest.get("experiment")
+        _LOGGER.info(
+            "Finalizing experiment manifest before write: experiment_id=%s "
+            "target_angle=%s target_achieved=%s target_time=%s completion_reason=%s "
+            "completion_status=%s",
+            manifest.get("experiment_id"),
+            target_details.get("target_angle_deg") if isinstance(target_details, dict) else None,
+            target_details.get("target_achieved") if isinstance(target_details, dict) else None,
+            target_details.get("target_time_s") if isinstance(target_details, dict) else None,
+            target_details.get("completion_reason") if isinstance(target_details, dict) else None,
+            completion_status,
+        )
         self.write_manifest(session.directory, manifest)
+        with (session.directory / "manifest.json").open(
+            "r", encoding="utf-8"
+        ) as written_manifest_file:
+            written_manifest = json.load(written_manifest_file)
+        written_details = written_manifest.get("experiment")
+        _LOGGER.info(
+            "Finalized experiment manifest after write: experiment_id=%s "
+            "target_angle=%s target_achieved=%s target_time=%s completion_reason=%s "
+            "completion_status=%s",
+            written_manifest.get("experiment_id"),
+            written_details.get("target_angle_deg") if isinstance(written_details, dict) else None,
+            written_details.get("target_achieved") if isinstance(written_details, dict) else None,
+            written_details.get("target_time_s") if isinstance(written_details, dict) else None,
+            written_details.get("completion_reason") if isinstance(written_details, dict) else None,
+            written_manifest.get("completion_status"),
+        )
         write_simscape_input(session.directory, manifest)
         return manifest
 

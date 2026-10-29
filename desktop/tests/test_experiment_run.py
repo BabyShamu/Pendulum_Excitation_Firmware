@@ -661,7 +661,7 @@ class ExperimentRunTests(unittest.TestCase):
         self.assertEqual(manifest["completion_status"], "COMPLETED")
         self.assertEqual(manifest["experiment"]["completion_reason"], "duration_elapsed")
 
-    def test_autoresonance_target_crossing_during_duration_stop_is_saved(self) -> None:
+    def test_autoresonance_target_crossing_during_firmware_target_stop_is_saved(self) -> None:
         directory = self.temporary_directory()
         controller, device, _repository = self.create_connected_controller(directory)
         self.addCleanup(controller.shutdown)
@@ -677,7 +677,7 @@ class ExperimentRunTests(unittest.TestCase):
         run._on_telemetry_sample(TelemetrySample(100, 12.055, 49.4, 0.0, "real"))
         run._on_telemetry_sample(TelemetrySample(101, 12.075, 51.15, 0.0, "real"))
         run._pending_final_state = ExperimentRunState.COMPLETE
-        run._pending_completion_reason = "duration_elapsed"
+        run._pending_completion_reason = "TARGET_REACHED"
         run._phase = "sine_stop"
         run._set_snapshot(state=ExperimentRunState.STOPPING)
         run._on_telemetry_sample(TelemetrySample(102, 12.095, 50.8, 0.0, "real"))

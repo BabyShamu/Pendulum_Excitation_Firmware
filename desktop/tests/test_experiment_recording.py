@@ -11,6 +11,7 @@ from PySide6.QtWidgets import QApplication
 
 from pendulum_workbench.application.experiment_recording import ExperimentRecordingService
 from pendulum_workbench.application.experiment_recording import RecordingRequest
+from pendulum_workbench.application.controller import WorkbenchController
 from pendulum_workbench.application.state import ApplicationStateModel
 from pendulum_workbench.domain.models import (
     ConnectionState,
@@ -20,6 +21,7 @@ from pendulum_workbench.domain.models import (
 )
 from pendulum_workbench.domain.experiment_run import VerticalSineDefinition
 from pendulum_workbench.experiments.repository import ExperimentRepository
+from pendulum_workbench.ui.pages.experiment_manager_page import ExperimentManagerPage
 from pendulum_workbench.infrastructure.serial_client import (
     ReceivedSerialLine,
     SerialTelemetryClient,
@@ -93,6 +95,61 @@ class ExperimentRecordingTests(unittest.TestCase):
             self.assertEqual(reopened.manifest["experiment"]["measured_initial_angle_deg"], -14.8)
             self.assertNotIn("target_initial_angle_deg", reopened.manifest["experiment"])
             self.assertEqual(len(reopened.telemetry), 1)
+
+    def test_target_metadata_survives_save_reload_and_library_refresh(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            state = ApplicationStateModel()
+            state.set_mock_source_active(True)
+            repository = ExperimentRepository(Path(temporary_directory))
+            service = ExperimentRecordingService(state, SerialTelemetryClient(), repository)
+            self.addCleanup(service.shutdown)
+            target_metadata = {
+                "target_angle_deg": 80.0,
+                "target_achieved": True,
+                "target_time_s": 14.760349899996072,
+                "target_time_source": "workbench_monotonic_motor_start_ack",
+                "actual_elapsed_duration_s": 14.760349899996072,
+                "completion_reason": "TARGET_REACHED",
+            }
+            experiment_id = service.start_recording(
+                "Auto-Resonance target save",
+                "",
+                experiment_metadata=target_metadata,
+            )
+            self.assertTrue(self.wait_for(lambda: state.snapshot.recording == RecordingState.RECORDING))
+            state.publish_sample(TelemetrySample(1, 14.76, 82.62, 0.0, source="mock"))
+            service.update_run_metadata(
+                experiment_id,
+                name="Auto-Resonance target save",
+                experiment_metadata=target_metadata,
+            )
+            self.assertTrue(
+                self.wait_for(
+                    lambda: service.active_session is not None
+                    and service.active_session.manifest["experiment"]["target_achieved"] is True
+                )
+            )
+            service.stop_recording()
+            self.assertTrue(self.wait_for(lambda: state.snapshot.recording == RecordingState.SAVED))
+
+            completed_session = service.last_completed_session
+            self.assertIsNotNone(completed_session)
+            loaded = repository.load(completed_session.directory)
+            self.assertTrue(loaded.manifest["experiment"]["target_achieved"])
+            self.assertAlmostEqual(
+                loaded.manifest["experiment"]["target_time_s"],
+                14.760349899996072,
+            )
+
+            controller = WorkbenchController(experiment_repository=repository)
+            page = ExperimentManagerPage(controller)
+            self.addCleanup(controller.shutdown)
+            self.addCleanup(page.close)
+            self.assertEqual(page.table.item(0, 7).text(), "Yes")
+            self.assertEqual(page.table.item(0, 8).text(), "14.76 s")
+            page.table.selectRow(0)
+            self.assertEqual(page.detail_labels["Target achieved"].text(), "Yes")
+            self.assertEqual(page.detail_labels["Target time"].text(), "14.76 s")
 
     def wait_for(self, predicate, timeout_s: float = 2.0) -> bool:
         deadline = time.monotonic() + timeout_s

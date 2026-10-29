@@ -52,6 +52,34 @@ class TargetMetricsTests(unittest.TestCase):
         self.assertTrue(result["target_achieved"])
         self.assertAlmostEqual(result["target_time_s"], 14.27)
 
+    def test_saved_target_result_without_source_marker_is_displayable(self):
+        manifest = {"experiment": {
+            "target_angle_deg": 60.0,
+            "actual_elapsed_duration_s": 15.0,
+            "target_achieved": True,
+            "target_time_s": 14.760349899996072,
+        }}
+        result = target_metrics(self.path, manifest)
+        self.assertTrue(result["target_achieved"])
+        self.assertAlmostEqual(result["target_time_s"], 14.760349899996072)
+
+    def test_saved_false_target_result_is_displayable(self):
+        result = target_metrics(self.path, {"experiment": {
+            "target_angle_deg": 60.0,
+            "target_achieved": False,
+            "target_time_s": None,
+        }})
+        self.assertFalse(result["target_achieved"])
+        self.assertIsNone(result["target_time_s"])
+
+    def test_null_saved_target_result_is_unknown(self):
+        result = target_metrics(self.path, {"experiment": {
+            "target_angle_deg": 60.0,
+            "target_achieved": None,
+        }})
+        self.assertIsNone(result["target_achieved"])
+        self.assertIsNone(result["target_time_s"])
+
     def test_post_stop_angle_does_not_create_target(self):
         manifest = {"experiment": {
             "target_angle_deg": 30,
@@ -84,6 +112,7 @@ class TargetMetricsTests(unittest.TestCase):
                 notes="",
                 data_source=DataSourceMode.REAL,
                 serial_port="COM6",
+                experiment_id="7cae9c7e-d72a-4edf-92d5-3e5928e12abe",
                 experiment_metadata={
                     "target_angle_deg": 50.0,
                     "actual_elapsed_duration_s": 12.1,
@@ -123,6 +152,20 @@ class TargetMetricsTests(unittest.TestCase):
             self.addCleanup(page.close)
             self.assertEqual(page.table.item(0, 7).text(), "Yes")
             self.assertEqual(page.table.item(0, 8).text(), "12.07 s")
+            page.table.selectRow(0)
+            self.assertEqual(page.detail_labels["Target achieved"].text(), "Yes")
+            self.assertEqual(page.detail_labels["Target time"].text(), "12.07 s")
+
+            refreshed_manifest = dict(listed[0][1])
+            refreshed_details = dict(refreshed_manifest["experiment"])
+            refreshed_details.update(target_achieved=False, target_time_s=None)
+            refreshed_manifest["experiment"] = refreshed_details
+            repository.write_manifest(session.directory, refreshed_manifest)
+            page.refresh()
+            self.assertEqual(page.table.item(0, 7).text(), "No")
+            self.assertEqual(page.table.item(0, 8).text(), "—")
+            self.assertEqual(page.detail_labels["Target achieved"].text(), "No")
+            self.assertEqual(page.detail_labels["Target time"].text(), "—")
 
     def test_unreached_target(self):
         result = target_metrics(self.path, {"experiment": {"target_angle_deg": 65}})
