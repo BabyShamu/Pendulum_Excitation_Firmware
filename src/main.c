@@ -4080,8 +4080,16 @@ static uint8_t ProcessMaintenanceCommand(char *arguments)
             g_experimentTargetAngleDeg = targetAngleDeg;
             g_experimentTargetReachedPending = 0U;
             StartParametricController(amplitudeMm, phaseDeg);
+            /* This experimental branch routes Workbench's existing
+             * parametric_start command to the nonblocking TIM6 actuator.
+             * Keep active_mode=parametric for Workbench protocol compatibility.
+             * The legacy terminal 'parametric' command remains unchanged.
+             */
+            g_parametricV2TargetSteps = g_positionSteps;
+            g_parametricV2SpeedHz = 0.0f;
+            g_parametricV2Enabled = 1U;
             snprintf(msg, sizeof(msg),
-                     "maintenance: id=%lu type=parametric_start ok=1 active=1 active_mode=parametric amplitude_mm=%.6f phase_deg=%.6f\r\n",
+                     "maintenance: id=%lu type=parametric_start ok=1 active=1 active_mode=parametric controller=v2_timer amplitude_mm=%.6f phase_deg=%.6f\r\n",
                      requestId,
                      (double)g_parametricAmplitudeMm,
                      (double)phaseDeg);
