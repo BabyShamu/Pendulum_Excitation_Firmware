@@ -63,6 +63,7 @@
 #define FIRMWARE_DEBUG_RX   0U
 #endif
 #define PARAMETRIC_SPEED_HZ 4000U
+#define PARAMETRIC_TRACE_DECIMATION 5U /* nominal ~20 Hz */
 #define PARAMETRIC_UPDATE_PERIOD_MS   10U
 #define PARAMETRIC_TEST_PERIOD_MS      5U
 #define PARAMETRIC_TEST_TELEMETRY_DECIMATION 4U
@@ -306,6 +307,8 @@ static float g_parametricThetaSqDc = 0.0f;
 static float g_parametricPrevAcSignal = 0.0f;
 static float g_parametricCosPeak = 0.0f;
 static float g_parametricSinPeak = 0.0f;
+static uint8_t g_parametricTraceEnabled = 0U;
+static uint32_t g_parametricTraceSampleCount = 0U;
 static uint8_t g_parametricTestRunning = 0U;
 static uint8_t g_parametricTestFilterValid = 0U;
 static uint32_t g_parametricTestStartMs = 0U;
@@ -2133,6 +2136,8 @@ static void UpdateParametric(void)
     float sin2;
     float targetMm;
     float maxStepMm;
+    int32_t traceStartSteps;
+    uint32_t traceMoveStartMs;
     int32_t targetSteps;
     int32_t halfTravelSteps;
     uint32_t now = HAL_GetTick();
@@ -2224,6 +2229,8 @@ static void UpdateParametric(void)
         targetSteps = -halfTravelSteps;
     }
 
+    traceStartSteps = g_positionSteps;
+    traceMoveStartMs = HAL_GetTick();
     while (g_positionSteps != targetSteps)
     {
         uint8_t direction = (targetSteps > g_positionSteps) ? 0U : 1U;
@@ -2248,6 +2255,29 @@ static void UpdateParametric(void)
         }
         g_positionSteps += (direction == 0U) ? 1 : -1;
     }
+    /* Opt-in; no messages are formatted while motor pulses are generated.
+     * The actual position below is tracked steps, not a physical encoder.
+     * UART enqueue is nonblocking, but tracing may still alter loop timing.
+     */
+    if (g_parametricTraceEnabled != 0U &&
+        (g_parametricTraceSampleCount++ % PARAMETRIC_TRACE_DECIMATION) == 0U)
+    {
+        char trace[208];
+        int len = snprintf(trace, sizeof(trace),
+            "param_trace: ms=%lu dt_ms=%.2f theta_rad=%.5f deriv=%.5f sin2=%.4f cos2=%.4f target_mm=%.4f actual_mm=%.4f move_steps=%ld move_ms=%lu\r\n",
+            (unsigned long)now, (double)(dt * 1000.0f),
+            (double)rawThetaRad, (double)derivative,
+            (double)sin2, (double)cos2,
+            (double)((float)targetSteps / g_stepsPerMm),
+            (double)((float)g_positionSteps / g_stepsPerMm),
+            (long)labs((long)g_positionSteps - (long)traceStartSteps),
+            (unsigned long)(HAL_GetTick() - traceMoveStartMs));
+        if (len > 0 && (size_t)len < sizeof(trace))
+        {
+            (void)UartTryEnqueue(trace, (size_t)len);
+        }
+    }
+
 }
 
 static void StartParametricController(float amplitudeMm, float phaseDeg)
@@ -2268,6 +2298,7 @@ static void StartParametricController(float amplitudeMm, float phaseDeg)
     g_parametricPrevAcSignal = 0.0f;
     g_parametricCosPeak = 0.0f;
     g_parametricSinPeak = 0.0f;
+    g_parametricTraceSampleCount = 0U;
     g_parametricCommandedMm = (float)g_positionSteps / g_stepsPerMm;
     g_parametricRunning = 1U;
 }
@@ -4394,6 +4425,21 @@ static void ProcessLine(char *line)
     if (strcmp(line, "status") == 0)
     {
         PrintStatus();
+        return;
+    }
+
+    if (strncmp(line, "param_trace ", 12) == 0)
+    {
+        char *endptr;
+        unsigned long enable = strtoul(line + 12, &endptr, 10);
+        if (endptr == line + 12 || *endptr != '\0' || enable > 1UL)
+        {
+            UartPrint("usage: param_trace 0|1\r\n");
+            return;
+        }
+        g_parametricTraceEnabled = (uint8_t)enable;
+        g_parametricTraceSampleCount = 0U;
+        UartPrint(enable != 0UL ? "parametric trace enabled\r\n" : "parametric trace disabled\r\n");
         return;
     }
 
