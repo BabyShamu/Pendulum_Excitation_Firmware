@@ -29,6 +29,7 @@ from pendulum_workbench.domain.models import (
 )
 from pendulum_workbench.experiments.repository import LoadedExperiment
 from pendulum_workbench.ui.pages.experiment_page import ExperimentPage
+from pendulum_workbench.ui.pages.experiment_manager_page import ExperimentManagerPage
 from pendulum_workbench.ui.pages.live_page import MonitorPage
 from pendulum_workbench.ui.pages.maintenance_page import MaintenancePage
 from pendulum_workbench.ui.status_indicator import IndicatorTone, StatusChip
@@ -46,6 +47,20 @@ class MainWindow(QMainWindow):
             """
             QMainWindow { background: #e9eeeb; color: #24363a; }
             QWidget { background: transparent; color: #24363a; }
+            /* Override the Windows dark dialog palette. Without an explicit
+               background, transparent children inherit near-black surfaces. */
+            QDialog, QMessageBox { background-color: #f8faf9; color: #24363a; }
+            QDialog QLabel, QMessageBox QLabel {
+                background-color: transparent; color: #24363a; font-size: 12px;
+            }
+            QDialog QPushButton, QMessageBox QPushButton {
+                background-color: #f4f7f5; color: #28463b;
+                border: 1px solid #cbd8d0; border-radius: 6px;
+                padding: 7px 12px; min-width: 64px;
+            }
+            QDialog QPushButton:hover, QMessageBox QPushButton:hover {
+                background-color: #e6eee8;
+            }
             QWidget#centralContent { background: #e9eeeb; }
             QLabel { background: transparent; }
             QLabel#eyebrow { color: #287b68; font-size: 10px; font-weight: 700; }
@@ -118,7 +133,7 @@ class MainWindow(QMainWindow):
         workspace.setSpacing(12)
         navigation = QFrame()
         navigation.setObjectName("navRail")
-        navigation.setFixedWidth(148)
+        navigation.setFixedWidth(173)
         self.navigation_rail = navigation
         nav_layout = QVBoxLayout(navigation)
         self.navigation_layout = nav_layout
@@ -133,10 +148,15 @@ class MainWindow(QMainWindow):
         self.monitor_navigation_button = self._navigation_button("Monitor", "monitorNavigationButton", 0)
         self.live_navigation_button = self.monitor_navigation_button
         self.experiment_navigation_button = self._navigation_button(
-            "Experiment", "experimentNavigationButton", 1
+            "Run Experiment", "experimentNavigationButton", 1
         )
-        for index, button in enumerate(
-            (self.monitor_navigation_button, self.experiment_navigation_button)
+        self.manager_navigation_button = self._navigation_button(
+            "Experiment Library", "managerNavigationButton", 3
+        )
+        for index, button in (
+            (0, self.monitor_navigation_button),
+            (1, self.experiment_navigation_button),
+            (3, self.manager_navigation_button),
         ):
             self.navigation_group.addButton(button, index)
             button.clicked.connect(lambda _checked=False, page=index: self._show_page(page))
@@ -166,9 +186,11 @@ class MainWindow(QMainWindow):
         self.live_page = self.monitor_page
         self.experiment_page = ExperimentPage(controller)
         self.maintenance_page = MaintenancePage(controller)
+        self.manager_page = ExperimentManagerPage(controller)
         self.page_stack.addWidget(self.monitor_page)
         self.page_stack.addWidget(self.experiment_page)
         self.page_stack.addWidget(self.maintenance_page)
+        self.page_stack.addWidget(self.manager_page)
         workspace.addWidget(self.page_stack, 1)
         layout.addLayout(workspace, 1)
 
@@ -221,6 +243,8 @@ class MainWindow(QMainWindow):
             and index != self.page_stack.indexOf(self.maintenance_page)
         ):
             self.controller.maintenance.stop_manual_motion("maintenance_page_left")
+        if index == 3:
+            self.manager_page.refresh()
         self.page_stack.setCurrentIndex(index)
         for page_index in range(self.page_stack.count()):
             page_button = self.navigation_group.button(page_index)

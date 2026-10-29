@@ -184,6 +184,30 @@ class ExperimentRepository:
         self.write_manifest(directory, manifest)
         return ExperimentSession(experiment_id, directory, manifest)
 
+    def list_manifests(self) -> list[tuple[Path, dict[str, Any]]]:
+        """List saved experiment metadata without loading large telemetry CSV files.
+
+        Invalid or unreadable manifests are skipped so one damaged recording
+        does not prevent the experiment browser from opening.
+        """
+        if not self.root.is_dir():
+            return []
+        records: list[tuple[Path, dict[str, Any]]] = []
+        for manifest_path in self.root.glob("*/manifest.json"):
+            try:
+                with manifest_path.open("r", encoding="utf-8") as source:
+                    manifest = json.load(source)
+                if not isinstance(manifest, dict) or not manifest.get("experiment_id"):
+                    continue
+                records.append((manifest_path.parent, manifest))
+            except (OSError, ValueError, TypeError):
+                continue
+        records.sort(
+            key=lambda item: str(item[1].get("created_at") or ""),
+            reverse=True,
+        )
+        return records
+
     @staticmethod
     def write_manifest(directory: Path, manifest: dict[str, Any]) -> None:
         manifest_path = directory / "manifest.json"
@@ -219,6 +243,7 @@ class ExperimentRepository:
         # after excitation stopped but before the recorder was finalized.
         peak_angle = None
         peak_time = None
+        first_sample_time = None
         with (session.directory / "telemetry.csv").open(
             "r", encoding="utf-8", newline=""
         ) as telemetry_file:
@@ -230,12 +255,18 @@ class ExperimentRepository:
                     continue
                 if not (math.isfinite(angle) and math.isfinite(sample_time)):
                     continue
+                if first_sample_time is None:
+                    first_sample_time = sample_time
                 if peak_angle is None or abs(angle) > abs(peak_angle):
                     peak_angle = angle
                     peak_time = sample_time
         manifest["peak_absolute_angle_deg"] = abs(peak_angle) if peak_angle is not None else None
         manifest["peak_signed_angle_deg"] = peak_angle
         manifest["peak_angle_time_s"] = peak_time
+        manifest["peak_angle_elapsed_s"] = (
+            max(0.0, peak_time - first_sample_time)
+            if peak_time is not None and first_sample_time is not None else None
+        )
         experiment = manifest.get("experiment")
         target_angle = experiment.get("target_angle_deg") if isinstance(experiment, dict) else None
         if (
