@@ -3930,13 +3930,25 @@ static uint8_t ProcessMaintenanceCommand(char *arguments)
 
     if (strcmp(end, "autores_stop") == 0)
     {
+        uint8_t wasRunning = g_parametricClosedLoopRunning;
         g_parametricClosedLoopRunning = 0U;
         g_parametricClosedLoopExperimentMode = 0U;
         ClosedLoopActuatorStop();
+
+        // Return to the *existing homed origin* after a normal AR stop.
+        // Never overwrite g_positionSteps here: doing so would only move the
+        // software zero, not the carriage. Skip motion on safety faults.
+        if (wasRunning != 0U && g_homed != 0U &&
+            g_closedLoopFault == 0U && g_pendulumAngleSafetyAvailable != 0U &&
+            g_angleSensorUnavailable == 0U)
+        {
+            ReturnToCenter();
+        }
         snprintf(msg, sizeof(msg),
-                 "maintenance: id=%lu type=autores_stop ok=1 active=0 active_mode=%s\r\n",
+                 "maintenance: id=%lu type=autores_stop ok=1 active=0 active_mode=%s position_steps=%ld\r\n",
                  requestId,
-                 ActiveModeName());
+                 ActiveModeName(),
+                 (long)g_positionSteps);
         UartPrint(msg);
         return 1U;
     }
