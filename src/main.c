@@ -63,6 +63,10 @@
 #define FIRMWARE_DEBUG_RX   0U
 #endif
 #define PARAMETRIC_SPEED_HZ 4000U
+/* Experimental timer-driven stepper: validate on bench before physical use. */
+#define PARAMETRIC_V2_MAX_HZ 4000.0f
+#define PARAMETRIC_V2_START_HZ 150.0f
+#define PARAMETRIC_V2_ACCEL_HZ_S 18000.0f
 #define PARAMETRIC_TRACE_DECIMATION 5U /* nominal ~20 Hz */
 #define PARAMETRIC_UPDATE_PERIOD_MS   10U
 #define PARAMETRIC_TEST_PERIOD_MS      5U
@@ -187,6 +191,7 @@ static void ManualStepTimerStopFromIsr(uint8_t reason);
 static void ManualStepTimerOnTimer(void);
 static void ClosedLoopActuatorKick(void);
 static void ClosedLoopActuatorStop(void);
+static void ParametricV2OnTimer(void);
 static void ClosedLoopActuatorOnTimer(void);
 static GPIO_PinState ActiveState(uint8_t on);
 static uint8_t UpperLimitPressed(void);
@@ -297,6 +302,9 @@ static float g_sineAmplitudeMm = 0.0f;
 static float g_sineFrequencyHz = 0.0f;
 static uint32_t g_sineStartMs = 0U;
 static uint8_t g_parametricRunning = 0U;
+static volatile uint8_t g_parametricV2Enabled = 0U;
+static volatile int32_t g_parametricV2TargetSteps = 0;
+static float g_parametricV2SpeedHz = 0.0f;
 static float g_parametricAmplitudeMm = 0.0f;
 static float g_parametricPhiRad = 0.0f;
 static uint32_t g_parametricLastUpdateMs = 0U;
@@ -419,7 +427,14 @@ void TIM6_DAC_IRQHandler(void)
     if ((TIM6->SR & TIM_SR_UIF) != 0U)
     {
         TIM6->SR = 0U;
-        ClosedLoopActuatorOnTimer();
+        if (g_parametricV2Enabled != 0U)
+        {
+            ParametricV2OnTimer();
+        }
+        else
+        {
+            ClosedLoopActuatorOnTimer();
+        }
     }
 }
 
@@ -1368,7 +1383,8 @@ static void ClosedLoopActuatorStop(void)
 
 static uint8_t ClosedLoopActuatorIsActive(void)
 {
-    return (g_parametricClosedLoopRunning != 0U || g_phaseTrackedSineRunning != 0U) ? 1U : 0U;
+    return (g_parametricClosedLoopRunning != 0U || g_phaseTrackedSineRunning != 0U ||
+            (g_parametricRunning != 0U && g_parametricV2Enabled != 0U)) ? 1U : 0U;
 }
 
 static void ClosedLoopActuatorFault(uint8_t fault)
@@ -1382,6 +1398,93 @@ static void ClosedLoopActuatorFault(uint8_t fault)
     TIM6->SR = 0U;
     g_closedLoopActuatorPhase = CLOSED_LOOP_PHASE_IDLE;
     HAL_GPIO_WritePin(STEP_PORT, STEP_PIN, ActiveState(0U));
+}
+
+/* Experimental nonblocking stepper scheduler. The resonance equations are
+ * unchanged. TIM6 is shared with the other closed-loop modes, never concurrent.
+ * Current position is a commanded step count (no independent encoder).
+ * Safety polling continues in main; ISR also checks the cached safety gate.
+ */
+static void ParametricV2OnTimer(void)
+{
+    int32_t error;
+    uint8_t direction;
+    float brakingHz;
+    float demandedHz;
+    float accelIncrement;
+    uint32_t periodUs;
+
+    if (g_parametricRunning == 0U || g_parametricV2Enabled == 0U ||
+        g_closedLoopFault != 0U || g_pendulumAngleSafetyAvailable == 0U)
+    {
+        ClosedLoopActuatorStop();
+        return;
+    }
+
+    if (g_closedLoopActuatorPhase == CLOSED_LOOP_PHASE_STEP_HIGH)
+    {
+        HAL_GPIO_WritePin(STEP_PORT, STEP_PIN, ActiveState(0U));
+        g_positionSteps += (g_dir == DIR_UP) ? 1 : -1;
+        g_closedLoopActuatorPhase = CLOSED_LOOP_PHASE_INTERSTEP;
+        periodUs = (uint32_t)(1000000.0f / g_parametricV2SpeedHz);
+        if (periodUs < (CLOSED_LOOP_STEP_PULSE_US + 2U))
+        {
+            periodUs = CLOSED_LOOP_STEP_PULSE_US + 2U;
+        }
+        ClosedLoopTimerScheduleUs(periodUs - CLOSED_LOOP_STEP_PULSE_US);
+        return;
+    }
+
+    error = g_parametricV2TargetSteps - g_positionSteps;
+    if (error == 0)
+    {
+        g_parametricV2SpeedHz = 0.0f;
+        g_closedLoopActuatorPhase = CLOSED_LOOP_PHASE_IDLE;
+        return;
+    }
+
+    direction = (error > 0) ? DIR_UP : DIR_DOWN;
+    if ((direction == DIR_UP && UpperLimitPressed() != 0U) ||
+        (direction == DIR_DOWN && LowerLimitPressed() != 0U))
+    {
+        g_parametricRunning = 0U;
+        g_parametricV2Enabled = 0U;
+        ClosedLoopActuatorFault(direction == DIR_UP ? 1U : 2U);
+        return;
+    }
+    if (g_dir != direction)
+    {
+        /* Target reversal: restart conservatively and honor DIR setup time. */
+        g_parametricV2SpeedHz = PARAMETRIC_V2_START_HZ;
+        g_dir = direction;
+        HAL_GPIO_WritePin(DIR_PORT, DIR_PIN, ActiveState(g_dir));
+        g_closedLoopActuatorPhase = CLOSED_LOOP_PHASE_DIR_SETUP;
+        ClosedLoopTimerScheduleUs(CLOSED_LOOP_DIR_SETUP_US);
+        return;
+    }
+
+    if (g_parametricV2SpeedHz < PARAMETRIC_V2_START_HZ)
+    {
+        g_parametricV2SpeedHz = PARAMETRIC_V2_START_HZ;
+    }
+    /* Speed is bounded by the remaining braking distance and acceleration.
+     * This is a per-step trapezoidal profile, not a jerk-limited S-curve.
+     */
+    brakingHz = sqrtf(2.0f * PARAMETRIC_V2_ACCEL_HZ_S * (float)labs((long)error));
+    demandedHz = fminf(PARAMETRIC_V2_MAX_HZ, brakingHz);
+    accelIncrement = PARAMETRIC_V2_ACCEL_HZ_S / g_parametricV2SpeedHz;
+    if (g_parametricV2SpeedHz < demandedHz)
+    {
+        g_parametricV2SpeedHz = fminf(demandedHz, g_parametricV2SpeedHz + accelIncrement);
+    }
+    else
+    {
+        g_parametricV2SpeedHz = fmaxf(PARAMETRIC_V2_START_HZ,
+                                     g_parametricV2SpeedHz - accelIncrement);
+    }
+    HAL_GPIO_WritePin(STEP_PORT, STEP_PIN, ActiveState(1U));
+    g_closedLoopActuatorPhase = CLOSED_LOOP_PHASE_STEP_HIGH;
+    ClosedLoopTimerScheduleUs(CLOSED_LOOP_STEP_PULSE_US);
 }
 
 static void ClosedLoopActuatorOnTimer(void)
@@ -2231,6 +2334,13 @@ static void UpdateParametric(void)
 
     traceStartSteps = g_positionSteps;
     traceMoveStartMs = HAL_GetTick();
+    if (g_parametricV2Enabled != 0U)
+    {
+        g_parametricV2TargetSteps = targetSteps;
+        ClosedLoopActuatorKick();
+        return;
+    }
+
     while (g_positionSteps != targetSteps)
     {
         uint8_t direction = (targetSteps > g_positionSteps) ? 0U : 1U;
@@ -2307,6 +2417,12 @@ static uint8_t StopParametricController(uint8_t returnToCenter)
 {
     uint8_t wasRunning = g_parametricRunning;
     g_parametricRunning = 0U;
+    if (g_parametricV2Enabled != 0U)
+    {
+        ClosedLoopActuatorStop();
+        g_parametricV2Enabled = 0U;
+        g_parametricV2SpeedHz = 0.0f;
+    }
     if (returnToCenter != 0U && wasRunning != 0U &&
         g_homed != 0U && g_closedLoopFault == 0U)
     {
@@ -3090,7 +3206,9 @@ static void PrintHelp(void)
     UartPrint("  maint <id> autores_start <amp_mm> <phase_deg> | autores_stop - legacy experimental bounded controller\r\n");
     UartPrint("  maint <id> phase_sine_start <amp_mm> <phase_deg> | phase_sine_stop - phase-tracked sine control\r\n");
     UartPrint("  maint <id> sine_start <amp_mm> <hz> | sine_stop - correlated sine motion control\r\n");
-    UartPrint("  parametric <amp_mm> <phi_deg> - drive pivot at 2x pendulum phase rate\r\n");
+    UartPrint("  parametric <amp_mm> <phi_deg> - legacy blocking parametric controller\r\n");
+    UartPrint("  parametric_v2 <amp_mm> <phi_deg> - experimental TIM6 trajectory (bench test only)\r\n");
+    UartPrint("  parametric_v2 stop - stop experimental controller\r\n");
     UartPrint("  parametric stop - stop parametric drive\r\n");
     UartPrint("  parametric_test 0|1 - test parametric signal processing without motor motion\r\n");
     UartPrint("  parametric_closed_loop 0|1 - run bounded parametric motor control\r\n");
@@ -4766,6 +4884,49 @@ static void ProcessLine(char *line)
         g_parametricRunning = 0U;
         g_run = 0U;
         UartPrint("sine started\r\n");
+        return;
+    }
+
+    if (strncmp(line, "parametric_v2 ", 14) == 0)
+    {
+        const char *args = line + 14;
+        char *end;
+        float amp;
+        float phase;
+        if (strcmp(args, "stop") == 0)
+        {
+            (void)StopParametricController(0U);
+            UartPrint("parametric_v2 stopped\r\n");
+            return;
+        }
+        amp = strtof(args, &end);
+        if (end == args)
+        {
+            UartPrint("usage: parametric_v2 <amp_mm> <phase_deg>\r\n");
+            return;
+        }
+        phase = strtof(end, &end);
+        while (*end == ' ' || *end == '\t')
+        {
+            end++;
+        }
+        if (*end != '\0' || !isfinite(amp) || !isfinite(phase) ||
+            amp <= 0.0f || amp > CLOSED_LOOP_MAX_MM ||
+            g_homed == 0U || g_closedLoopFault != 0U ||
+            PendulumAngleSafetyReadyForMotion() == 0U ||
+            (amp * 2.0f * g_stepsPerMm) >= (float)g_travelSteps)
+        {
+            UartPrint("parametric_v2 rejected: check syntax, homing, safety, travel, and amplitude\r\n");
+            return;
+        }
+        StartParametricController(amp, phase);
+        /* V2 keeps the raw controller output unchanged; travel clamp is a
+         * separate safety bound. Do not treat amplitude as a hard limit.
+         */
+        g_parametricV2TargetSteps = g_positionSteps;
+        g_parametricV2SpeedHz = 0.0f;
+        g_parametricV2Enabled = 1U;
+        UartPrint("parametric_v2 started (experimental)\r\n");
         return;
     }
 
