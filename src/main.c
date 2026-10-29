@@ -66,7 +66,9 @@
 /* Experimental timer-driven stepper: validate on bench before physical use. */
 #define PARAMETRIC_V2_MAX_HZ 4000.0f
 #define PARAMETRIC_V2_START_HZ 150.0f
-#define PARAMETRIC_V2_ACCEL_HZ_S 18000.0f
+#define PARAMETRIC_V2_ACCEL_DEFAULT_HZ_S 18000.0f
+#define PARAMETRIC_V2_ACCEL_MIN_HZ_S 6000.0f
+#define PARAMETRIC_V2_ACCEL_MAX_HZ_S 36000.0f
 #define PARAMETRIC_TRACE_DECIMATION 5U /* nominal ~20 Hz */
 #define PARAMETRIC_UPDATE_PERIOD_MS   10U
 #define PARAMETRIC_TEST_PERIOD_MS      5U
@@ -304,7 +306,9 @@ static uint32_t g_sineStartMs = 0U;
 static uint8_t g_parametricRunning = 0U;
 static volatile uint8_t g_parametricV2Enabled = 0U;
 static volatile int32_t g_parametricV2TargetSteps = 0;
-static float g_parametricV2SpeedHz = 0.0f;
+static volatile float g_parametricV2SpeedHz = 0.0f;
+static float g_parametricV2AccelHzS = PARAMETRIC_V2_ACCEL_DEFAULT_HZ_S;
+static uint32_t g_parametricV2TraceCount = 0U;
 static float g_parametricAmplitudeMm = 0.0f;
 static float g_parametricPhiRad = 0.0f;
 static uint32_t g_parametricLastUpdateMs = 0U;
@@ -1470,9 +1474,9 @@ static void ParametricV2OnTimer(void)
     /* Speed is bounded by the remaining braking distance and acceleration.
      * This is a per-step trapezoidal profile, not a jerk-limited S-curve.
      */
-    brakingHz = sqrtf(2.0f * PARAMETRIC_V2_ACCEL_HZ_S * (float)labs((long)error));
+    brakingHz = sqrtf(2.0f * g_parametricV2AccelHzS * (float)labs((long)error));
     demandedHz = fminf(PARAMETRIC_V2_MAX_HZ, brakingHz);
-    accelIncrement = PARAMETRIC_V2_ACCEL_HZ_S / g_parametricV2SpeedHz;
+    accelIncrement = g_parametricV2AccelHzS / g_parametricV2SpeedHz;
     if (g_parametricV2SpeedHz < demandedHz)
     {
         g_parametricV2SpeedHz = fminf(demandedHz, g_parametricV2SpeedHz + accelIncrement);
@@ -2360,6 +2364,29 @@ static void UpdateParametric(void)
         }
         g_parametricV2TargetSteps = targetSteps;
         ClosedLoopActuatorKick();
+        if (g_parametricTraceEnabled != 0U &&
+            (g_parametricV2TraceCount++ % PARAMETRIC_TRACE_DECIMATION) == 0U)
+        {
+            char msg[280];
+            int32_t trackedSteps;
+            float speedHz;
+            int len;
+            uint32_t primask = __get_PRIMASK();
+            __disable_irq();
+            trackedSteps = g_positionSteps;
+            speedHz = g_parametricV2SpeedHz;
+            if (primask == 0U) { __enable_irq(); }
+            len = snprintf(msg, sizeof(msg),
+                "param_v2_trace: ms=%lu dt_ms=%.2f theta_rad=%.5f deriv=%.5f target_mm=%.4f actual_mm=%.4f error_mm=%.4f speed_hz=%.1f accel_hz_s=%.0f\r\n",
+                (unsigned long)now, (double)(dt * 1000.0f),
+                (double)rawThetaRad, (double)derivative,
+                (double)((float)targetSteps / g_stepsPerMm),
+                (double)((float)trackedSteps / g_stepsPerMm),
+                (double)((float)(targetSteps - trackedSteps) / g_stepsPerMm),
+                (double)speedHz, (double)g_parametricV2AccelHzS);
+            if (len > 0 && (size_t)len < sizeof(msg))
+            { (void)UartTryEnqueue(msg, (size_t)len); }
+        }
         return;
     }
 
@@ -3233,6 +3260,7 @@ static void PrintHelp(void)
     UartPrint("  parametric <amp_mm> <phi_deg> - legacy blocking parametric controller\r\n");
     UartPrint("  parametric_v2 <amp_mm> <phi_deg> - experimental TIM6 trajectory (bench test only)\r\n");
     UartPrint("  parametric_v2 stop - stop experimental controller\r\n");
+    UartPrint("  v2_accel [steps/s2] - inspect/set V2 acceleration while idle (6000..36000)\r\n");
     UartPrint("  parametric stop - stop parametric drive\r\n");
     UartPrint("  parametric_test 0|1 - test parametric signal processing without motor motion\r\n");
     UartPrint("  parametric_closed_loop 0|1 - run bounded parametric motor control\r\n");
@@ -4916,6 +4944,41 @@ static void ProcessLine(char *line)
         g_parametricRunning = 0U;
         g_run = 0U;
         UartPrint("sine started\r\n");
+        return;
+    }
+
+    if (strcmp(line, "v2_accel") == 0)
+    {
+        char msg[96];
+        snprintf(msg, sizeof(msg), "v2_accel: steps_per_s2=%.0f mm_per_s2=%.1f\r\n",
+                 (double)g_parametricV2AccelHzS,
+                 (double)(g_parametricV2AccelHzS / g_stepsPerMm));
+        UartPrint(msg);
+        return;
+    }
+    if (strncmp(line, "v2_accel ", 9) == 0)
+    {
+        char *end;
+        float value = strtof(line + 9, &end);
+        char msg[100];
+        while (*end == ' ' || *end == '\t') { end++; }
+        if (*end != '\0' || !isfinite(value) ||
+            value < PARAMETRIC_V2_ACCEL_MIN_HZ_S ||
+            value > PARAMETRIC_V2_ACCEL_MAX_HZ_S)
+        {
+            UartPrint("v2_accel rejected: expected 6000..36000 steps/s2\r\n");
+            return;
+        }
+        if (PivotMotionIsActive() != 0U || ClosedLoopActuatorIsActive() != 0U ||
+            g_closedLoopFault != 0U)
+        {
+            UartPrint("v2_accel rejected: motion or fault active\r\n");
+            return;
+        }
+        g_parametricV2AccelHzS = value;
+        snprintf(msg, sizeof(msg), "v2_accel set: steps_per_s2=%.0f mm_per_s2=%.1f\r\n",
+                 (double)value, (double)(value / g_stepsPerMm));
+        UartPrint(msg);
         return;
     }
 
