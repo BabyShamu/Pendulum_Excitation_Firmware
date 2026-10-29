@@ -427,7 +427,7 @@ void TIM6_DAC_IRQHandler(void)
     if ((TIM6->SR & TIM_SR_UIF) != 0U)
     {
         TIM6->SR = 0U;
-        if (g_parametricV2Enabled != 0U)
+        if (g_parametricV2Enabled != 0U && g_parametricRunning != 0U)
         {
             ParametricV2OnTimer();
         }
@@ -2336,6 +2336,28 @@ static void UpdateParametric(void)
     traceMoveStartMs = HAL_GetTick();
     if (g_parametricV2Enabled != 0U)
     {
+        /* V2 adds a physical envelope independent of the phase-normalized
+         * excitation command, which can exceed the requested amplitude.
+         */
+        int32_t maxCommandSteps = (int32_t)lroundf(CLOSED_LOOP_MAX_MM * g_stepsPerMm);
+        int32_t safetyHalfSteps = halfTravelSteps -
+            (int32_t)lroundf(CLOSED_LOOP_TRAVEL_MARGIN_MM * g_stepsPerMm);
+        if (safetyHalfSteps < 0)
+        {
+            safetyHalfSteps = 0;
+        }
+        if (maxCommandSteps > safetyHalfSteps)
+        {
+            maxCommandSteps = safetyHalfSteps;
+        }
+        if (targetSteps > maxCommandSteps)
+        {
+            targetSteps = maxCommandSteps;
+        }
+        else if (targetSteps < -maxCommandSteps)
+        {
+            targetSteps = -maxCommandSteps;
+        }
         g_parametricV2TargetSteps = targetSteps;
         ClosedLoopActuatorKick();
         return;
@@ -2400,6 +2422,8 @@ static void StartParametricController(float amplitudeMm, float phaseDeg)
     g_sineRunning = 0U;
     g_run = 0U;
 
+    g_parametricV2Enabled = 0U;
+    g_parametricV2SpeedHz = 0.0f;
     g_parametricAmplitudeMm = amplitudeMm;
     g_parametricPhiRad = phaseDeg * PI_F / 180.0f;
     g_parametricFilterValid = 0U;
