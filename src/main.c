@@ -241,6 +241,7 @@ static void UpdatePhaseTrackedSine(void);
 static void ReturnToCenter(void);
 static void UpdateSine(void);
 static void UpdateParametric(void);
+static void UpdateV2ActuatorTest(void);
 static void UpdateParametricTest(void);
 static void UpdateParametricClosedLoop(void);
 static void ReportClosedLoopFault(void);
@@ -309,6 +310,16 @@ static volatile int32_t g_parametricV2TargetSteps = 0;
 static volatile float g_parametricV2SpeedHz = 0.0f;
 static float g_parametricV2AccelHzS = PARAMETRIC_V2_ACCEL_DEFAULT_HZ_S;
 static uint32_t g_parametricV2TraceCount = 0U;
+static uint8_t g_v2TestRunning = 0U;
+static uint32_t g_v2TestStartMs = 0U;
+static uint32_t g_v2TestLastMs = 0U;
+static uint32_t g_v2TestDurationMs = 0U;
+static uint32_t g_v2TestSamples = 0U;
+static float g_v2TestAmplitudeMm = 0.0f;
+static float g_v2TestFrequencyHz = 0.0f;
+static double g_v2TestSquaredError = 0.0;
+static float g_v2TestMaxErrorMm = 0.0f;
+static float g_v2TestMaxSpeedHz = 0.0f;
 static float g_parametricAmplitudeMm = 0.0f;
 static float g_parametricPhiRad = 0.0f;
 static uint32_t g_parametricLastUpdateMs = 0U;
@@ -596,6 +607,10 @@ int main(void)
         else if (g_sineRunning != 0U)
         {
             UpdateSine();
+        }
+        else if (g_v2TestRunning != 0U)
+        {
+            UpdateV2ActuatorTest();
         }
         else if (g_parametricRunning != 0U)
         {
@@ -2439,6 +2454,81 @@ static void UpdateParametric(void)
 
 }
 
+/* Fixed trajectory for comparing V2 acceleration settings. The "actual"
+ * position is a firmware step-count estimate, NOT independent feedback.
+ * Neither the ISR nor the 10 ms main loop waits for target convergence.
+ */
+static void UpdateV2ActuatorTest(void)
+{
+    uint32_t now = HAL_GetTick();
+    uint32_t elapsed = now - g_v2TestStartMs;
+    float targetMm;
+    int32_t targetSteps;
+    int32_t actualSteps;
+    float speedHz;
+    float errorMm;
+    float absError;
+    uint32_t primask;
+    char msg[232];
+    int len;
+
+    if (g_closedLoopFault != 0U || g_parametricRunning == 0U ||
+        g_parametricV2Enabled == 0U || g_pendulumAngleSafetyAvailable == 0U)
+    {
+        g_v2TestRunning = 0U;
+        (void)StopParametricController(0U);
+        UartPrint("v2_test aborted: safety or motion fault\r\n");
+        return;
+    }
+    if (elapsed >= g_v2TestDurationMs)
+    {
+        float rms = g_v2TestSamples > 0U ?
+            sqrtf((float)(g_v2TestSquaredError / (double)g_v2TestSamples)) : 0.0f;
+        g_v2TestRunning = 0U;
+        (void)StopParametricController(0U);
+        snprintf(msg, sizeof(msg),
+                 "v2_test_result: samples=%lu rms_error_mm=%.4f max_error_mm=%.4f max_speed_hz=%.1f accel_hz_s=%.0f final_position_mm=%.4f\r\n",
+                 (unsigned long)g_v2TestSamples, (double)rms,
+                 (double)g_v2TestMaxErrorMm, (double)g_v2TestMaxSpeedHz,
+                 (double)g_parametricV2AccelHzS,
+                 (double)((float)g_positionSteps / g_stepsPerMm));
+        UartPrint(msg);
+        return;
+    }
+    if ((now - g_v2TestLastMs) < PARAMETRIC_UPDATE_PERIOD_MS)
+    {
+        return;
+    }
+    g_v2TestLastMs = now;
+    targetMm = g_v2TestAmplitudeMm *
+               sinf(2.0f * PI_F * g_v2TestFrequencyHz * ((float)elapsed / 1000.0f));
+    targetSteps = (int32_t)lroundf(targetMm * g_stepsPerMm);
+    primask = __get_PRIMASK();
+    __disable_irq();
+    actualSteps = g_positionSteps;
+    speedHz = g_parametricV2SpeedHz;
+    g_parametricV2TargetSteps = targetSteps;
+    if (primask == 0U) { __enable_irq(); }
+    ClosedLoopActuatorKick();
+
+    errorMm = (float)(targetSteps - actualSteps) / g_stepsPerMm;
+    absError = fabsf(errorMm);
+    g_v2TestSquaredError += (double)errorMm * (double)errorMm;
+    g_v2TestSamples++;
+    if (absError > g_v2TestMaxErrorMm) { g_v2TestMaxErrorMm = absError; }
+    if (speedHz > g_v2TestMaxSpeedHz) { g_v2TestMaxSpeedHz = speedHz; }
+    if ((g_v2TestSamples % PARAMETRIC_TRACE_DECIMATION) == 0U)
+    {
+        len = snprintf(msg, sizeof(msg),
+                       "v2_test_trace: ms=%lu target_mm=%.4f actual_mm=%.4f error_mm=%.4f speed_hz=%.1f accel_hz_s=%.0f\r\n",
+                       (unsigned long)now, (double)((float)targetSteps / g_stepsPerMm),
+                       (double)((float)actualSteps / g_stepsPerMm),
+                       (double)errorMm, (double)speedHz, (double)g_parametricV2AccelHzS);
+        if (len > 0 && (size_t)len < sizeof(msg))
+        { (void)UartTryEnqueue(msg, (size_t)len); }
+    }
+}
+
 static void StartParametricController(float amplitudeMm, float phaseDeg)
 {
     g_parametricClosedLoopRunning = 0U;
@@ -2468,6 +2558,7 @@ static uint8_t StopParametricController(uint8_t returnToCenter)
 {
     uint8_t wasRunning = g_parametricRunning;
     g_parametricRunning = 0U;
+    g_v2TestRunning = 0U;
     if (g_parametricV2Enabled != 0U)
     {
         ClosedLoopActuatorStop();
@@ -3261,6 +3352,7 @@ static void PrintHelp(void)
     UartPrint("  parametric_v2 <amp_mm> <phi_deg> - experimental TIM6 trajectory (bench test only)\r\n");
     UartPrint("  parametric_v2 stop - stop experimental controller\r\n");
     UartPrint("  v2_accel [steps/s2] - inspect/set V2 acceleration while idle (6000..36000)\r\n");
+    UartPrint("  v2_test <amp_mm> <freq_hz> <duration_s> - timed V2 tracking test\r\n");
     UartPrint("  parametric stop - stop parametric drive\r\n");
     UartPrint("  parametric_test 0|1 - test parametric signal processing without motor motion\r\n");
     UartPrint("  parametric_closed_loop 0|1 - run bounded parametric motor control\r\n");
@@ -4944,6 +5036,66 @@ static void ProcessLine(char *line)
         g_parametricRunning = 0U;
         g_run = 0U;
         UartPrint("sine started\r\n");
+        return;
+    }
+
+    if (strncmp(line, "v2_test ", 8) == 0)
+    {
+        const char *args = line + 8;
+        char *end;
+        float amp = strtof(args, &end);
+        float freq;
+        float duration;
+        float travelHalfMm;
+        if (end == args) { UartPrint("usage: v2_test <amp_mm> <freq_hz> <duration_s>\r\n"); return; }
+        args = end;
+        freq = strtof(args, &end);
+        if (end == args) { UartPrint("usage: v2_test <amp_mm> <freq_hz> <duration_s>\r\n"); return; }
+        args = end;
+        duration = strtof(args, &end);
+        if (end == args) { UartPrint("usage: v2_test <amp_mm> <freq_hz> <duration_s>\r\n"); return; }
+        while (*end == ' ' || *end == '\t') { end++; }
+        travelHalfMm = (float)g_travelSteps / (2.0f * g_stepsPerMm);
+        if (*end != '\0' || !isfinite(amp) || !isfinite(freq) || !isfinite(duration) ||
+            amp <= 0.0f || amp > CLOSED_LOOP_MAX_MM ||
+            amp >= (travelHalfMm - CLOSED_LOOP_TRAVEL_MARGIN_MM) ||
+            freq <= 0.0f || freq > 2.0f || duration < 1.0f || duration > 10.0f)
+        {
+            UartPrint("v2_test rejected: require amp within safe travel, frequency 0..2 Hz, duration 1..10 s\r\n");
+            return;
+        }
+        if (g_homed == 0U || g_closedLoopFault != 0U ||
+            PendulumAngleSafetyReadyForMotion() == 0U ||
+            g_servoLatchCommandedState != SERVO_LATCH_STATE_OPEN ||
+            PivotMotionIsActive() != 0U || ClosedLoopActuatorIsActive() != 0U ||
+            g_v2TestRunning != 0U)
+        {
+            UartPrint("v2_test rejected: home, latch OPEN, idle and sensor safety required\r\n");
+            return;
+        }
+        /* Require a stationary carriage at the homed center for consistent
+         * trials and predictable physical travel bounds. No auto-recentering.
+         */
+        if (g_positionSteps != 0)
+        {
+            UartPrint("v2_test rejected: carriage must be at homed center (position=0)\r\n");
+            return;
+        }
+        g_parametricRunning = 1U;
+        g_parametricV2Enabled = 1U;
+        g_parametricV2SpeedHz = 0.0f;
+        g_parametricV2TargetSteps = g_positionSteps;
+        g_v2TestStartMs = HAL_GetTick();
+        g_v2TestLastMs = g_v2TestStartMs;
+        g_v2TestDurationMs = (uint32_t)(duration * 1000.0f);
+        g_v2TestAmplitudeMm = amp;
+        g_v2TestFrequencyHz = freq;
+        g_v2TestSamples = 0U;
+        g_v2TestSquaredError = 0.0;
+        g_v2TestMaxErrorMm = 0.0f;
+        g_v2TestMaxSpeedHz = 0.0f;
+        g_v2TestRunning = 1U;
+        UartPrint("v2_test started: tracking is step-count estimate; auto-stop at duration\r\n");
         return;
     }
 
