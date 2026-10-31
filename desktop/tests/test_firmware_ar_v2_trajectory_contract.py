@@ -41,7 +41,21 @@ class FirmwareAutoResonanceV2TrajectoryTests(unittest.TestCase):
             'sscanf(line+12,"%f %f %u %c",&amp,&phase,&mode,&trailing)!=3',
             FIRMWARE_SOURCE,
         )
-        self.assertIn("amp<=0.0f || amp>2.0f || mode<1U || mode>3U", FIRMWARE_SOURCE)
+        self.assertIn("amp<=0.0f || amp>ARV2_MAX_AMPLITUDE_MM || mode<1U || mode>3U", FIRMWARE_SOURCE)
+        self.assertRegex(FIRMWARE_SOURCE, r"#define ARV2_MAX_AMPLITUDE_MM\s+20\.0f")
+
+    def test_ar_v2_travel_check_covers_both_quantized_extremes(self) -> None:
+        start = FIRMWARE_SOURCE.split('if (strncmp(line,"ar_v2 start ",12U)==0', 1)[1]
+        start = start.split('UartPrint("ar_v2 started', 1)[0]
+        for required in (
+            "amplitudeSteps=(int32_t)lroundf(amp*g_stepsPerMm)",
+            "lowerTargetSteps=currentPositionSteps-amplitudeSteps",
+            "upperTargetSteps=currentPositionSteps+amplitudeSteps",
+            "lowerTargetSteps < -allowed",
+            "upperTargetSteps > allowed",
+            "requested amplitude does not fit available travel",
+        ):
+            self.assertIn(required, start)
 
     def test_ar_v2_updates_the_parametric_v2_target(self) -> None:
         update = function_body("UpdateAutoResonanceV2")
@@ -75,6 +89,7 @@ class FirmwareAutoResonanceV2TrajectoryTests(unittest.TestCase):
             FIRMWARE_SOURCE,
             r"#define PARAMETRIC_V2_ACCEL_DEFAULT_HZ_S\s+18000\.0f",
         )
+        self.assertRegex(FIRMWARE_SOURCE, r"CLOSED_LOOP_MAX_MM\s+7\.5f")
 
     def test_faults_disable_ar_v2_and_parametric_v2_state(self) -> None:
         fault = function_body("ClosedLoopActuatorFault")

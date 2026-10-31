@@ -70,6 +70,7 @@
 #define PARAMETRIC_V2_ACCEL_DEFAULT_HZ_S 18000.0f
 #define PARAMETRIC_V2_ACCEL_MIN_HZ_S 6000.0f
 #define PARAMETRIC_V2_ACCEL_MAX_HZ_S 1000000.0f
+#define ARV2_MAX_AMPLITUDE_MM         20.0f
 #define PARAMETRIC_TRACE_DECIMATION 5U /* nominal ~20 Hz */
 #define PARAMETRIC_UPDATE_PERIOD_MS   10U
 #define PARAMETRIC_TEST_PERIOD_MS      5U
@@ -4893,12 +4894,11 @@ static void ProcessLine(char *line)
             float amp,phase;
             unsigned int mode;
             char trailing;
-            int32_t allowed;
             if (sscanf(line+12,"%f %f %u %c",&amp,&phase,&mode,&trailing)!=3 ||
                 !isfinite(amp) || !isfinite(phase) ||
-                amp<=0.0f || amp>2.0f || mode<1U || mode>3U)
+                amp<=0.0f || amp>ARV2_MAX_AMPLITUDE_MM || mode<1U || mode>3U)
             {
-                UartPrint("usage: ar_v2 start <amp 0..2 mm> <phase deg> <mode 1..3>\r\n");
+                UartPrint("usage: ar_v2 start <amp 0..20 mm> <phase deg> <mode 1..3>\r\n");
                 return;
             }
             if (PivotMotionIsActive()!=0U || g_homed==0U ||
@@ -4909,11 +4909,27 @@ static void ProcessLine(char *line)
                 UartPrint("ar_v2 rejected: must be idle, homed, fault-free, angle-ready, latch OPEN\r\n");
                 return;
             }
-            allowed=(int32_t)(g_travelSteps/2U)-
-                    (int32_t)lroundf(CLOSED_LOOP_TRAVEL_MARGIN_MM*g_stepsPerMm);
-            if (g_stepsPerMm<=0.0f || allowed<=0 ||
-                amp*g_stepsPerMm>=(float)allowed ||
-                g_positionSteps > (int32_t)lroundf(g_stepsPerMm*0.5f) ||
+            {
+                int32_t amplitudeSteps;
+                int32_t currentPositionSteps;
+                int32_t lowerTargetSteps;
+                int32_t upperTargetSteps;
+                int32_t allowed;
+
+                allowed=(int32_t)(g_travelSteps/2U)-
+                        (int32_t)lroundf(CLOSED_LOOP_TRAVEL_MARGIN_MM*g_stepsPerMm);
+                amplitudeSteps=(int32_t)lroundf(amp*g_stepsPerMm);
+                currentPositionSteps=g_positionSteps;
+                lowerTargetSteps=currentPositionSteps-amplitudeSteps;
+                upperTargetSteps=currentPositionSteps+amplitudeSteps;
+                if (g_stepsPerMm<=0.0f || allowed<=0 ||
+                    lowerTargetSteps < -allowed || upperTargetSteps > allowed)
+                {
+                    UartPrint("ar_v2 rejected: requested amplitude does not fit available travel\r\n");
+                    return;
+                }
+            }
+            if (g_positionSteps > (int32_t)lroundf(g_stepsPerMm*0.5f) ||
                 g_positionSteps < -(int32_t)lroundf(g_stepsPerMm*0.5f))
             {
                 UartPrint("ar_v2 rejected: unsafe travel or carriage not centered (+/-0.5 mm)\r\n");
@@ -4934,7 +4950,7 @@ static void ProcessLine(char *line)
             g_parametricRunning=1U;
             g_arv2Running=1U;
             g_suppressPromptOnce=1U;
-            UartPrint("ar_v2 started (EXPERIMENTAL: max 2 mm)\r\n");
+            UartPrint("ar_v2 started (EXPERIMENTAL: max 20 mm configurable; actuator clamp 7.5 mm)\r\n");
             UartPrint("time_s,angle_deg,command_mm,motor_mm,actual_mm,phase_rad,waveform\r\n");
             return;
         }

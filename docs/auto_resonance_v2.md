@@ -40,7 +40,11 @@ ar_v2 stop
 ```
 
 Arguments: amplitude in mm, phase offset in degrees, Fourier mode 1/2/3.
-The current experimental firmware rejects amplitude above **2 mm**.
+The configurable amplitude range is **0 < amplitude <= 20 mm**. The requested
+positive and negative displacement must both fit inside the calibrated travel
+after the existing 2 mm safety margin and step quantization are applied.
+The existing actuator output clamp remains **7.5 mm**; a 20 mm configuration
+does not bypass that motor-control safety limit or imply 20 mm physical travel.
 No V2 motion starts automatically at boot.
 
 During V2 activity, the CLI rejects other motion commands. The global
@@ -76,7 +80,7 @@ diagnostic firmware stream, not a new desktop experiment schema.
    not prove that actual carriage motion follows the Fourier harmonics.
    Measure tracking before increasing excitation amplitude.
 6. The startup command currently requires the carriage within 0.5 mm of
-   the homed midpoint, independent of the 2 mm amplitude cap.
+   the homed midpoint, independent of the 20 mm configurable amplitude cap.
 7. Use guard/clearance and conservative commissioning, and verify
    hardware emergency-stop operation independently.
 
@@ -108,9 +112,12 @@ missed steps, mechanical compliance, and sensor/serial timing; hardware
 tracking remains unverified.
 
 The controller is ready for the next software/bench validation stage, not for
-unattended physical excitation. Verify polarity, limit response, actual
+unattended physical excitation. In particular, higher configured amplitudes
+require gradual commissioning. Verify polarity, limit response, actual
 carriage tracking, and emergency-stop behavior with conservative hardware
-tests before increasing scope.
+tests before increasing scope. The reported position is a commanded step
+count; independently measured physical carriage displacement remains
+unverified.
 
 ## Planned validation stages
 
