@@ -6,6 +6,9 @@ from pathlib import Path
 FIRMWARE_SOURCE = (
     Path(__file__).resolve().parents[2] / "src" / "main.c"
 ).read_text(encoding="utf-8")
+PLATFORMIO_CONFIG = (
+    Path(__file__).resolve().parents[2] / "platformio.ini"
+).read_text(encoding="utf-8")
 
 
 def function_body(name: str) -> str:
@@ -30,6 +33,16 @@ def function_body(name: str) -> str:
 
 
 class FirmwareAutoResonanceV2TrajectoryTests(unittest.TestCase):
+    def test_platformio_enables_float_input_scanning(self) -> None:
+        self.assertIn("-Wl,-u,_scanf_float", PLATFORMIO_CONFIG)
+
+    def test_ar_v2_parser_accepts_three_numeric_arguments(self) -> None:
+        self.assertIn(
+            'sscanf(line+12,"%f %f %u %c",&amp,&phase,&mode,&trailing)!=3',
+            FIRMWARE_SOURCE,
+        )
+        self.assertIn("amp<=0.0f || amp>2.0f || mode<1U || mode>3U", FIRMWARE_SOURCE)
+
     def test_ar_v2_updates_the_parametric_v2_target(self) -> None:
         update = function_body("UpdateAutoResonanceV2")
         self.assertIn("g_parametricV2TargetSteps=steps", update)
