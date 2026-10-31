@@ -80,6 +80,38 @@ diagnostic firmware stream, not a new desktop experiment schema.
 7. Use guard/clearance and conservative commissioning, and verify
    hardware emergency-stop operation independently.
 
+## Offline trajectory validation
+
+The firmware build and desktop firmware tests include an event-driven offline
+model of `ParametricV2OnTimer()`. It checks the configured 5-us STEP pulse,
+10-us DIR setup interval, 150-Hz startup rate, 4-kHz rate cap, 18,000-Hz/s
+acceleration setting, target reversals, immediate stop, limit faults, sensor
+faults, and restart from the current commanded step position. The AR V2
+F1/F2/F3 command path is also exercised with its 5-ms update and slew limit.
+
+For 2-mm synthetic commands, the model produced the following commanded-step
+tracking results over a 2-second run:
+
+| Mode | Frequency | RMS error | Maximum error | Peak step rate |
+|---|---:|---:|---:|---:|
+| F1 | 0.5 Hz | 0.016 mm | 0.050 mm | 329 Hz |
+| F1 | 1 Hz | 0.082 mm | 0.150 mm | 537 Hz |
+| F1 | 2 Hz | 0.338 mm | 0.550 mm | 931 Hz |
+| F2 | 1 Hz | 0.187 mm | 0.425 mm | 849 Hz |
+| F3 | 1 Hz | 0.273 mm | 0.700 mm | 1,057 Hz |
+
+At 5 Hz, the F1/F2/F3 synthetic-command RMS errors were 1.327/1.708/1.907
+mm respectively, so those rates are not considered suitable for the current
+commissioning stage. These are commanded step-count results, not measured
+carriage displacement. The model omits interrupt latency, GPIO/driver timing,
+missed steps, mechanical compliance, and sensor/serial timing; hardware
+tracking remains unverified.
+
+The controller is ready for the next software/bench validation stage, not for
+unattended physical excitation. Verify polarity, limit response, actual
+carriage tracking, and emergency-stop behavior with conservative hardware
+tests before increasing scope.
+
 ## Planned validation stages
 
 1. Build and static-check; review firmware safety integrations.
