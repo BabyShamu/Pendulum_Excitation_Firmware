@@ -196,6 +196,7 @@ static void ClosedLoopActuatorKick(void);
 static void ClosedLoopActuatorStop(void);
 static void ParametricV2OnTimer(void);
 static void ClosedLoopActuatorOnTimer(void);
+static void StopAutoResonanceV2(void);
 static GPIO_PinState ActiveState(uint8_t on);
 static uint8_t UpperLimitPressed(void);
 static uint8_t LowerLimitPressed(void);
@@ -1298,6 +1299,8 @@ static void PendulumAngleSensorFaultTrip(void)
     g_run = 0U;
     g_sineRunning = 0U;
     g_parametricRunning = 0U;
+    g_parametricV2Enabled = 0U;
+    g_parametricV2SpeedHz = 0.0f;
     g_parametricTestRunning = 0U;
     g_parametricClosedLoopRunning = 0U;
     g_parametricClosedLoopExperimentMode = 0U;
@@ -1421,6 +1424,9 @@ static uint8_t ClosedLoopActuatorIsActive(void)
 static void ClosedLoopActuatorFault(uint8_t fault)
 {
     g_arv2Running=0U;
+    g_parametricRunning = 0U;
+    g_parametricV2Enabled = 0U;
+    g_parametricV2SpeedHz = 0.0f;
     g_parametricClosedLoopRunning = 0U;
     g_parametricClosedLoopExperimentMode = 0U;
     g_phaseTrackedSineRunning = 0U;
@@ -1590,6 +1596,20 @@ static void ClosedLoopActuatorOnTimer(void)
     g_closedLoopStepHighCount++;
     g_closedLoopActuatorPhase = CLOSED_LOOP_PHASE_STEP_HIGH;
     ClosedLoopTimerScheduleUs(CLOSED_LOOP_STEP_PULSE_US);
+}
+
+static void StopAutoResonanceV2(void)
+{
+    if (g_arv2Running == 0U)
+    {
+        return;
+    }
+    g_arv2Running = 0U;
+    g_parametricRunning = 0U;
+    g_parametricV2Enabled = 0U;
+    g_parametricV2SpeedHz = 0.0f;
+    g_parametricV2TargetSteps = g_positionSteps;
+    ClosedLoopActuatorStop();
 }
 
 static void ClosedLoopActuatorKick(void)
@@ -2577,6 +2597,7 @@ static uint8_t StopParametricController(uint8_t returnToCenter)
         ClosedLoopActuatorStop();
         g_parametricV2Enabled = 0U;
         g_parametricV2SpeedHz = 0.0f;
+        g_parametricV2TargetSteps = g_positionSteps;
     }
     if (returnToCenter != 0U && wasRunning != 0U &&
         g_homed != 0U && g_closedLoopFault == 0U)
@@ -2757,7 +2778,7 @@ static void UpdateAutoResonanceV2(void)
     steps=(int32_t)lroundf(motor*g_stepsPerMm);
     if (steps>halfTravel) steps=halfTravel;
     if (steps< -halfTravel) steps= -halfTravel;
-    g_parametricClosedLoopTargetSteps=steps;
+    g_parametricV2TargetSteps=steps;
     ClosedLoopActuatorKick();
     if ((g_arv2Samples++%PARAMETRIC_TEST_TELEMETRY_DECIMATION)!=0U)
         return;
@@ -4839,13 +4860,16 @@ static void ProcessLine(char *line)
 
     if (strcmp(line, "stop") == 0)
     {
-        g_arv2Running=0U;
+        StopAutoResonanceV2();
         StopManualMotion("operator_stop");
         g_parametricClosedLoopRunning = 0U;
         g_phaseTrackedSineRunning = 0U;
         ClosedLoopActuatorStop();
         g_sineRunning = 0U;
         g_parametricRunning = 0U;
+        g_parametricV2Enabled = 0U;
+        g_parametricV2SpeedHz = 0.0f;
+        g_parametricV2TargetSteps = g_positionSteps;
         g_parametricTestRunning = 0U;
         g_run = 0U;
         g_liveTelemetry = 0U;
@@ -4860,8 +4884,7 @@ static void ProcessLine(char *line)
     {
         if (strcmp(line,"ar_v2 stop")==0)
         {
-            g_arv2Running=0U;
-            ClosedLoopActuatorStop();
+            StopAutoResonanceV2();
             UartPrint("ar_v2 stopped\r\n");
             return;
         }
@@ -4905,7 +4928,10 @@ static void ProcessLine(char *line)
             g_arv2Samples=0U;
             g_arv2Start=HAL_GetTick();
             g_arv2Next=g_arv2Start+PARAMETRIC_TEST_PERIOD_MS;
-            g_parametricClosedLoopTargetSteps=g_positionSteps;
+            g_parametricV2TargetSteps=g_positionSteps;
+            g_parametricV2SpeedHz=0.0f;
+            g_parametricV2Enabled=1U;
+            g_parametricRunning=1U;
             g_arv2Running=1U;
             g_suppressPromptOnce=1U;
             UartPrint("ar_v2 started (EXPERIMENTAL: max 2 mm)\r\n");

@@ -16,8 +16,15 @@ legacy parametric or phase-tracked-sine controllers.
   - F3: 1.20713*sin(alpha) + 0.28101*sin(3*alpha) + 0.07389*sin(5*alpha)
 - Neither pendulum length nor natural frequency is required.
 - V2 uses its own controller state in `src/auto_resonance_v2.h`.
-- The existing closed-loop step timer, fault handling, homing requirements,
-  angle-sensor checks, and stage travel bounds are reused.
+- The controller writes its carriage target into the existing Parametric V2
+  trajectory owner (`g_parametricV2TargetSteps`). TIM6 then executes that
+  target with the existing acceleration-controlled scheduler and runtime
+  acceleration configuration. The existing timer ownership, fault handling,
+  homing requirements, angle-sensor checks, and stage travel bounds are reused.
+- Auto-Resonance V2 remains a separate controller mode: its 5-ms update and
+  Fourier command generation are unchanged, while `g_parametricRunning` and
+  `g_parametricV2Enabled` are used only to hand its target to the Parametric V2
+  actuator path.
 
 The PLL is **not** part of V2: simulation comparisons showed the original
 quadrature phase reference outperforming the experimental smoothed PLL.
