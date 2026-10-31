@@ -39,3 +39,15 @@ communication events. It does not measure physical carriage displacement and
 cannot establish missed-step or pendulum dynamics behavior. Bench validation
 must verify the outage grace period, recovery timing, angle-limit response,
 emergency stop, and physical clearances.
+
+AS5600 samples are also checked for plausibility before they are committed to
+the validated angle state. A sample with an implausible circular step change is
+reported as `event: type=angle_measurement_rejected` with its timestamp, raw
+value, previous validated angle, and rejection reason. Rejected samples do not
+update controller estimators, target-angle completion, telemetry angle values,
+or experiment statistics; the normal telemetry stream emits `NaN` for that
+sample. The session summary includes `angle_samples_rejected`,
+`max_validated_angle_deg`, and `max_rejected_angle_deg`. The plausibility rule
+is based on measurement continuity, not on the absolute angle threshold, so a
+credible gradual angle-limit violation still triggers the existing immediate
+protective trip.

@@ -132,6 +132,7 @@
 #define AS5600_READ_FAILURE_RECOVERY_THRESHOLD 3U
 #define AS5600_RECOVERY_RETRY_INTERVAL_MS 1000U
 #define AS5600_TRANSIENT_OUTAGE_GRACE_MS  250U
+#define AS5600_MAX_PLAUSIBLE_STEP_DEG 45.0f
 #define AS5600_I2C_BUS_CLEAR_CLOCK_PULSES 9U
 #define PARAMETRIC_SLEW_MM_PER_SEC    250.0f
 #define LIVE_PERIOD_MS      20U
@@ -210,6 +211,9 @@ typedef struct
     uint32_t sensor_total_outage_ms;
     uint32_t sensor_max_outage_ms;
     uint32_t sensor_last_outage_ms;
+    uint32_t angle_samples_rejected;
+    float max_validated_angle_deg;
+    float max_rejected_angle_deg;
     uint32_t outage_start_ms;
     uint8_t outage_active;
     uint8_t restored_event_pending;
@@ -242,6 +246,8 @@ static uint8_t WaitForDebouncedLimit(uint8_t upperLimit);
 static HAL_StatusTypeDef AS5600_ReadAngle(uint16_t *angle);
 static HAL_StatusTypeDef AS5600_ReadAngleOnce(uint16_t *angle);
 static void AS5600_RecordValidAngleSample(uint16_t angle);
+static uint8_t AS5600_AngleIsPlausible(uint16_t angle);
+static void AS5600_ReportRejectedAngle(uint16_t angle, const char *reason);
 static uint8_t AS5600_RecoverI2c(void);
 static void AS5600_RecordHalFailure(HAL_StatusTypeDef status, uint32_t error);
 static void AS5600_RecordReadFailure(HAL_StatusTypeDef status, uint32_t error);
@@ -456,6 +462,7 @@ static uint8_t g_servoLatchPwmInitialized = 0U;
 static uint8_t g_servoLatchPwmActive = 0U;
 static uint8_t g_angleSensorUnavailable = 0U;
 static volatile uint8_t g_controllerWaitingForSensor = 0U;
+static uint8_t g_as5600LastReadRejected = 0U;
 static uint8_t g_angleSensorConsecutiveFailures = 0U;
 static uint32_t g_lastI2cRecoveryMs = 0U;
 static uint32_t g_i2cRecoveryCount = 0U;
@@ -821,6 +828,11 @@ static HAL_StatusTypeDef AS5600_ReadAngle(uint16_t *angle)
     uint8_t recoveryAttempted = 0U;
 
     g_as5600LastRecoveryAttempted = 0U;
+    if (g_as5600LastReadRejected != 0U)
+    {
+        g_as5600LastReadRejected = 0U;
+        return HAL_ERROR;
+    }
     if (status == HAL_OK)
     {
         g_angleSensorConsecutiveFailures = 0U;
@@ -918,8 +930,64 @@ static HAL_StatusTypeDef AS5600_ReadAngleOnce(uint16_t *angle)
     }
 
     *angle = (uint16_t)((((uint16_t)data[0] << 8U) | data[1]) & 0x0FFFU);
+    if (AS5600_AngleIsPlausible(*angle) == 0U)
+    {
+        g_as5600LastReadRejected = 1U;
+        AS5600_ReportRejectedAngle(*angle, "step_change");
+        return HAL_ERROR;
+    }
     AS5600_RecordValidAngleSample(*angle);
     return HAL_OK;
+}
+
+static uint8_t AS5600_AngleIsPlausible(uint16_t angle)
+{
+    int32_t deltaRaw;
+    float deltaDeg;
+
+    if (g_latestAngleSampleValid == 0U || g_angleZeroValid == 0U)
+    {
+        return 1U;
+    }
+    deltaRaw = (int32_t)angle - (int32_t)g_latestAngleRaw;
+    if (deltaRaw > 2048)
+    {
+        deltaRaw -= 4096;
+    }
+    else if (deltaRaw < -2048)
+    {
+        deltaRaw += 4096;
+    }
+    deltaDeg = fabsf((float)deltaRaw * 360.0f / 4096.0f);
+    return (deltaDeg <= AS5600_MAX_PLAUSIBLE_STEP_DEG) ? 1U : 0U;
+}
+
+static void AS5600_ReportRejectedAngle(uint16_t angle, const char *reason)
+{
+    float rawAngleDeg = (float)angle * 360.0f / 4096.0f;
+    float previousAngle = g_latestAngleSampleValid != 0U
+                              ? g_latestAngleRelativeDeg : NAN;
+    float absoluteRejected = fabsf(g_angleZeroValid != 0U
+                                       ? RelativeAngleDegrees(angle)
+                                       : rawAngleDeg);
+    if (g_sensorSession.active != 0U)
+    {
+        g_sensorSession.angle_samples_rejected++;
+        if (absoluteRejected > g_sensorSession.max_rejected_angle_deg)
+        {
+            g_sensorSession.max_rejected_angle_deg = absoluteRejected;
+        }
+    }
+    {
+        char message[192];
+        snprintf(message, sizeof(message),
+                 "event: type=angle_measurement_rejected timestamp_ms=%lu "
+                 "raw_angle=%u raw_angle_deg=%.2f previous_validated_angle_deg=%.2f "
+                 "reason=%s\r\n",
+                 (unsigned long)HAL_GetTick(), (unsigned int)angle,
+                 (double)rawAngleDeg, (double)previousAngle, reason);
+        UartPrint(message);
+    }
 }
 
 static void AS5600_RecordValidAngleSample(uint16_t angle)
@@ -935,6 +1003,12 @@ static void AS5600_RecordValidAngleSample(uint16_t angle)
     }
 
     g_latestAngleRelativeDeg = RelativeAngleDegrees(angle);
+    if (g_sensorSession.active != 0U &&
+        fabsf(g_latestAngleRelativeDeg) > g_sensorSession.max_validated_angle_deg)
+    {
+        g_sensorSession.max_validated_angle_deg =
+            fabsf(g_latestAngleRelativeDeg);
+    }
     if (g_closedLoopFault == 0U &&
         fabsf(g_latestAngleRelativeDeg) >= PENDULUM_ANGLE_LIMIT_DEG)
     {
@@ -1340,7 +1414,9 @@ static void SensorSessionSummary(void)
     snprintf(message, sizeof(message),
              "event: type=sensor_session_summary failed_reads=%lu outages=%lu "
              "recovery_attempts=%lu recovery_successes=%lu recovery_failures=%lu "
-             "total_outage_ms=%lu max_outage_ms=%lu last_outage_ms=%lu\r\n",
+             "total_outage_ms=%lu max_outage_ms=%lu last_outage_ms=%lu "
+             "angle_samples_rejected=%lu max_validated_angle_deg=%.2f "
+             "max_rejected_angle_deg=%.2f\r\n",
              (unsigned long)g_sensorSession.sensor_failed_reads,
              (unsigned long)g_sensorSession.sensor_outages,
              (unsigned long)g_sensorSession.sensor_recovery_attempts,
@@ -1348,7 +1424,10 @@ static void SensorSessionSummary(void)
              (unsigned long)g_sensorSession.sensor_recovery_failures,
              (unsigned long)g_sensorSession.sensor_total_outage_ms,
              (unsigned long)g_sensorSession.sensor_max_outage_ms,
-             (unsigned long)g_sensorSession.sensor_last_outage_ms);
+             (unsigned long)g_sensorSession.sensor_last_outage_ms,
+             (unsigned long)g_sensorSession.angle_samples_rejected,
+             (double)g_sensorSession.max_validated_angle_deg,
+             (double)g_sensorSession.max_rejected_angle_deg);
     g_sensorSession.summary_emitted = 1U;
     g_sensorSession.active = 0U;
     g_controllerWaitingForSensor = 0U;
@@ -4040,7 +4119,6 @@ static void SetAngleZero(void)
     {
         g_angleZeroRaw = angle;
         g_angleZeroValid = 1U;
-        AS5600_RecordValidAngleSample(angle);
         UartPrint("angle zero set\r\n");
     }
     else

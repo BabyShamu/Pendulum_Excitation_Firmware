@@ -172,6 +172,21 @@ class TargetMetricsTests(unittest.TestCase):
         self.assertFalse(result["target_achieved"])
         self.assertIsNone(result["target_time_s"])
 
+    def test_rejected_outlier_is_excluded_from_target_analysis(self):
+        filtered = self.path / "telemetry.csv"
+        filtered.write_text(
+            "sample_index,time_s,angle_deg,position_mm,quality\n"
+            "1,0.0,35.1,0,valid\n"
+            "2,0.1,35.8,0,valid\n"
+            "3,0.2,117.4,0,rejected_plausibility\n"
+            "4,0.3,36.5,0,valid\n"
+            "5,0.4,37.2,0,valid\n",
+            encoding="utf-8",
+        )
+        result = target_metrics(self.path, {"experiment": {"target_angle_deg": 100}})
+        self.assertFalse(result["target_achieved"])
+        self.assertIsNone(result["target_time_s"])
+
 
 if __name__ == "__main__":
     unittest.main()

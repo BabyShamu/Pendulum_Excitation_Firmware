@@ -141,6 +141,38 @@ class ExperimentRepositoryTests(unittest.TestCase):
             self.assertEqual(loaded.telemetry[0].elapsed_s, 0.75)
             self.assertEqual(loaded.telemetry[0].received_elapsed_s, 1.2)
 
+    def test_finalize_uses_validated_samples_for_peak(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            repository = ExperimentRepository(Path(temporary_directory))
+            session = repository.create(
+                name="plausibility outlier",
+                notes="",
+                data_source=DataSourceMode.REAL,
+                serial_port="COM6",
+            )
+            with (session.directory / "telemetry.csv").open(
+                "a", encoding="utf-8", newline=""
+            ) as telemetry_file:
+                writer = csv.writer(telemetry_file, lineterminator="\n")
+                writer.writerows(
+                    [
+                        [1, 0.0, 35.1, 0, "", "", "", "valid"],
+                        [2, 0.1, 35.8, 0, "", "", "", "valid"],
+                        [3, 0.2, 117.4, 0, "", "", "", "rejected_plausibility"],
+                        [4, 0.3, 36.5, 0, "", "", "", "valid"],
+                        [5, 0.4, 37.2, 0, "", "", "", "valid"],
+                    ]
+                )
+            manifest = repository.finalize(
+                session,
+                completion_status="COMPLETED",
+                sample_count=5,
+                raw_line_count=5,
+            )
+            self.assertEqual(manifest["peak_absolute_angle_deg"], 37.2)
+            loaded = repository.load(session.directory)
+            self.assertIsNone(loaded.telemetry[2].angle_deg)
+
 
 if __name__ == "__main__":
     unittest.main()

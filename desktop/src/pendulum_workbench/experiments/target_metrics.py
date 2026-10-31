@@ -73,6 +73,8 @@ def target_metrics(directory: Path, manifest: dict) -> dict:
     try:
         with path.open(encoding="utf-8", newline="") as handle:
             for row in csv.DictReader(handle):
+                if row.get("quality") not in (None, "", "valid"):
+                    continue
                 try:
                     t = float(row["time_s"])
                     angle = abs(float(row["angle_deg"]))

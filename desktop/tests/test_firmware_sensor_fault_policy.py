@@ -39,6 +39,9 @@ class FirmwareSensorFaultPolicyTests(unittest.TestCase):
             "sensor_total_outage_ms",
             "sensor_max_outage_ms",
             "sensor_last_outage_ms",
+            "angle_samples_rejected",
+            "max_validated_angle_deg",
+            "max_rejected_angle_deg",
         ):
             self.assertIn(field, SOURCE)
 
@@ -119,6 +122,40 @@ class FirmwareSensorFaultPolicyTests(unittest.TestCase):
             "ClosedLoopActuatorStop()",
         ):
             self.assertIn(required, trip)
+
+    def test_plausibility_rejects_spike_before_validation_and_statistics(self) -> None:
+        read_once = function_body("AS5600_ReadAngleOnce")
+        self.assertIn("AS5600_AngleIsPlausible", read_once)
+        self.assertIn("AS5600_ReportRejectedAngle", read_once)
+        self.assertIn("return HAL_ERROR", read_once)
+        validator = function_body("AS5600_AngleIsPlausible")
+        self.assertIn("g_latestAngleRaw", validator)
+        self.assertIn("AS5600_MAX_PLAUSIBLE_STEP_DEG", validator)
+        rejected = function_body("AS5600_ReportRejectedAngle")
+        for field in (
+            "timestamp_ms",
+            "raw_angle",
+            "previous_validated_angle_deg",
+            "reason",
+            "max_rejected_angle_deg",
+        ):
+            self.assertIn(field, rejected)
+        valid = function_body("AS5600_RecordValidAngleSample")
+        self.assertIn("max_validated_angle_deg", valid)
+
+    def test_rejected_samples_are_missing_from_stream_and_not_target_events(self) -> None:
+        read_once = function_body("AS5600_ReadAngleOnce")
+        self.assertLess(
+            read_once.index("AS5600_AngleIsPlausible"),
+            read_once.index("AS5600_RecordValidAngleSample"),
+        )
+        telemetry = function_body("PrintLiveTelemetry")
+        self.assertIn("angle_deg=NaN", telemetry)
+
+    def test_high_angle_safety_remains_after_plausibility_validation(self) -> None:
+        valid = function_body("AS5600_RecordValidAngleSample")
+        self.assertIn("PENDULUM_ANGLE_LIMIT_DEG", valid)
+        self.assertIn("PendulumAngleLimitTrip", valid)
 
     def test_timer_still_requires_safety_gate_and_target_owner(self) -> None:
         timer = function_body("ParametricV2OnTimer")

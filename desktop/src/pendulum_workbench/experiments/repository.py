@@ -250,6 +250,8 @@ class ExperimentRepository:
             "r", encoding="utf-8", newline=""
         ) as telemetry_file:
             for row in csv.DictReader(telemetry_file):
+                if row.get("quality") not in (None, "", "valid"):
+                    continue
                 try:
                     angle = float(row["angle_deg"])
                     sample_time = float(row["time_s"])
@@ -356,11 +358,17 @@ class ExperimentRepository:
                     if received_elapsed_s is not None
                     else 0.0
                 )
+                quality = row.get("quality")
+                angle_deg = (
+                    self._optional_float(row["angle_deg"])
+                    if quality in (None, "", "valid")
+                    else None
+                )
                 telemetry.append(
                     TelemetrySample(
                         sample_index=int(row["sample_index"]),
                         elapsed_s=time_s,
-                        angle_deg=self._optional_float(row["angle_deg"]),
+                        angle_deg=angle_deg,
                         position_mm=self._optional_float(row["position_mm"]),
                         source="saved",
                         device_time_s=time_s if is_real_recording else None,
