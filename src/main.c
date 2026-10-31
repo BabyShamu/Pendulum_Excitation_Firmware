@@ -138,6 +138,7 @@
 #define DEFAULT_STEPS_PER_MM 40.0f
 #define MAX_SINE_FREQUENCY_HZ 10.0f
 #define PI_F                3.14159265358979323846f
+#define RETURN_TO_ZERO_REASON_MAX 32U
 
 typedef struct
 {
@@ -190,6 +191,13 @@ typedef enum
     SENSOR_POLICY_OPEN_LOOP = 0U,
     SENSOR_POLICY_CLOSED_LOOP = 1U
 } SensorSessionPolicy;
+
+typedef enum
+{
+    RETURN_TO_ZERO_IDLE = 0U,
+    RETURN_TO_ZERO_MOVING = 1U,
+    RETURN_TO_ZERO_ABORTED = 2U
+} ReturnToZeroState;
 
 typedef struct
 {
@@ -257,6 +265,7 @@ static const char *ManualMotionStopReasonText(uint8_t reason);
 static uint8_t PendulumAngleSafetyPoll(uint8_t motionActive);
 static uint8_t PendulumAngleSafetyReadyForMotion(void);
 static uint8_t PivotMotionIsActive(void);
+static uint8_t ExperimentControllerIsActive(void);
 static void PendulumAngleLimitTrip(float angleDeg);
 static void PendulumAngleSensorFaultTrip(void);
 static const char *StepStopReasonName(uint8_t reason);
@@ -271,6 +280,10 @@ static uint8_t StopParametricController(uint8_t returnToCenter);
 static float WrapRadiansToPi(float angleRad);
 static void UpdatePhaseTrackedSine(void);
 static void UpdateAutoResonanceV2(void);
+static uint8_t RequestReturnToZero(const char *reason);
+static void AbortReturnToZero(const char *reason);
+static void UpdateReturnToZero(void);
+static uint8_t ReturnToZeroIsActive(void);
 static void ReturnToCenter(void);
 static void UpdateSine(void);
 static void UpdateParametric(void);
@@ -379,6 +392,9 @@ static uint32_t g_parametricTestSampleCount = 0U;
 static volatile uint8_t g_parametricClosedLoopRunning = 0U;
 static volatile uint8_t g_phaseTrackedSineRunning = 0U;
 static volatile uint8_t g_arv2Running = 0U;
+static volatile ReturnToZeroState g_returnToZeroState = RETURN_TO_ZERO_IDLE;
+static uint32_t g_returnToZeroStartMs = 0U;
+static const char *g_returnToZeroAbortReason = "unknown";
 static ARV2_State g_arv2={0};
 static float g_arv2AmpMm=0.0f, g_arv2Phase=0.0f;
 static uint8_t g_arv2Mode=1U, g_arv2ReadFailures=0U;
@@ -600,6 +616,10 @@ int main(void)
                          "event: type=experiment_target_reached angle_deg=%.2f\r\n",
                          (double)g_experimentTargetReachedAngleDeg);
                 UartPrint(targetMessage);
+                g_parametricV2Enabled = 0U;
+                g_parametricV2SpeedHz = 0.0f;
+                ClosedLoopActuatorStop();
+                (void)RequestReturnToZero("target_angle_reached");
             }
         }
         if (g_parametricTestRunning == 0U && ClosedLoopActuatorIsActive() == 0U)
@@ -628,7 +648,11 @@ int main(void)
         ReportUartTxOverflow();
         PrintLiveTelemetry();
 
-        if (g_manualMotionDirection != 0U)
+        if (ReturnToZeroIsActive() != 0U)
+        {
+            UpdateReturnToZero();
+        }
+        else if (g_manualMotionDirection != 0U)
         {
             UpdateManualMotion();
         }
@@ -1265,7 +1289,7 @@ static void SensorSessionSummary(void)
 
 static void SensorSessionObserve(void)
 {
-    uint8_t active = PivotMotionIsActive();
+    uint8_t active = ExperimentControllerIsActive();
 
     if (active != 0U && g_sensorSession.active == 0U)
     {
@@ -1319,6 +1343,10 @@ static void PendulumAngleLimitTrip(float angleDeg)
 {
     uint32_t primask;
 
+    if (g_returnToZeroState == RETURN_TO_ZERO_MOVING)
+    {
+        AbortReturnToZero("pendulum_angle_limit");
+    }
     if (g_closedLoopFault != 0U)
     {
         return;
@@ -1480,8 +1508,20 @@ static uint8_t PivotMotionIsActive(void)
                : 0U;
 }
 
+static uint8_t ExperimentControllerIsActive(void)
+{
+    return (g_sineRunning != 0U || g_parametricRunning != 0U ||
+            g_parametricClosedLoopRunning != 0U ||
+            g_phaseTrackedSineRunning != 0U || g_arv2Running != 0U ||
+            g_v2TestRunning != 0U || g_parametricTestRunning != 0U) ? 1U : 0U;
+}
+
 static void PendulumAngleSensorFaultTrip(void)
 {
+    if (g_returnToZeroState == RETURN_TO_ZERO_MOVING)
+    {
+        AbortReturnToZero("angle_sensor_unavailable");
+    }
     g_arv2Running=0U;
     if (g_closedLoopFault != 0U)
     {
@@ -1620,6 +1660,11 @@ static uint8_t ClosedLoopActuatorIsActive(void)
 
 static void ClosedLoopActuatorFault(uint8_t fault)
 {
+    if (g_returnToZeroState == RETURN_TO_ZERO_MOVING)
+    {
+        AbortReturnToZero((fault == 1U) ? "upper_limit" :
+                          (fault == 2U) ? "lower_limit" : "actuator_fault");
+    }
     g_arv2Running=0U;
     g_parametricRunning = 0U;
     g_parametricV2Enabled = 0U;
@@ -1798,6 +1843,8 @@ static void ClosedLoopActuatorOnTimer(void)
 
 static void StopAutoResonanceV2(void)
 {
+    uint8_t wasRunning = g_arv2Running;
+
     if (g_arv2Running == 0U)
     {
         return;
@@ -1808,6 +1855,10 @@ static void StopAutoResonanceV2(void)
     g_parametricV2SpeedHz = 0.0f;
     g_parametricV2TargetSteps = g_positionSteps;
     ClosedLoopActuatorStop();
+    if (wasRunning != 0U)
+    {
+        ReturnToCenter();
+    }
 }
 
 static void ClosedLoopActuatorKick(void)
@@ -2400,30 +2451,110 @@ static void StopManualMotion(const char *reason)
     UartPrint(message);
 }
 
+static uint8_t ReturnToZeroIsActive(void)
+{
+    return (g_returnToZeroState != RETURN_TO_ZERO_IDLE) ? 1U : 0U;
+}
+
+static void AbortReturnToZero(const char *reason)
+{
+    if (g_returnToZeroState != RETURN_TO_ZERO_MOVING)
+    {
+        return;
+    }
+    g_returnToZeroAbortReason = reason;
+    g_returnToZeroState = RETURN_TO_ZERO_ABORTED;
+    g_parametricRunning = 0U;
+    g_parametricV2Enabled = 0U;
+    g_parametricV2SpeedHz = 0.0f;
+    g_parametricV2TargetSteps = g_positionSteps;
+    ClosedLoopActuatorStop();
+}
+
+static uint8_t RequestReturnToZero(const char *reason)
+{
+    char message[128];
+
+    if (g_returnToZeroState != RETURN_TO_ZERO_IDLE)
+    {
+        return 0U;
+    }
+    if (g_homed == 0U || g_closedLoopFault != 0U ||
+        PendulumAngleSafetyReadyForMotion() == 0U)
+    {
+        snprintf(message, sizeof(message),
+                 "event: type=return_to_zero_aborted reason=interlock position_steps=%ld\r\n",
+                 (long)g_positionSteps);
+        UartPrint(message);
+        return 0U;
+    }
+    if (g_positionSteps == 0)
+    {
+        snprintf(message, sizeof(message),
+                 "event: type=return_to_zero_completed position_steps=0 duration_ms=0\r\n");
+        UartPrint(message);
+        return 1U;
+    }
+
+    ClosedLoopActuatorStop();
+    g_parametricV2TargetSteps = 0;
+    g_parametricV2SpeedHz = 0.0f;
+    g_parametricV2Enabled = 1U;
+    g_parametricRunning = 1U;
+    g_returnToZeroStartMs = HAL_GetTick();
+    g_returnToZeroAbortReason = reason;
+    g_returnToZeroState = RETURN_TO_ZERO_MOVING;
+    snprintf(message, sizeof(message),
+             "event: type=return_to_zero_started reason=%s position_steps=%ld\r\n",
+             reason, (long)g_positionSteps);
+    UartPrint(message);
+    ClosedLoopActuatorKick();
+    return 1U;
+}
+
+static void UpdateReturnToZero(void)
+{
+    char message[144];
+
+    if (g_returnToZeroState == RETURN_TO_ZERO_ABORTED)
+    {
+        snprintf(message, sizeof(message),
+                 "event: type=return_to_zero_aborted reason=%s position_steps=%ld\r\n",
+                 g_returnToZeroAbortReason, (long)g_positionSteps);
+        UartPrint(message);
+        g_returnToZeroState = RETURN_TO_ZERO_IDLE;
+        return;
+    }
+    if (g_returnToZeroState != RETURN_TO_ZERO_MOVING)
+    {
+        return;
+    }
+    if (g_closedLoopFault != 0U || g_homed == 0U ||
+        g_pendulumAngleSafetyAvailable == 0U)
+    {
+        AbortReturnToZero((g_closedLoopFault != 0U) ? "protective_fault" :
+                          (g_homed == 0U) ? "homing_lost" :
+                          "angle_sensor_unavailable");
+        return;
+    }
+    if (g_positionSteps == 0 && g_closedLoopActuatorPhase == CLOSED_LOOP_PHASE_IDLE)
+    {
+        uint32_t durationMs = HAL_GetTick() - g_returnToZeroStartMs;
+        g_parametricRunning = 0U;
+        g_parametricV2Enabled = 0U;
+        g_parametricV2SpeedHz = 0.0f;
+        ClosedLoopActuatorStop();
+        snprintf(message, sizeof(message),
+                 "event: type=return_to_zero_completed position_steps=0 duration_ms=%lu\r\n",
+                 (unsigned long)durationMs);
+        UartPrint(message);
+        g_returnToZeroState = RETURN_TO_ZERO_IDLE;
+    }
+}
+
 static void ReturnToCenter(void)
 {
-    UartPrint("sine stopped: returning pivot to zero\r\n");
-    while (g_positionSteps != 0)
-    {
-        uint8_t direction = (g_positionSteps < 0) ? 0U : 1U;
-        SetDirection(direction);
-        if (StepOne(JOG_SPEED_HZ, 1U, 1U) == 0U)
-        {
-            if (g_stepStopReason == STEP_STOP_REASON_UPPER_LIMIT ||
-                g_stepStopReason == STEP_STOP_REASON_LOWER_LIMIT)
-            {
-                char message[80];
-                snprintf(message, sizeof(message), "return to zero stopped: %s\r\n",
-                         StepStopReasonName(g_stepStopReason));
-                UartPrint(message);
-            }
-            return;
-        }
-        g_positionSteps += (direction == 0U) ? 1 : -1;
-        ReportSwitchChanges();
-        PrintLiveTelemetry();
-    }
-    UartPrint("pivot returned to zero\r\n");
+    (void)RequestReturnToZero("experiment_stop");
 }
 
 static void UpdateSine(void)
@@ -2716,7 +2847,7 @@ static void UpdateV2ActuatorTest(void)
         float rms = g_v2TestSamples > 0U ?
             sqrtf((float)(g_v2TestSquaredError / (double)g_v2TestSamples)) : 0.0f;
         g_v2TestRunning = 0U;
-        (void)StopParametricController(0U);
+        (void)StopParametricController(1U);
         snprintf(msg, sizeof(msg),
                  "v2_test_result: samples=%lu rms_error_mm=%.4f max_error_mm=%.4f max_speed_hz=%.1f accel_hz_s=%.0f final_position_mm=%.4f\r\n",
                  (unsigned long)g_v2TestSamples, (double)rms,
@@ -3610,6 +3741,7 @@ static void PrintHelp(void)
     UartPrint("  diag            - print low-level firmware diagnostics\r\n");
     UartPrint("  angle           - read AS5600 raw angle (0..4095)\r\n");
     UartPrint("  zero            - set current pendulum angle to 0 degrees\r\n");
+    UartPrint("  go_zero         - return the homed carriage to step position zero\r\n");
     UartPrint("  live 0|1        - stop/start angle and position stream\r\n");
     UartPrint("  record 0|1      - stop/start CSV recording\r\n");
     UartPrint("  scale <steps/mm> - set pivot position conversion\r\n");
@@ -3712,6 +3844,10 @@ static void PrintDiagnostics(void)
 
 static const char *ActiveModeName(void)
 {
+    if (ReturnToZeroIsActive() != 0U)
+    {
+        return "return_to_zero";
+    }
     if (g_manualMotionDirection == 1U)
     {
         return "manual_up";
@@ -3813,6 +3949,17 @@ static uint8_t ProcessMaintenanceCommand(char *arguments)
     while (*end == ' ' || *end == '\t')
     {
         end++;
+    }
+
+    if (ReturnToZeroIsActive() != 0U &&
+        strcmp(end, "status") != 0 && strcmp(end, "switches") != 0 &&
+        strcmp(end, "angle") != 0)
+    {
+        snprintf(msg, sizeof(msg),
+                 "maintenance: id=%lu type=error ok=0 error=return_to_zero_active\r\n",
+                 requestId);
+        UartPrint(msg);
+        return 1U;
     }
 
     if (requestId == 0UL)
@@ -4496,7 +4643,7 @@ static uint8_t ProcessMaintenanceCommand(char *arguments)
 
     if (strcmp(end, "parametric_stop") == 0)
     {
-        (void)StopParametricController(0U);
+        (void)StopParametricController(1U);
         snprintf(msg, sizeof(msg),
                  "maintenance: id=%lu type=parametric_stop ok=1 active=0 active_mode=%s\r\n",
                  requestId,
@@ -4661,8 +4808,14 @@ static uint8_t ProcessMaintenanceCommand(char *arguments)
 
     if (strcmp(end, "phase_sine_stop") == 0)
     {
+        uint8_t wasRunning = g_phaseTrackedSineRunning;
+
         g_phaseTrackedSineRunning = 0U;
         ClosedLoopActuatorStop();
+        if (wasRunning != 0U)
+        {
+            ReturnToCenter();
+        }
         snprintf(msg, sizeof(msg),
                  "maintenance: id=%lu type=phase_sine_stop ok=1 active=0 active_mode=%s\r\n",
                  requestId,
@@ -4927,6 +5080,21 @@ static void ProcessLine(char *line)
         UartPrint("ar_v2 active: stop before using other commands\r\n");
         return;
     }
+    if (ReturnToZeroIsActive() != 0U && strcmp(line, "stop") == 0)
+    {
+        AbortReturnToZero("operator_stop");
+        UartPrint("return to zero stop requested\r\n");
+        return;
+    }
+    if (ReturnToZeroIsActive() != 0U &&
+        strcmp(line, "status") != 0 && strcmp(line, "diag") != 0 &&
+        strcmp(line, "help") != 0 && strcmp(line, "angle") != 0 &&
+        strcmp(line, "switches") != 0 && strcmp(line, "go_zero") != 0 &&
+        strncmp(line, "maint ", 6U) != 0)
+    {
+        UartPrint("command rejected: return to zero is active\r\n");
+        return;
+    }
     if (strncmp(line, "maint ", 6U) == 0)
     {
         ProcessMaintenanceCommand(line + 6U);
@@ -5017,6 +5185,27 @@ static void ProcessLine(char *line)
             UartPrint("zero rejected: stop motion and clear faults first\r\n");
             return;
         }
+
+        if (strcmp(line, "go_zero") == 0)
+        {
+            if (g_homed == 0U)
+            {
+                UartPrint("go_zero rejected: run home first\r\n");
+            }
+            else if (g_closedLoopFault != 0U)
+            {
+                UartPrint("go_zero rejected: clear protective fault first\r\n");
+            }
+            else if (PivotMotionIsActive() != 0U)
+            {
+                UartPrint("go_zero rejected: controller or motion is active\r\n");
+            }
+            else if (RequestReturnToZero("manual") != 0U)
+            {
+                UartPrint("go_zero accepted: return in progress\r\n");
+            }
+            return;
+        }
         SetAngleZero();
         return;
     }
@@ -5060,6 +5249,8 @@ static void ProcessLine(char *line)
 
     if (strcmp(line, "stop") == 0)
     {
+        uint8_t hadExperimentMotion = ExperimentControllerIsActive();
+
         StopAutoResonanceV2();
         StopManualMotion("operator_stop");
         g_parametricClosedLoopRunning = 0U;
@@ -5075,6 +5266,11 @@ static void ProcessLine(char *line)
         g_run = 0U;
         g_liveTelemetry = 0U;
         g_recording = 0U;
+        if (hadExperimentMotion != 0U && g_homed != 0U &&
+            g_closedLoopFault == 0U)
+        {
+            (void)RequestReturnToZero("operator_stop");
+        }
         UartPrint("stopped: motion and telemetry halted\r\n");
         return;
     }
@@ -5269,9 +5465,15 @@ static void ProcessLine(char *line)
 
         if (strcmp(argument, "0") == 0)
         {
+            uint8_t wasRunning = g_parametricClosedLoopRunning;
+
             g_parametricClosedLoopRunning = 0U;
             g_phaseTrackedSineRunning = 0U;
             ClosedLoopActuatorStop();
+            if (wasRunning != 0U && g_homed != 0U && g_closedLoopFault == 0U)
+            {
+                ReturnToCenter();
+            }
             g_suppressPromptOnce = 1U;
             return;
         }
@@ -5510,7 +5712,7 @@ static void ProcessLine(char *line)
         float phase;
         if (strcmp(args, "stop") == 0)
         {
-            (void)StopParametricController(0U);
+            (void)StopParametricController(1U);
             UartPrint("parametric_v2 stopped\r\n");
             return;
         }

@@ -20,6 +20,7 @@ class FirmwareCommand(str, Enum):
     ANGLE = "angle"
     HOME = "home"
     ZERO = "zero"
+    GO_ZERO = "go_zero"
     MANUAL_UP = "manual_up"
     MANUAL_DOWN = "manual_down"
     MANUAL_STOP = "manual_stop"
@@ -92,6 +93,9 @@ class FirmwareCommandService(QObject):
 
     def set_angle_zero(self) -> int:
         return self._request(FirmwareCommand.ZERO)
+
+    def go_zero(self) -> int:
+        return self._request(FirmwareCommand.GO_ZERO, timeout_ms=self._HOME_TIMEOUT_MS)
 
     @staticmethod
     def _is_routine_success(command: FirmwareCommand) -> bool:

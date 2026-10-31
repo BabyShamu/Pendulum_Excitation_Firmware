@@ -787,7 +787,7 @@ class FirmwareManualMotionContractTests(unittest.TestCase):
         self.assertIn("g_parametricRunning = 0U", stop_helper)
         self.assertIn("ReturnToCenter()", stop_helper)
         self.assertIn("StopParametricController(1U)", console)
-        self.assertIn("StopParametricController(0U)", function_body("ProcessMaintenanceCommand"))
+        self.assertIn("StopParametricController(1U)", function_body("ProcessMaintenanceCommand"))
 
     def test_global_pendulum_angle_limit_stops_every_motion_path_and_clears_only_by_fresh_safe_sample(self) -> None:
         safety = function_body("PendulumAngleSafetyPoll")
