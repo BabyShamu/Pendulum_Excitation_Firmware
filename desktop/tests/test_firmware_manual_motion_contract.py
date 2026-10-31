@@ -127,7 +127,7 @@ class FirmwareManualMotionContractTests(unittest.TestCase):
         self.assertEqual(homing.count("StepOne(HOMING_SPEED_HZ"), 3)
         self.assertNotIn("ManualStepTimer", homing)
 
-    def test_latch_pwm_is_lazy_and_pc7_has_no_boot_actuation(self) -> None:
+    def test_latch_pwm_opens_once_at_boot_and_reports_failure(self) -> None:
         startup = function_body("main")
         gpio_init = function_body("GPIO_Init")
         pwm_init = function_body("ServoLatchPwmInitialize")
@@ -135,9 +135,12 @@ class FirmwareManualMotionContractTests(unittest.TestCase):
         self.assertIn("GPIO_InitStruct.Pin = GPIO_PIN_7", gpio_init)
         self.assertIn("GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP", gpio_init)
         self.assertIn("HAL_GPIO_WritePin(GPIOC, GPIO_PIN_7, GPIO_PIN_RESET)", gpio_init)
-        self.assertNotIn("ServoLatchPwmInitialize", startup)
-        self.assertNotIn("ServoLatchCommand", startup)
-        self.assertNotIn("HAL_TIM_PWM_Start", startup)
+        self.assertIn(
+            "ServoLatchCommand(SERVO_LATCH_OPEN_PULSE_US, SERVO_LATCH_STATE_OPEN)",
+            startup,
+        )
+        self.assertIn("latch: startup_open_commanded ok=1", startup)
+        self.assertIn("latch: startup_open_commanded ok=0 reason=pwm_unavailable", startup)
         self.assertIn("channelConfig.Pulse = 0U", pwm_init)
         self.assertNotIn("HAL_TIM_PWM_Start", pwm_init)
         self.assertIn("HAL_TIM_PWM_Start(&htim8, TIM_CHANNEL_2)", pwm_command)

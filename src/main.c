@@ -205,7 +205,8 @@ typedef enum
 {
     TIM6_TRAJECTORY_OWNER_NONE = 0U,
     TIM6_TRAJECTORY_OWNER_SINE = 1U,
-    TIM6_TRAJECTORY_OWNER_PARAMETRIC = 2U
+    TIM6_TRAJECTORY_OWNER_PARAMETRIC = 2U,
+    TIM6_TRAJECTORY_OWNER_RETURN_ZERO = 3U
 } Tim6TrajectoryOwner;
 
 typedef struct
@@ -293,6 +294,7 @@ static const char *ServoLatchStateName(uint8_t state);
 static const char *ServoLatchInterlockReason(void);
 static uint8_t ClosedLoopActuatorIsActive(void);
 static const char *ActiveModeName(void);
+static const char *Tim6TrajectoryOwnerName(void);
 static void StartParametricController(float amplitudeMm, float phaseDeg);
 static uint8_t StopParametricController(uint8_t returnToCenter);
 static float WrapRadiansToPi(float angleRad);
@@ -316,6 +318,7 @@ static void DelayUs(uint32_t us);
 static void PollUart(void);
 static void ProcessLine(char *line);
 static void PrintHelp(void);
+static void PrintHelpCategory(const char *category);
 static void PrintStatus(void);
 static void PrintDiagnostics(void);
 static void PrintSwitches(void);
@@ -522,7 +525,8 @@ void TIM6_DAC_IRQHandler(void)
     {
         TIM6->SR = 0U;
         if (g_tim6TrajectoryOwner == TIM6_TRAJECTORY_OWNER_SINE ||
-            (g_parametricV2Enabled != 0U && g_parametricRunning != 0U))
+            g_tim6TrajectoryOwner == TIM6_TRAJECTORY_OWNER_PARAMETRIC ||
+            g_tim6TrajectoryOwner == TIM6_TRAJECTORY_OWNER_RETURN_ZERO)
         {
             ParametricV2OnTimer();
         }
@@ -603,6 +607,14 @@ int main(void)
     ManualStepTimerInit();
     USART2_Init();
     UartPrint("\r\nStepper control starting\r\n");
+    if (ServoLatchCommand(SERVO_LATCH_OPEN_PULSE_US, SERVO_LATCH_STATE_OPEN) != 0U)
+    {
+        UartPrint("latch: startup_open_commanded ok=1\r\n");
+    }
+    else
+    {
+        UartPrint("latch: startup_open_commanded ok=0 reason=pwm_unavailable\r\n");
+    }
     I2C1_Init();
 
     // Enable DWT cycle counter for precise short pulse timing.
@@ -1903,6 +1915,9 @@ static void ParametricV2OnTimer(void)
     uint32_t periodUs;
 
     if ((g_tim6TrajectoryOwner != TIM6_TRAJECTORY_OWNER_SINE &&
+         g_tim6TrajectoryOwner != TIM6_TRAJECTORY_OWNER_PARAMETRIC &&
+         g_tim6TrajectoryOwner != TIM6_TRAJECTORY_OWNER_RETURN_ZERO) ||
+        (g_tim6TrajectoryOwner == TIM6_TRAJECTORY_OWNER_PARAMETRIC &&
          (g_parametricRunning == 0U || g_parametricV2Enabled == 0U)) ||
         g_closedLoopFault != 0U ||
         (g_pendulumAngleSafetyAvailable == 0U &&
@@ -2706,9 +2721,7 @@ static uint8_t RequestReturnToZero(const char *reason)
     ClosedLoopActuatorStop();
     g_parametricV2TargetSteps = 0;
     g_parametricV2SpeedHz = 0.0f;
-    g_tim6TrajectoryOwner = TIM6_TRAJECTORY_OWNER_PARAMETRIC;
-    g_parametricV2Enabled = 1U;
-    g_parametricRunning = 1U;
+    g_tim6TrajectoryOwner = TIM6_TRAJECTORY_OWNER_RETURN_ZERO;
     g_returnToZeroStartMs = HAL_GetTick();
     g_returnToZeroLastProgressMs = g_returnToZeroStartMs;
     g_returnToZeroLastPositionSteps = g_positionSteps;
@@ -2750,10 +2763,9 @@ static void UpdateReturnToZero(void)
     if (g_positionSteps == 0 && g_closedLoopActuatorPhase == CLOSED_LOOP_PHASE_IDLE)
     {
         uint32_t durationMs = HAL_GetTick() - g_returnToZeroStartMs;
-        g_parametricRunning = 0U;
-        g_parametricV2Enabled = 0U;
         g_parametricV2SpeedHz = 0.0f;
         ClosedLoopActuatorStop();
+        g_tim6TrajectoryOwner = TIM6_TRAJECTORY_OWNER_NONE;
         snprintf(message, sizeof(message),
                  "event: type=return_to_zero_completed position_steps=0 duration_ms=%lu\r\n",
                  (unsigned long)durationMs);
@@ -3943,41 +3955,80 @@ static void ReportUartTxOverflow(void)
 
 static void PrintHelp(void)
 {
-    UartPrint("Commands:\r\n");
-    UartPrint("  help            - show commands\r\n");
-    UartPrint("  status          - print current settings\r\n");
-    UartPrint("  switches        - show upper/lower switch states\r\n");
+    UartPrint("PENDULUM CONTROL SYSTEM\r\n");
+    UartPrint("EXPERIMENT CONTROLLERS:\r\n");
+    UartPrint("  parametric classic|enhanced|ar1|ar2|ar3 <amp_mm> <phase_deg>\r\n");
+    UartPrint("  sine <amp_mm> <frequency_hz> | sine stop\r\n");
+    UartPrint("DIAGNOSTICS:\r\n");
+    UartPrint("  diag [param start|param stop|trajectory <amp> <freq> <duration>]\r\n");
+    UartPrint("  param_trace 0|1 | status\r\n");
+    UartPrint("MOTION AND CONFIGURATION:\r\n");
+    UartPrint("  home | go_zero | scale <steps/mm> | accel [steps/s2]\r\n");
+    UartPrint("SENSORS AND SAFETY:\r\n");
+    UartPrint("  angle | zero | switches | stop\r\n");
+    UartPrint("  help <controllers|diagnostics|motion|configuration|sensors|latch|telemetry|maintenance|safety>\r\n");
     UartPrint("  maint <id> <status|switches|angle|home|zero|manual_up|manual_down|manual_keepalive_up|manual_keepalive_down|manual_stop|latch_hold|latch_open|latch_status>\r\n");
     UartPrint("  maint <id> fault_clear - validate and clear a latched closed-loop fault\r\n");
-    UartPrint("  diag            - print low-level firmware diagnostics\r\n");
-    UartPrint("  angle           - read AS5600 raw angle (0..4095)\r\n");
-    UartPrint("  zero            - set current pendulum angle to 0 degrees\r\n");
-    UartPrint("  go_zero         - return the homed carriage to step position zero\r\n");
     UartPrint("  live 0|1        - stop/start angle and position stream\r\n");
     UartPrint("  record 0|1      - stop/start CSV recording\r\n");
-    UartPrint("  scale <steps/mm> - set pivot position conversion\r\n");
-    UartPrint("  stop            - stop live output or recording\r\n");
-    UartPrint("  jog <dir> <steps> - move a bounded number of steps\r\n");
-    UartPrint("  home            - find both limits and move to midpoint\r\n");
-    UartPrint("  sine <amp_mm> <hz> - start sinusoidal pivot motion after homing\r\n");
-    UartPrint("  sine stop       - stop sine motion\r\n");
-    UartPrint("  maint <id> parametric_start <amp_mm> <phase_deg> | parametric_stop - proven parametric controller\r\n");
-    UartPrint("  maint <id> autores_start <amp_mm> <phase_deg> | autores_stop - legacy experimental bounded controller\r\n");
-    UartPrint("  maint <id> phase_sine_start <amp_mm> <phase_deg> | phase_sine_stop - phase-tracked sine control\r\n");
-    UartPrint("  maint <id> sine_start <amp_mm> <hz> | sine_stop - correlated sine motion control\r\n");
-    UartPrint("  parametric <amp_mm> <phi_deg> - legacy blocking parametric controller\r\n");
-    UartPrint("  parametric_v2 <amp_mm> <phi_deg> - experimental TIM6 trajectory (bench test only)\r\n");
-    UartPrint("  parametric_v2 stop - stop experimental controller\r\n");
-    UartPrint("  v2_accel [steps/s2] - inspect/set V2 acceleration while idle (6000..1000000)\r\n");
-    UartPrint("  v2_test <amp_mm> <freq_hz> <duration_s> - timed V2 tracking test\r\n");
-    UartPrint("  parametric stop - stop parametric drive\r\n");
-    UartPrint("  parametric_test 0|1 - test parametric signal processing without motor motion\r\n");
-    UartPrint("  parametric_closed_loop 0|1 - run bounded parametric motor control\r\n");
-    UartPrint("  ar_v2 start <amp_mm> <phase_deg> <mode 1..3> | ar_v2 stop - experimental V2\r\n");
-    UartPrint("  run 0|1         - disable/enable stepping\r\n");
-    UartPrint("  dir 0|1         - set direction\r\n");
-    UartPrint("  hz <value>      - target speed in steps/sec\r\n");
-    UartPrint("  accel <value>   - acceleration in steps/sec^2\r\n");
+    UartPrint("Type 'help <category>' for detailed syntax and safety restrictions.\r\n");
+}
+
+static void PrintHelpCategory(const char *category)
+{
+    if (strcmp(category, "controllers") == 0)
+    {
+        UartPrint("EXPERIMENT CONTROLLERS\r\n");
+        UartPrint("parametric classic <amp_mm> <phase_deg> - original feedback controller\r\n");
+        UartPrint("parametric enhanced <amp_mm> <phase_deg> - TIM6 parametric controller\r\n");
+        UartPrint("parametric ar1|ar2|ar3 <amp_mm> <phase_deg> - AR V2 modes\r\n");
+        UartPrint("sine <amp_mm> <frequency_hz> - open-loop TIM6 sine\r\n");
+        UartPrint("parametric stop | sine stop | stop\r\n");
+        return;
+    }
+    if (strcmp(category, "diagnostics") == 0)
+    {
+        UartPrint("DIAGNOSTICS\r\n");
+        UartPrint("diag - low-level firmware diagnostics\r\n");
+        UartPrint("param_trace 0|1 - parametric trace output\r\n");
+        UartPrint("v2_test <amp_mm> <frequency_hz> <duration_s> - timed trajectory test\r\n");
+        UartPrint("parametric_test 0|1 - signal-processing diagnostic without motion\r\n");
+        return;
+    }
+    if (strcmp(category, "motion") == 0 || strcmp(category, "configuration") == 0)
+    {
+        UartPrint("MOTION AND CONFIGURATION\r\n");
+        UartPrint("home | go_zero | scale <steps/mm> | accel [steps/s2]\r\n");
+        UartPrint("accel accepts 6000..1000000 steps/s2 and only changes while idle.\r\n");
+        return;
+    }
+    if (strcmp(category, "sensors") == 0)
+    {
+        UartPrint("SENSORS AND CALIBRATION\r\n");
+        UartPrint("angle - read AS5600; zero - set angular reference; switches - read limits\r\n");
+        return;
+    }
+    if (strcmp(category, "latch") == 0)
+    {
+        UartPrint("SERVO LATCH\r\n");
+        UartPrint("maint <id> latch_open|latch_hold|latch_status\r\n");
+        UartPrint("The latch is commanded OPEN once during startup; physical position is not sensed.\r\n");
+        return;
+    }
+    if (strcmp(category, "telemetry") == 0)
+    {
+        UartPrint("TELEMETRY\r\n");
+        UartPrint("live 0|1 | record 0|1\r\n");
+        return;
+    }
+    if (strcmp(category, "maintenance") == 0 || strcmp(category, "safety") == 0)
+    {
+        UartPrint("SAFETY AND MAINTENANCE\r\n");
+        UartPrint("stop - stop active motion and telemetry; faults remain latched\r\n");
+        UartPrint("maint <id> fault_clear|status|home|switches|angle\r\n");
+        return;
+    }
+    UartPrint("unknown help category; use controllers, diagnostics, motion, configuration, sensors, latch, telemetry, maintenance, or safety\r\n");
 }
 
 static void PrintStatus(void)
@@ -3988,14 +4039,18 @@ static void PrintStatus(void)
     snprintf(
         msg,
         sizeof(msg),
-        "status: homed=%u upper_limit=%u lower_limit=%u fault=%u active_mode=%s travel_span_steps=%lu position_steps=%ld steps_per_mm=%.3f\r\n",
+        "status: homed=%u upper_limit=%u lower_limit=%u fault=%u active_mode=%s trajectory_owner=%s return_zero_state=%u position_steps=%ld target_steps=%ld tim6_active=%u travel_span_steps=%lu steps_per_mm=%.3f\r\n",
         (unsigned int)g_homed,
         (unsigned int)g_upperLimitDebounced,
         (unsigned int)g_lowerLimitDebounced,
         (unsigned int)g_closedLoopFault,
         ActiveModeName(),
-        (unsigned long)g_travelSteps,
+        Tim6TrajectoryOwnerName(),
+        (unsigned int)g_returnToZeroState,
         (long)g_positionSteps,
+        (long)g_parametricV2TargetSteps,
+        (unsigned int)((TIM6->CR1 & TIM_CR1_CEN) != 0U),
+        (unsigned long)g_travelSteps,
         (double)g_stepsPerMm);
     UartPrint(msg);
 }
@@ -4009,9 +4064,15 @@ static void PrintDiagnostics(void)
     snprintf(
         timerMsg,
         sizeof(timerMsg),
-        "diag: closed_loop_sign=%.0f phase=%u kick=%lu arm=%lu irq=%lu callback=%lu step_high=%lu step_complete=%lu TIM6_CR1=0x%08lX DIER=0x%08lX SR=0x%08lX CNT=%lu PSC=%lu ARR=%lu\r\n",
+        "diag: closed_loop_sign=%.0f phase=%u owner=%s return_zero_state=%u position_steps=%ld target_steps=%ld speed_hz=%.1f accel_hz_s=%.0f kick=%lu arm=%lu irq=%lu callback=%lu step_high=%lu step_complete=%lu TIM6_CR1=0x%08lX DIER=0x%08lX SR=0x%08lX CNT=%lu PSC=%lu ARR=%lu\r\n",
         (double)CLOSED_LOOP_COMMAND_SIGN,
         (unsigned int)g_closedLoopActuatorPhase,
+        Tim6TrajectoryOwnerName(),
+        (unsigned int)g_returnToZeroState,
+        (long)g_positionSteps,
+        (long)g_parametricV2TargetSteps,
+        (double)g_parametricV2SpeedHz,
+        (double)g_parametricV2AccelHzS,
         (unsigned long)g_closedLoopKickCount,
         (unsigned long)g_closedLoopTimerArmCount,
         (unsigned long)g_tim6IrqCount,
@@ -4093,6 +4154,21 @@ static const char *ActiveModeName(void)
         return "manual_stepping";
     }
     return "idle";
+}
+
+static const char *Tim6TrajectoryOwnerName(void)
+{
+    switch (g_tim6TrajectoryOwner)
+    {
+        case TIM6_TRAJECTORY_OWNER_SINE:
+            return "sine";
+        case TIM6_TRAJECTORY_OWNER_PARAMETRIC:
+            return "parametric";
+        case TIM6_TRAJECTORY_OWNER_RETURN_ZERO:
+            return "return_to_zero";
+        default:
+            return "none";
+    }
 }
 
 static void PrintAngle(void)
@@ -5287,7 +5363,8 @@ static void ProcessLine(char *line)
     if (g_arv2Running != 0U &&
         strcmp(line,"stop")!=0 && strcmp(line,"ar_v2 stop")!=0 &&
         strcmp(line,"status")!=0 && strcmp(line,"diag")!=0 &&
-        strcmp(line,"help")!=0 && strcmp(line,"angle")!=0 &&
+        strcmp(line,"help")!=0 && strncmp(line, "help ", 5U)!=0 &&
+        strcmp(line,"angle")!=0 &&
         strcmp(line,"switches")!=0)
     {
         UartPrint("ar_v2 active: stop before using other commands\r\n");
@@ -5301,7 +5378,8 @@ static void ProcessLine(char *line)
     }
     if (ReturnToZeroIsActive() != 0U &&
         strcmp(line, "status") != 0 && strcmp(line, "diag") != 0 &&
-        strcmp(line, "help") != 0 && strcmp(line, "angle") != 0 &&
+        strcmp(line, "help") != 0 && strncmp(line, "help ", 5U) != 0 &&
+        strcmp(line, "angle") != 0 &&
         strcmp(line, "switches") != 0 && strcmp(line, "go_zero") != 0 &&
         strncmp(line, "maint ", 6U) != 0)
     {
@@ -5343,7 +5421,8 @@ static void ProcessLine(char *line)
     }
 
     if (g_manualMotionDirection != 0U && strcmp(line, "stop") != 0 &&
-        strcmp(line, "help") != 0 && strcmp(line, "status") != 0 &&
+        strcmp(line, "help") != 0 && strncmp(line, "help ", 5) != 0 &&
+        strcmp(line, "status") != 0 &&
         strcmp(line, "diag") != 0 && strcmp(line, "angle") != 0 &&
         strcmp(line, "switches") != 0)
     {
@@ -5355,6 +5434,16 @@ static void ProcessLine(char *line)
     if (strcmp(line, "help") == 0)
     {
         PrintHelp();
+        return;
+    }
+    if (strncmp(line, "help ", 5) == 0)
+    {
+        char *category = line + 5;
+        while (*category == ' ' || *category == '\t')
+        {
+            category++;
+        }
+        PrintHelpCategory(category);
         return;
     }
 
@@ -5415,6 +5504,10 @@ static void ProcessLine(char *line)
         else if (PivotMotionIsActive() != 0U)
         {
             UartPrint("go_zero rejected: controller or motion is active\r\n");
+        }
+        else if (g_returnToZeroState != RETURN_TO_ZERO_IDLE)
+        {
+            UartPrint("go_zero rejected: return-to-zero already active\r\n");
         }
         else if (RequestReturnToZero("manual") != 0U)
         {
@@ -5894,38 +5987,98 @@ static void ProcessLine(char *line)
         return;
     }
 
-    if (strcmp(line, "v2_accel") == 0)
+    if (strcmp(line, "accel") == 0)
     {
         char msg[96];
-        snprintf(msg, sizeof(msg), "v2_accel: steps_per_s2=%.0f mm_per_s2=%.1f\r\n",
+        snprintf(msg, sizeof(msg), "accel: steps_per_s2=%.0f mm_per_s2=%.1f\r\n",
                  (double)g_parametricV2AccelHzS,
                  (double)(g_parametricV2AccelHzS / g_stepsPerMm));
         UartPrint(msg);
         return;
     }
-    if (strncmp(line, "v2_accel ", 9) == 0)
+    if (strncmp(line, "accel ", 6) == 0)
     {
         char *end;
-        float value = strtof(line + 9, &end);
+        float value = strtof(line + 6, &end);
         char msg[100];
         while (*end == ' ' || *end == '\t') { end++; }
         if (*end != '\0' || !isfinite(value) ||
             value < PARAMETRIC_V2_ACCEL_MIN_HZ_S ||
             value > PARAMETRIC_V2_ACCEL_MAX_HZ_S)
         {
-            UartPrint("v2_accel rejected: expected 6000..1000000 steps/s2\r\n");
+            UartPrint("accel rejected: expected 6000..1000000 steps/s2\r\n");
             return;
         }
         if (PivotMotionIsActive() != 0U || ClosedLoopActuatorIsActive() != 0U ||
             g_closedLoopFault != 0U)
         {
-            UartPrint("v2_accel rejected: motion or fault active\r\n");
+            UartPrint("accel rejected: motion or fault active\r\n");
             return;
         }
         g_parametricV2AccelHzS = value;
-        snprintf(msg, sizeof(msg), "v2_accel set: steps_per_s2=%.0f mm_per_s2=%.1f\r\n",
+        snprintf(msg, sizeof(msg), "accel set: steps_per_s2=%.0f mm_per_s2=%.1f\r\n",
                  (double)value, (double)(value / g_stepsPerMm));
         UartPrint(msg);
+        return;
+    }
+
+    if (strncmp(line, "parametric ", 11U) == 0)
+    {
+        char variant[16];
+        float amplitude;
+        float phase;
+        char trailing;
+        int parsed = sscanf(line + 11U, "%15s %f %f %c",
+                            variant, &amplitude, &phase, &trailing);
+        if (parsed == 1 && strcmp(variant, "stop") == 0)
+        {
+            (void)StopParametricController(1U);
+            UartPrint("parametric stopped\r\n");
+            return;
+        }
+        if (parsed != 3 || !isfinite(amplitude) || !isfinite(phase) ||
+            amplitude <= 0.0f || g_homed == 0U ||
+            g_closedLoopFault != 0U ||
+            PendulumAngleSafetyReadyForMotion() == 0U ||
+            g_servoLatchCommandedState != SERVO_LATCH_STATE_OPEN)
+        {
+            UartPrint("parametric rejected: invalid parameters or motion safety interlock\r\n");
+            return;
+        }
+        if (strcmp(variant, "classic") == 0)
+        {
+            float halfTravelMm = (g_stepsPerMm > 0.0f)
+                                     ? ((float)g_travelSteps / (2.0f * g_stepsPerMm))
+                                     : 0.0f;
+            if (amplitude >= halfTravelMm || PivotMotionIsActive() != 0U)
+            {
+                UartPrint("parametric classic rejected: amplitude or motion interlock\r\n");
+                return;
+            }
+            StartParametricController(amplitude, phase);
+            UartPrint("parametric classic started\r\n");
+            return;
+        }
+        if (strcmp(variant, "enhanced") == 0)
+        {
+            char delegated[64];
+            snprintf(delegated, sizeof(delegated),
+                     "parametric_v2 %.9g %.9g", (double)amplitude, (double)phase);
+            ProcessLine(delegated);
+            return;
+        }
+        if (strcmp(variant, "ar1") == 0 || strcmp(variant, "ar2") == 0 ||
+            strcmp(variant, "ar3") == 0)
+        {
+            char delegated[80];
+            unsigned int mode = (variant[2] - '0');
+            snprintf(delegated, sizeof(delegated),
+                     "ar_v2 start %.9g %.9g %u",
+                     (double)amplitude, (double)phase, mode);
+            ProcessLine(delegated);
+            return;
+        }
+        UartPrint("usage: parametric classic|enhanced|ar1|ar2|ar3 <amp_mm> <phase_deg>\r\n");
         return;
     }
 

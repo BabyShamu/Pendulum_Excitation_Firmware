@@ -166,6 +166,26 @@ class FirmwareAutoResonanceV2TrajectoryTests(unittest.TestCase):
             FIRMWARE_SOURCE,
         )
         self.assertIn("6000..1000000", FIRMWARE_SOURCE)
+        self.assertIn('if (strcmp(line, "accel") == 0)', function_body("ProcessLine"))
+        self.assertIn('if (strncmp(line, "accel ", 6) == 0)', function_body("ProcessLine"))
+
+    def test_status_and_diagnostics_report_tim6_ownership(self) -> None:
+        self.assertIn("trajectory_owner=%s", function_body("PrintStatus"))
+        self.assertIn("return_zero_state=%u", function_body("PrintStatus"))
+        self.assertIn("target_steps=%ld", function_body("PrintDiagnostics"))
+        self.assertIn("Tim6TrajectoryOwnerName()", FIRMWARE_SOURCE)
+
+    def test_unified_parametric_names_delegate_without_changing_algorithms(self) -> None:
+        process_line = function_body("ProcessLine")
+        self.assertIn('strncmp(line, "parametric ", 11U)', process_line)
+        self.assertIn('strcmp(variant, "classic")', process_line)
+        self.assertIn('strcmp(variant, "enhanced")', process_line)
+        self.assertIn('strcmp(variant, "ar1")', process_line)
+        self.assertIn('strcmp(variant, "ar2")', process_line)
+        self.assertIn('strcmp(variant, "ar3")', process_line)
+        self.assertIn('StartParametricController(amplitude, phase)', process_line)
+        self.assertIn('"parametric_v2 %.9g %.9g"', process_line)
+        self.assertIn('"ar_v2 start %.9g %.9g %u"', process_line)
         self.assertIn(
             "value < PARAMETRIC_V2_ACCEL_MIN_HZ_S",
             function_body("ProcessLine"),
@@ -180,7 +200,9 @@ class FirmwareAutoResonanceV2TrajectoryTests(unittest.TestCase):
         timer = function_body("ParametricV2OnTimer")
         self.assertIn("g_parametricV2AccelHzS", timer)
         self.assertNotIn("g_parametricV2AccelHzS =", request)
-        self.assertIn("g_parametricV2Enabled = 1U", request)
+        self.assertIn("TIM6_TRAJECTORY_OWNER_RETURN_ZERO", request)
+        self.assertNotIn("g_parametricV2Enabled = 1U", request)
+        self.assertNotIn("g_parametricRunning = 1U", request)
 
     def test_faults_disable_ar_v2_and_parametric_v2_state(self) -> None:
         fault = function_body("ClosedLoopActuatorFault")

@@ -32,12 +32,14 @@ class FirmwareReturnToZeroTests(unittest.TestCase):
         request = function_body("RequestReturnToZero")
         update = function_body("UpdateReturnToZero")
         self.assertIn("g_parametricV2TargetSteps = 0", request)
-        self.assertIn("g_parametricV2Enabled = 1U", request)
-        self.assertIn("g_parametricRunning = 1U", request)
+        self.assertIn("TIM6_TRAJECTORY_OWNER_RETURN_ZERO", request)
+        self.assertNotIn("g_parametricV2Enabled = 1U", request)
+        self.assertNotIn("g_parametricRunning = 1U", request)
         self.assertIn("ClosedLoopActuatorKick()", request)
         self.assertNotIn("StepOne(", request)
         self.assertIn("g_positionSteps == 0", update)
         self.assertIn("ClosedLoopActuatorStop()", update)
+        self.assertIn("g_tim6TrajectoryOwner = TIM6_TRAJECTORY_OWNER_NONE", update)
         self.assertIn("RETURN_TO_ZERO_STALL_TIMEOUT_MS", update)
         self.assertIn("trajectory_inactive", update)
         self.assertIn("position_stalled", update)
@@ -71,6 +73,31 @@ class FirmwareReturnToZeroTests(unittest.TestCase):
         zero_branch = process_line.split('if (strcmp(line, "zero") == 0)', 1)[1]
         zero_branch = zero_branch.split('if (strcmp(line, "go_zero") == 0)', 1)[0]
         self.assertNotIn('strcmp(line, "go_zero") == 0', zero_branch)
+
+    def test_return_zero_has_dedicated_tim6_owner(self) -> None:
+        self.assertIn("TIM6_TRAJECTORY_OWNER_RETURN_ZERO", SOURCE)
+        irq = SOURCE.split("void TIM6_DAC_IRQHandler(void)", 1)[1].split(
+            "void TIM7_DAC_IRQHandler", 1
+        )[0]
+        self.assertIn("TIM6_TRAJECTORY_OWNER_RETURN_ZERO", irq)
+        timer = function_body("ParametricV2OnTimer")
+        self.assertIn("TIM6_TRAJECTORY_OWNER_RETURN_ZERO", timer)
+
+    def test_go_zero_reports_when_return_is_already_active(self) -> None:
+        process_line = function_body("ProcessLine")
+        self.assertIn(
+            'go_zero rejected: return-to-zero already active',
+            process_line,
+        )
+
+    def test_startup_commands_latch_open_and_reports_result(self) -> None:
+        main = function_body("main")
+        self.assertIn(
+            "ServoLatchCommand(SERVO_LATCH_OPEN_PULSE_US, SERVO_LATCH_STATE_OPEN)",
+            main,
+        )
+        self.assertIn("latch: startup_open_commanded ok=1", main)
+        self.assertIn("latch: startup_open_commanded ok=0 reason=pwm_unavailable", main)
 
     def test_return_is_prioritized_and_does_not_start_sensor_session(self) -> None:
         main = function_body("main")
