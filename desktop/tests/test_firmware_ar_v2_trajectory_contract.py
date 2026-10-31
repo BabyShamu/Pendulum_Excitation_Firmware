@@ -99,9 +99,31 @@ class FirmwareAutoResonanceV2TrajectoryTests(unittest.TestCase):
         self.assertNotIn("PARAMETRIC_V2_ACCEL_MAX_HZ_S", trajectory)
         self.assertRegex(
             FIRMWARE_SOURCE,
-            r"#define PARAMETRIC_V2_ACCEL_DEFAULT_HZ_S\s+18000\.0f",
+            r"#define PARAMETRIC_V2_ACCEL_DEFAULT_HZ_S\s+100000\.0f",
         )
         self.assertRegex(FIRMWARE_SOURCE, r"CLOSED_LOOP_MAX_MM\s+7\.5f")
+
+    def test_v2_acceleration_command_documents_unchanged_runtime_bounds(self) -> None:
+        self.assertIn(
+            "PARAMETRIC_V2_ACCEL_DEFAULT_HZ_S 100000.0f",
+            FIRMWARE_SOURCE,
+        )
+        self.assertIn("6000..1000000", FIRMWARE_SOURCE)
+        self.assertIn(
+            "value < PARAMETRIC_V2_ACCEL_MIN_HZ_S",
+            function_body("ProcessLine"),
+        )
+        self.assertIn(
+            "value > PARAMETRIC_V2_ACCEL_MAX_HZ_S",
+            function_body("ProcessLine"),
+        )
+
+    def test_return_to_zero_uses_shared_runtime_acceleration(self) -> None:
+        request = function_body("RequestReturnToZero")
+        timer = function_body("ParametricV2OnTimer")
+        self.assertIn("g_parametricV2AccelHzS", timer)
+        self.assertNotIn("g_parametricV2AccelHzS =", request)
+        self.assertIn("g_parametricV2Enabled = 1U", request)
 
     def test_faults_disable_ar_v2_and_parametric_v2_state(self) -> None:
         fault = function_body("ClosedLoopActuatorFault")

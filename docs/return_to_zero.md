@@ -9,6 +9,11 @@ its configured acceleration and speed limits. The main loop remains available
 for UART processing, telemetry, angle safety polling, limit monitoring, and
 fault handling while the carriage moves.
 
+The default TIM6 acceleration is `100000 steps/s^2`. It remains configurable
+with `v2_accel`; the accepted runtime range is `6000..1000000 steps/s^2`.
+Automatic return-to-zero uses the same current runtime setting and does not
+silently select a separate acceleration.
+
 The supported motion modes are sine, legacy parametric, Parametric V2,
 time-limited V2 actuator tests, legacy Auto-Resonance, Auto-Resonance V2,
 phase-tracked sine, and bounded parametric closed-loop excitation. Their

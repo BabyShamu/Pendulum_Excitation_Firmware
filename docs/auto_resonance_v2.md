@@ -19,7 +19,8 @@ legacy parametric or phase-tracked-sine controllers.
 - The controller writes its carriage target into the existing Parametric V2
   trajectory owner (`g_parametricV2TargetSteps`). TIM6 then executes that
   target with the existing acceleration-controlled scheduler and runtime
-  acceleration configuration. The existing timer ownership, fault handling,
+  acceleration configuration (default `100000 steps/s^2`, configurable with
+  `v2_accel` from `6000..1000000 steps/s^2`). The existing timer ownership, fault handling,
   homing requirements, angle-sensor checks, and stage travel bounds are reused.
 - Auto-Resonance V2 remains a separate controller mode: its 5-ms update and
   Fourier command generation are unchanged, while `g_parametricRunning` and

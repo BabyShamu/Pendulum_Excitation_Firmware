@@ -67,7 +67,7 @@
 /* Experimental timer-driven stepper: validate on bench before physical use. */
 #define PARAMETRIC_V2_MAX_HZ 4000.0f
 #define PARAMETRIC_V2_START_HZ 150.0f
-#define PARAMETRIC_V2_ACCEL_DEFAULT_HZ_S 18000.0f
+#define PARAMETRIC_V2_ACCEL_DEFAULT_HZ_S 100000.0f
 #define PARAMETRIC_V2_ACCEL_MIN_HZ_S 6000.0f
 #define PARAMETRIC_V2_ACCEL_MAX_HZ_S 1000000.0f
 #define ARV2_MAX_AMPLITUDE_MM         20.0f
@@ -3781,7 +3781,7 @@ static void PrintHelp(void)
     UartPrint("  parametric <amp_mm> <phi_deg> - legacy blocking parametric controller\r\n");
     UartPrint("  parametric_v2 <amp_mm> <phi_deg> - experimental TIM6 trajectory (bench test only)\r\n");
     UartPrint("  parametric_v2 stop - stop experimental controller\r\n");
-    UartPrint("  v2_accel [steps/s2] - inspect/set V2 acceleration while idle (6000..36000)\r\n");
+    UartPrint("  v2_accel [steps/s2] - inspect/set V2 acceleration while idle (6000..1000000)\r\n");
     UartPrint("  v2_test <amp_mm> <freq_hz> <duration_s> - timed V2 tracking test\r\n");
     UartPrint("  parametric stop - stop parametric drive\r\n");
     UartPrint("  parametric_test 0|1 - test parametric signal processing without motor motion\r\n");
@@ -5721,7 +5721,7 @@ static void ProcessLine(char *line)
             value < PARAMETRIC_V2_ACCEL_MIN_HZ_S ||
             value > PARAMETRIC_V2_ACCEL_MAX_HZ_S)
         {
-            UartPrint("v2_accel rejected: expected 6000..36000 steps/s2\r\n");
+            UartPrint("v2_accel rejected: expected 6000..1000000 steps/s2\r\n");
             return;
         }
         if (PivotMotionIsActive() != 0U || ClosedLoopActuatorIsActive() != 0U ||
