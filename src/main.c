@@ -3150,6 +3150,10 @@ static uint8_t StopParametricController(uint8_t returnToCenter)
         g_parametricV2Enabled = 0U;
         g_parametricV2SpeedHz = 0.0f;
         g_parametricV2TargetSteps = g_positionSteps;
+        if (g_tim6TrajectoryOwner == TIM6_TRAJECTORY_OWNER_PARAMETRIC)
+        {
+            g_tim6TrajectoryOwner = TIM6_TRAJECTORY_OWNER_NONE;
+        }
     }
     if (returnToCenter != 0U && wasRunning != 0U &&
         g_homed != 0U && g_closedLoopFault == 0U)
@@ -5659,6 +5663,7 @@ static void ProcessLine(char *line)
             g_parametricV2SpeedHz=0.0f;
             g_parametricV2Enabled=1U;
             g_parametricRunning=1U;
+            g_tim6TrajectoryOwner=TIM6_TRAJECTORY_OWNER_PARAMETRIC;
             g_arv2Running=1U;
             g_suppressPromptOnce=1U;
             UartPrint("ar_v2 started (EXPERIMENTAL: max 20 mm configurable; actuator clamp 7.5 mm)\r\n");
@@ -5971,6 +5976,7 @@ static void ProcessLine(char *line)
         }
         g_parametricRunning = 1U;
         g_parametricV2Enabled = 1U;
+        g_tim6TrajectoryOwner = TIM6_TRAJECTORY_OWNER_PARAMETRIC;
         g_parametricV2SpeedHz = 0.0f;
         g_parametricV2TargetSteps = g_positionSteps;
         g_v2TestStartMs = HAL_GetTick();
@@ -6121,6 +6127,7 @@ static void ProcessLine(char *line)
         g_parametricV2TargetSteps = g_positionSteps;
         g_parametricV2SpeedHz = 0.0f;
         g_parametricV2Enabled = 1U;
+        g_tim6TrajectoryOwner = TIM6_TRAJECTORY_OWNER_PARAMETRIC;
         UartPrint("parametric_v2 started (experimental)\r\n");
         return;
     }

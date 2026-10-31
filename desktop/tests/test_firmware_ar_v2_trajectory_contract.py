@@ -80,7 +80,29 @@ class FirmwareAutoResonanceV2TrajectoryTests(unittest.TestCase):
         start = start.split('UartPrint("ar_v2 started', 1)[0]
         self.assertIn("g_parametricV2Enabled=1U", start)
         self.assertIn("g_parametricRunning=1U", start)
+        self.assertIn("g_tim6TrajectoryOwner=TIM6_TRAJECTORY_OWNER_PARAMETRIC", start)
         self.assertIn("g_parametricV2TargetSteps=g_positionSteps", start)
+
+    def test_all_ar_v2_modes_claim_parametric_tim6_ownership(self) -> None:
+        process_line = function_body("ProcessLine")
+        ar_start = process_line.split('if (strncmp(line,"ar_v2 start ",12U)==0', 1)[1]
+        ar_start = ar_start.split('UartPrint("ar_v2 started', 1)[0]
+        self.assertIn("mode<1U || mode>3U", ar_start)
+        self.assertIn("g_tim6TrajectoryOwner=TIM6_TRAJECTORY_OWNER_PARAMETRIC", ar_start)
+        self.assertIn("g_parametricV2TargetSteps=g_positionSteps", ar_start)
+
+    def test_parametric_enhanced_and_trajectory_test_claim_tim6_ownership(self) -> None:
+        process_line = function_body("ProcessLine")
+        self.assertIn(
+            'g_tim6TrajectoryOwner = TIM6_TRAJECTORY_OWNER_PARAMETRIC',
+            process_line,
+        )
+        self.assertIn(
+            'g_tim6TrajectoryOwner=TIM6_TRAJECTORY_OWNER_PARAMETRIC',
+            process_line,
+        )
+        self.assertIn("g_v2TestRunning = 1U", process_line)
+        self.assertIn('parametric_v2 started (experimental)', process_line)
 
     def test_ar_v2_start_resets_estimator_and_preserves_sample_deadline(self) -> None:
         start = FIRMWARE_SOURCE.split(
@@ -149,6 +171,11 @@ class FirmwareAutoResonanceV2TrajectoryTests(unittest.TestCase):
             "ClosedLoopActuatorStop()",
         ):
             self.assertIn(required, stop)
+
+    def test_parametric_v2_stop_releases_parametric_owner(self) -> None:
+        stop = function_body("StopParametricController")
+        self.assertIn("g_tim6TrajectoryOwner == TIM6_TRAJECTORY_OWNER_PARAMETRIC", stop)
+        self.assertIn("g_tim6TrajectoryOwner = TIM6_TRAJECTORY_OWNER_NONE", stop)
 
     def test_v2_trajectory_keeps_runtime_acceleration_configuration(self) -> None:
         trajectory = function_body("ParametricV2OnTimer")
