@@ -93,6 +93,22 @@ class FirmwareProtocolParserTests(unittest.TestCase):
         self.assertEqual(restored.name, "angle_sensor_restored")
         self.assertEqual(restored.fields["outage_ms"], "191")
 
+    def test_sensor_session_events_preserve_structured_statistics(self) -> None:
+        start = FirmwareProtocolParser.parse_device_event(
+            "event: type=sensor_session_start policy=complete_target"
+        )
+        summary = FirmwareProtocolParser.parse_device_event(
+            "event: type=sensor_session_summary failed_reads=4 outages=1 "
+            "recovery_attempts=1 recovery_successes=1 recovery_failures=0 "
+            "total_outage_ms=125 max_outage_ms=125 last_outage_ms=125"
+        )
+
+        self.assertEqual(start.name, "sensor_session_start")
+        self.assertEqual(start.fields["policy"], "complete_target")
+        self.assertEqual(summary.name, "sensor_session_summary")
+        self.assertEqual(summary.fields["failed_reads"], "4")
+        self.assertEqual(summary.fields["total_outage_ms"], "125")
+
     def test_fault_cleared_event_preserves_previous_fault_code(self) -> None:
         event = FirmwareProtocolParser.parse_device_event(
             "event: type=fault_cleared previous_fault=3"

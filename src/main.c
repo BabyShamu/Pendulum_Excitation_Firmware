@@ -131,6 +131,7 @@
 #define AS5600_STARTUP_RETRY_DELAY_MS 25U
 #define AS5600_READ_FAILURE_RECOVERY_THRESHOLD 3U
 #define AS5600_RECOVERY_RETRY_INTERVAL_MS 1000U
+#define AS5600_TRANSIENT_OUTAGE_GRACE_MS  250U
 #define AS5600_I2C_BUS_CLEAR_CLOCK_PULSES 9U
 #define PARAMETRIC_SLEW_MM_PER_SEC    250.0f
 #define LIVE_PERIOD_MS      20U
@@ -184,6 +185,30 @@ typedef struct
     float commandedTargetMm;
 } PhaseTrackedSineState;
 
+typedef enum
+{
+    SENSOR_POLICY_OPEN_LOOP = 0U,
+    SENSOR_POLICY_CLOSED_LOOP = 1U
+} SensorSessionPolicy;
+
+typedef struct
+{
+    uint32_t sensor_failed_reads;
+    uint32_t sensor_outages;
+    uint32_t sensor_recovery_attempts;
+    uint32_t sensor_recovery_successes;
+    uint32_t sensor_recovery_failures;
+    uint32_t sensor_total_outage_ms;
+    uint32_t sensor_max_outage_ms;
+    uint32_t sensor_last_outage_ms;
+    uint32_t outage_start_ms;
+    uint8_t outage_active;
+    uint8_t restored_event_pending;
+    uint8_t active;
+    uint8_t summary_emitted;
+    SensorSessionPolicy policy;
+} SensorSessionStats;
+
 static void GPIO_Init(void);
 static void USART2_Init(void);
 static void I2C1_Init(void);
@@ -211,6 +236,10 @@ static void AS5600_RecordValidAngleSample(uint16_t angle);
 static uint8_t AS5600_RecoverI2c(void);
 static void AS5600_RecordHalFailure(HAL_StatusTypeDef status, uint32_t error);
 static void AS5600_RecordReadFailure(HAL_StatusTypeDef status, uint32_t error);
+static uint8_t AS5600_RecordSessionSuccess(void);
+static void SensorSessionObserve(void);
+static void SensorSessionStart(SensorSessionPolicy policy);
+static void SensorSessionSummary(void);
 static const char *AS5600_HalErrorName(uint32_t error);
 static void AS5600_SampleLineStates(AS5600LineState *lines);
 static void AS5600_ReportRecovery(uint8_t success);
@@ -417,6 +446,7 @@ static uint32_t g_as5600LongestFailureStreak = 0U;
 static uint32_t g_as5600OutageStartMs = 0U;
 static uint8_t g_as5600LastRecoveryAttempted = 0U;
 static AS5600RecoveryLineStates g_as5600RecoveryLineStates = {0};
+static SensorSessionStats g_sensorSession = {0};
 static uint16_t g_angleZeroRaw = 0U;
 static uint8_t g_angleZeroValid = 0U;
 static uint8_t g_switchStatusValid = 0U;
@@ -594,6 +624,7 @@ int main(void)
         }
 
         PollUart();
+        SensorSessionObserve();
         ReportUartTxOverflow();
         PrintLiveTelemetry();
 
@@ -761,6 +792,7 @@ static HAL_StatusTypeDef AS5600_ReadAngle(uint16_t *angle)
     if (status == HAL_OK)
     {
         g_angleSensorConsecutiveFailures = 0U;
+        (void)AS5600_RecordSessionSuccess();
         AS5600_ReportRestored();
         return HAL_OK;
     }
@@ -786,6 +818,10 @@ static HAL_StatusTypeDef AS5600_ReadAngle(uint16_t *angle)
         g_i2cRecoveryCount++;
         recoveryAttempted = 1U;
         g_as5600LastRecoveryAttempted = 1U;
+        if (g_sensorSession.active != 0U)
+        {
+            g_sensorSession.sensor_recovery_attempts++;
+        }
     }
 
     AS5600_ReportUnavailable();
@@ -795,12 +831,21 @@ static HAL_StatusTypeDef AS5600_ReadAngle(uint16_t *angle)
         if (recoverySucceeded != 0U && AS5600_ReadAngleOnce(angle) == HAL_OK)
         {
             g_as5600RecoverySuccessCount++;
+            if (g_sensorSession.active != 0U)
+            {
+                g_sensorSession.sensor_recovery_successes++;
+            }
             AS5600_ReportRecovery(1U);
             g_angleSensorConsecutiveFailures = 0U;
+            (void)AS5600_RecordSessionSuccess();
             AS5600_ReportRestored();
             return HAL_OK;
         }
         g_as5600RecoveryFailureCount++;
+        if (g_sensorSession.active != 0U)
+        {
+            g_sensorSession.sensor_recovery_failures++;
+        }
         AS5600_ReportRecovery(0U);
     }
     return HAL_ERROR;
@@ -880,7 +925,40 @@ static void AS5600_RecordHalFailure(HAL_StatusTypeDef status, uint32_t error)
 static void AS5600_RecordReadFailure(HAL_StatusTypeDef status, uint32_t error)
 {
     g_as5600TotalReadFailures++;
+    if (g_sensorSession.active != 0U)
+    {
+        g_sensorSession.sensor_failed_reads++;
+        if (g_sensorSession.outage_active == 0U)
+        {
+            g_sensorSession.outage_active = 1U;
+            g_sensorSession.sensor_outages++;
+            g_sensorSession.outage_start_ms = HAL_GetTick();
+        }
+    }
     AS5600_RecordHalFailure(status, error);
+}
+
+static uint8_t AS5600_RecordSessionSuccess(void)
+{
+    uint32_t now;
+    uint32_t outageMs;
+
+    if (g_sensorSession.active == 0U ||
+        g_sensorSession.outage_active == 0U)
+    {
+        return 0U;
+    }
+    now = HAL_GetTick();
+    outageMs = now - g_sensorSession.outage_start_ms;
+    g_sensorSession.sensor_last_outage_ms = outageMs;
+    g_sensorSession.sensor_total_outage_ms += outageMs;
+    if (outageMs > g_sensorSession.sensor_max_outage_ms)
+    {
+        g_sensorSession.sensor_max_outage_ms = outageMs;
+    }
+    g_sensorSession.outage_active = 0U;
+    g_sensorSession.restored_event_pending = 1U;
+    return 1U;
 }
 
 static const char *AS5600_HalErrorName(uint32_t error)
@@ -1094,18 +1172,24 @@ static void AS5600_ReportRestored(void)
 {
     char message[384];
     uint32_t now;
+    uint32_t outageMs;
 
-    if (g_angleSensorUnavailable == 0U)
+    if (g_angleSensorUnavailable == 0U &&
+        g_sensorSession.restored_event_pending == 0U)
     {
         return;
     }
     g_angleSensorUnavailable = 0U;
+    g_sensorSession.restored_event_pending = 0U;
     now = HAL_GetTick();
+    outageMs = (g_sensorSession.sensor_last_outage_ms != 0U)
+                   ? g_sensorSession.sensor_last_outage_ms
+                   : (now - g_as5600OutageStartMs);
     snprintf(message, sizeof(message),
              "event: type=angle_sensor_restored outage_ms=%lu recovery_count=%lu "
              "recovery_successes=%lu recovery_failures=%lu hal_status=%u "
              "hal_error=0x%08lX hal_error_name=%s uptime_ms=%lu\r\n",
-             (unsigned long)(now - g_as5600OutageStartMs),
+             (unsigned long)outageMs,
              (unsigned long)g_i2cRecoveryCount,
              (unsigned long)g_as5600RecoverySuccessCount,
              (unsigned long)g_as5600RecoveryFailureCount,
@@ -1114,6 +1198,105 @@ static void AS5600_ReportRestored(void)
              AS5600_HalErrorName(g_as5600LastHalError),
              (unsigned long)now);
     UartPrint(message);
+}
+
+static SensorSessionPolicy SensorSessionCurrentPolicy(void)
+{
+    if (g_parametricClosedLoopRunning != 0U ||
+        g_phaseTrackedSineRunning != 0U ||
+        g_arv2Running != 0U ||
+        g_parametricRunning != 0U ||
+        g_parametricTestRunning != 0U)
+    {
+        return SENSOR_POLICY_CLOSED_LOOP;
+    }
+    return SENSOR_POLICY_OPEN_LOOP;
+}
+
+static void SensorSessionStart(SensorSessionPolicy policy)
+{
+    memset(&g_sensorSession, 0, sizeof(g_sensorSession));
+    g_sensorSession.active = 1U;
+    g_sensorSession.policy = policy;
+    UartPrint(policy == SENSOR_POLICY_CLOSED_LOOP
+                  ? "event: type=sensor_session_start policy=complete_target\r\n"
+                  : "event: type=sensor_session_start policy=open_loop_transient\r\n");
+}
+
+static void SensorSessionSummary(void)
+{
+    uint32_t now;
+    uint32_t outageMs;
+    char message[320];
+
+    if (g_sensorSession.active == 0U ||
+        g_sensorSession.summary_emitted != 0U)
+    {
+        return;
+    }
+    now = HAL_GetTick();
+    if (g_sensorSession.outage_active != 0U)
+    {
+        outageMs = now - g_sensorSession.outage_start_ms;
+        g_sensorSession.sensor_last_outage_ms = outageMs;
+        g_sensorSession.sensor_total_outage_ms += outageMs;
+        if (outageMs > g_sensorSession.sensor_max_outage_ms)
+        {
+            g_sensorSession.sensor_max_outage_ms = outageMs;
+        }
+        g_sensorSession.outage_active = 0U;
+    }
+    snprintf(message, sizeof(message),
+             "event: type=sensor_session_summary failed_reads=%lu outages=%lu "
+             "recovery_attempts=%lu recovery_successes=%lu recovery_failures=%lu "
+             "total_outage_ms=%lu max_outage_ms=%lu last_outage_ms=%lu\r\n",
+             (unsigned long)g_sensorSession.sensor_failed_reads,
+             (unsigned long)g_sensorSession.sensor_outages,
+             (unsigned long)g_sensorSession.sensor_recovery_attempts,
+             (unsigned long)g_sensorSession.sensor_recovery_successes,
+             (unsigned long)g_sensorSession.sensor_recovery_failures,
+             (unsigned long)g_sensorSession.sensor_total_outage_ms,
+             (unsigned long)g_sensorSession.sensor_max_outage_ms,
+             (unsigned long)g_sensorSession.sensor_last_outage_ms);
+    g_sensorSession.summary_emitted = 1U;
+    g_sensorSession.active = 0U;
+    UartPrint(message);
+}
+
+static void SensorSessionObserve(void)
+{
+    uint8_t active = PivotMotionIsActive();
+
+    if (active != 0U && g_sensorSession.active == 0U)
+    {
+        SensorSessionStart(SensorSessionCurrentPolicy());
+    }
+    else if (active == 0U && g_sensorSession.active != 0U)
+    {
+        SensorSessionSummary();
+    }
+}
+
+static uint8_t SensorOutageWithinGrace(void)
+{
+    uint32_t startMs;
+
+    if (g_sensorSession.active != 0U &&
+        g_sensorSession.outage_active != 0U)
+    {
+        startMs = g_sensorSession.outage_start_ms;
+    }
+    else if (g_angleSensorUnavailable != 0U)
+    {
+        startMs = g_as5600OutageStartMs;
+    }
+    else
+    {
+        return 0U;
+    }
+    return ((HAL_GetTick() - startMs) <= AS5600_TRANSIENT_OUTAGE_GRACE_MS)
+               ? 1U
+               : 0U;
 }
 
 static void SetDirection(uint8_t dir)
@@ -1160,6 +1343,7 @@ static void PendulumAngleLimitTrip(float angleDeg)
     g_run = 0U;
     g_sineRunning = 0U;
     g_parametricRunning = 0U;
+    g_v2TestRunning = 0U;
     g_parametricTestRunning = 0U;
     g_parametricClosedLoopRunning = 0U;
     g_parametricClosedLoopExperimentMode = 0U;
@@ -1197,6 +1381,11 @@ static uint8_t PendulumAngleSafetyPoll(uint8_t motionActive)
         g_angleSensorConsecutiveFailures >= AS5600_READ_FAILURE_RECOVERY_THRESHOLD)
     {
         g_pendulumAngleSafetyAvailable = 0U;
+        if (motionActive != 0U && SensorOutageWithinGrace() != 0U)
+        {
+            g_pendulumAngleSafetyAvailable = 1U;
+            return 1U;
+        }
         if (motionActive != 0U)
         {
             PendulumAngleSensorFaultTrip();
@@ -1246,6 +1435,11 @@ static uint8_t PendulumAngleSafetyPoll(uint8_t motionActive)
         g_angleSensorConsecutiveFailures >= AS5600_READ_FAILURE_RECOVERY_THRESHOLD)
     {
         g_pendulumAngleSafetyAvailable = 0U;
+        if (motionActive != 0U && SensorOutageWithinGrace() != 0U)
+        {
+            g_pendulumAngleSafetyAvailable = 1U;
+            return 1U;
+        }
         if (motionActive != 0U)
         {
             PendulumAngleSensorFaultTrip();
@@ -1280,7 +1474,8 @@ static uint8_t PivotMotionIsActive(void)
 {
     return (g_manualMotionDirection != 0U || g_homingActive != 0U || g_run != 0U ||
             g_sineRunning != 0U || g_parametricRunning != 0U ||
-            g_parametricClosedLoopRunning != 0U || g_phaseTrackedSineRunning != 0U || g_arv2Running != 0U)
+            g_parametricClosedLoopRunning != 0U || g_phaseTrackedSineRunning != 0U ||
+            g_arv2Running != 0U || g_v2TestRunning != 0U)
                ? 1U
                : 0U;
 }
@@ -1302,6 +1497,7 @@ static void PendulumAngleSensorFaultTrip(void)
     g_parametricRunning = 0U;
     g_parametricV2Enabled = 0U;
     g_parametricV2SpeedHz = 0.0f;
+    g_v2TestRunning = 0U;
     g_parametricTestRunning = 0U;
     g_parametricClosedLoopRunning = 0U;
     g_parametricClosedLoopExperimentMode = 0U;
@@ -1428,6 +1624,7 @@ static void ClosedLoopActuatorFault(uint8_t fault)
     g_parametricRunning = 0U;
     g_parametricV2Enabled = 0U;
     g_parametricV2SpeedHz = 0.0f;
+    g_v2TestRunning = 0U;
     g_parametricClosedLoopRunning = 0U;
     g_parametricClosedLoopExperimentMode = 0U;
     g_phaseTrackedSineRunning = 0U;
@@ -2763,8 +2960,7 @@ static void UpdateAutoResonanceV2(void)
     while ((int32_t)(now-g_arv2Next)>=0);
     if (AS5600_ReadAngle(&raw)!=HAL_OK)
     {
-        if (++g_arv2ReadFailures>=CLOSED_LOOP_ANGLE_FAILURE_LIMIT)
-            ClosedLoopActuatorFault(3U);
+        g_arv2ReadFailures++;
         return;
     }
     g_arv2ReadFailures=0U;
@@ -2832,10 +3028,6 @@ static void UpdateParametricClosedLoop(void)
     if (AS5600_ReadAngle(&angle) != HAL_OK)
     {
         g_parametricClosedLoopAngleFailureCount++;
-        if (g_parametricClosedLoopAngleFailureCount >= CLOSED_LOOP_ANGLE_FAILURE_LIMIT)
-        {
-            ClosedLoopActuatorFault(3U);
-        }
         return;
     }
     g_parametricClosedLoopAngleFailureCount = 0U;
@@ -3169,6 +3361,13 @@ static void UpdatePhaseTrackedSine(void)
             g_phaseTrackedSine.acquisitionCount = 0U;
             g_phaseTrackedSine.omegaValid = 0U;
         }
+    }
+
+    if (angleValid == 0U)
+    {
+        /* Hold the last validated target. Do not advance or synthesize a
+         * time-varying feedback command from stale angle data. */
+        return;
     }
 
     if (g_phaseTrackedSine.phaseValid != 0U &&
@@ -4871,6 +5070,7 @@ static void ProcessLine(char *line)
         g_parametricV2Enabled = 0U;
         g_parametricV2SpeedHz = 0.0f;
         g_parametricV2TargetSteps = g_positionSteps;
+        g_v2TestRunning = 0U;
         g_parametricTestRunning = 0U;
         g_run = 0U;
         g_liveTelemetry = 0U;
