@@ -38,6 +38,9 @@ class FirmwareReturnToZeroTests(unittest.TestCase):
         self.assertNotIn("StepOne(", request)
         self.assertIn("g_positionSteps == 0", update)
         self.assertIn("ClosedLoopActuatorStop()", update)
+        self.assertIn("RETURN_TO_ZERO_STALL_TIMEOUT_MS", update)
+        self.assertIn("trajectory_inactive", update)
+        self.assertIn("position_stalled", update)
 
     def test_return_reports_structured_start_completion_and_abort_events(self) -> None:
         source = function_body("RequestReturnToZero") + function_body("UpdateReturnToZero")
@@ -80,14 +83,42 @@ class FirmwareReturnToZeroTests(unittest.TestCase):
 
     def test_normal_stop_paths_request_return(self) -> None:
         source = SOURCE
-        for handler in (
-            "StopAutoResonanceV2",
-            "StopParametricController",
-            "ProcessMaintenanceCommand",
-        ):
-            self.assertIn("ReturnToCenter()", function_body(handler) if handler != "ProcessMaintenanceCommand" else function_body(handler))
+        stop = function_body("ProcessLine").split(
+            'if (strcmp(line, "stop") == 0)', 1
+        )[1].split('if (strncmp(line,"ar_v2",5U)==0', 1)[0]
+        self.assertLess(stop.index("g_parametricV2TargetSteps = g_positionSteps"),
+                        stop.index("RequestReturnToZero("))
+        self.assertNotIn(
+            "g_parametricV2TargetSteps = g_positionSteps",
+            stop[stop.index("RequestReturnToZero("):],
+        )
+        self.assertNotIn("ClosedLoopActuatorStop()", stop[stop.index("RequestReturnToZero("):])
+        self.assertNotIn("RequestReturnToZero(", function_body("StopAutoResonanceV2"))
+        self.assertIn("ReturnToCenter()", function_body("StopParametricController"))
+        self.assertIn("ReturnToCenter()", function_body("ProcessMaintenanceCommand"))
+        self.assertNotIn("RequestReturnToZero(", function_body("StopAutoResonanceV2"))
         self.assertIn('RequestReturnToZero("operator_stop")', source)
         self.assertIn('RequestReturnToZero("target_angle_reached")', source)
+
+    def test_ar_v2_stop_cleans_up_before_arming_return(self) -> None:
+        process_line = function_body("ProcessLine")
+        ar_stop = process_line.split('strcmp(line,"ar_v2 stop")==0', 1)[1]
+        ar_stop = ar_stop.split('if (strncmp(line,"ar_v2 start ', 1)[0]
+        self.assertLess(ar_stop.index("StopAutoResonanceV2()"),
+                        ar_stop.index("RequestReturnToZero("))
+        self.assertNotIn(
+            "ClosedLoopActuatorStop()",
+            ar_stop[ar_stop.index("RequestReturnToZero("):],
+        )
+
+    def test_stop_during_return_aborts_without_rearming_experiment(self) -> None:
+        process_line = function_body("ProcessLine")
+        active_stop = process_line.split(
+            'if (ReturnToZeroIsActive() != 0U && strcmp(line, "stop") == 0)',
+            1,
+        )[1].split('if (ReturnToZeroIsActive() != 0U &&', 1)[0]
+        self.assertIn('AbortReturnToZero("operator_stop")', active_stop)
+        self.assertIn("return;", active_stop)
 
     def test_desktop_command_service_exposes_go_zero(self) -> None:
         commands = (

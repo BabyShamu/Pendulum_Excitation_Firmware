@@ -139,6 +139,7 @@
 #define MAX_SINE_FREQUENCY_HZ 10.0f
 #define PI_F                3.14159265358979323846f
 #define RETURN_TO_ZERO_REASON_MAX 32U
+#define RETURN_TO_ZERO_STALL_TIMEOUT_MS 1000U
 
 typedef struct
 {
@@ -394,6 +395,8 @@ static volatile uint8_t g_phaseTrackedSineRunning = 0U;
 static volatile uint8_t g_arv2Running = 0U;
 static volatile ReturnToZeroState g_returnToZeroState = RETURN_TO_ZERO_IDLE;
 static uint32_t g_returnToZeroStartMs = 0U;
+static uint32_t g_returnToZeroLastProgressMs = 0U;
+static int32_t g_returnToZeroLastPositionSteps = 0;
 static const char *g_returnToZeroAbortReason = "unknown";
 static ARV2_State g_arv2={0};
 static float g_arv2AmpMm=0.0f, g_arv2Phase=0.0f;
@@ -1510,6 +1513,10 @@ static uint8_t PivotMotionIsActive(void)
 
 static uint8_t ExperimentControllerIsActive(void)
 {
+    if (g_returnToZeroState != RETURN_TO_ZERO_IDLE)
+    {
+        return 0U;
+    }
     return (g_sineRunning != 0U || g_parametricRunning != 0U ||
             g_parametricClosedLoopRunning != 0U ||
             g_phaseTrackedSineRunning != 0U || g_arv2Running != 0U ||
@@ -1843,8 +1850,6 @@ static void ClosedLoopActuatorOnTimer(void)
 
 static void StopAutoResonanceV2(void)
 {
-    uint8_t wasRunning = g_arv2Running;
-
     if (g_arv2Running == 0U)
     {
         return;
@@ -1855,10 +1860,6 @@ static void StopAutoResonanceV2(void)
     g_parametricV2SpeedHz = 0.0f;
     g_parametricV2TargetSteps = g_positionSteps;
     ClosedLoopActuatorStop();
-    if (wasRunning != 0U)
-    {
-        ReturnToCenter();
-    }
 }
 
 static void ClosedLoopActuatorKick(void)
@@ -2502,6 +2503,8 @@ static uint8_t RequestReturnToZero(const char *reason)
     g_parametricV2Enabled = 1U;
     g_parametricRunning = 1U;
     g_returnToZeroStartMs = HAL_GetTick();
+    g_returnToZeroLastProgressMs = g_returnToZeroStartMs;
+    g_returnToZeroLastPositionSteps = g_positionSteps;
     g_returnToZeroAbortReason = reason;
     g_returnToZeroState = RETURN_TO_ZERO_MOVING;
     snprintf(message, sizeof(message),
@@ -2549,6 +2552,27 @@ static void UpdateReturnToZero(void)
                  (unsigned long)durationMs);
         UartPrint(message);
         g_returnToZeroState = RETURN_TO_ZERO_IDLE;
+        return;
+    }
+    if (g_positionSteps != g_returnToZeroLastPositionSteps)
+    {
+        g_returnToZeroLastPositionSteps = g_positionSteps;
+        g_returnToZeroLastProgressMs = HAL_GetTick();
+    }
+    else if ((HAL_GetTick() - g_returnToZeroLastProgressMs) >=
+             RETURN_TO_ZERO_STALL_TIMEOUT_MS)
+    {
+        AbortReturnToZero(((TIM6->CR1 & TIM_CR1_CEN) == 0U)
+                              ? "trajectory_inactive"
+                              : "position_stalled");
+        return;
+    }
+    if ((TIM6->CR1 & TIM_CR1_CEN) == 0U &&
+        g_closedLoopActuatorPhase == CLOSED_LOOP_PHASE_IDLE &&
+        g_positionSteps != 0)
+    {
+        AbortReturnToZero("trajectory_inactive");
+        return;
     }
 }
 
@@ -5269,6 +5293,9 @@ static void ProcessLine(char *line)
         if (hadExperimentMotion != 0U && g_homed != 0U &&
             g_closedLoopFault == 0U)
         {
+            /* All experiment ownership and target cleanup is complete before
+             * arming the shared return trajectory. Do not touch TIM6 or its
+             * zero target after this call. */
             (void)RequestReturnToZero("operator_stop");
         }
         UartPrint("stopped: motion and telemetry halted\r\n");
@@ -5281,7 +5308,13 @@ static void ProcessLine(char *line)
     {
         if (strcmp(line,"ar_v2 stop")==0)
         {
+            uint8_t wasRunning = g_arv2Running;
+
             StopAutoResonanceV2();
+            if (wasRunning != 0U && g_homed != 0U && g_closedLoopFault == 0U)
+            {
+                (void)RequestReturnToZero("experiment_stop");
+            }
             UartPrint("ar_v2 stopped\r\n");
             return;
         }
