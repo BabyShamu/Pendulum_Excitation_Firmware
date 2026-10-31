@@ -5185,28 +5185,28 @@ static void ProcessLine(char *line)
             UartPrint("zero rejected: stop motion and clear faults first\r\n");
             return;
         }
-
-        if (strcmp(line, "go_zero") == 0)
-        {
-            if (g_homed == 0U)
-            {
-                UartPrint("go_zero rejected: run home first\r\n");
-            }
-            else if (g_closedLoopFault != 0U)
-            {
-                UartPrint("go_zero rejected: clear protective fault first\r\n");
-            }
-            else if (PivotMotionIsActive() != 0U)
-            {
-                UartPrint("go_zero rejected: controller or motion is active\r\n");
-            }
-            else if (RequestReturnToZero("manual") != 0U)
-            {
-                UartPrint("go_zero accepted: return in progress\r\n");
-            }
-            return;
-        }
         SetAngleZero();
+        return;
+    }
+
+    if (strcmp(line, "go_zero") == 0)
+    {
+        if (g_homed == 0U)
+        {
+            UartPrint("go_zero rejected: run home first\r\n");
+        }
+        else if (g_closedLoopFault != 0U)
+        {
+            UartPrint("go_zero rejected: clear protective fault first\r\n");
+        }
+        else if (PivotMotionIsActive() != 0U)
+        {
+            UartPrint("go_zero rejected: controller or motion is active\r\n");
+        }
+        else if (RequestReturnToZero("manual") != 0U)
+        {
+            UartPrint("go_zero accepted: return in progress\r\n");
+        }
         return;
     }
 

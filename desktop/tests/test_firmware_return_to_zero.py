@@ -65,6 +65,9 @@ class FirmwareReturnToZeroTests(unittest.TestCase):
         self.assertIn('strcmp(line, "zero") == 0', process_line)
         self.assertIn('RequestReturnToZero("manual")', process_line)
         self.assertIn('UartPrint("go_zero rejected: run home first', process_line)
+        zero_branch = process_line.split('if (strcmp(line, "zero") == 0)', 1)[1]
+        zero_branch = zero_branch.split('if (strcmp(line, "go_zero") == 0)', 1)[0]
+        self.assertNotIn('strcmp(line, "go_zero") == 0', zero_branch)
 
     def test_return_is_prioritized_and_does_not_start_sensor_session(self) -> None:
         main = function_body("main")
