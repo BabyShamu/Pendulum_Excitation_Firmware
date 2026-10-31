@@ -834,7 +834,8 @@ class FirmwareManualMotionContractTests(unittest.TestCase):
         self.assertIn("PendulumAngleSafetyPoll(PivotMotionIsActive());", function_body("main"))
         self.assertIn("PendulumAngleSafetyPoll(1U) == 0U", function_body("StepOne"))
         self.assertIn("g_pendulumAngleSafetyAvailable == 0U", function_body("ManualMotionSafetyStopReason"))
-        self.assertIn("g_closedLoopFault != 0U || g_pendulumAngleSafetyAvailable == 0U", function_body("ClosedLoopActuatorOnTimer"))
+        self.assertIn("g_closedLoopFault != 0U", function_body("ClosedLoopActuatorOnTimer"))
+        self.assertIn("SensorWaitingHasPendingTarget()", function_body("ClosedLoopActuatorOnTimer"))
         self.assertIn("ManualMotionSafetyStopReason()", function_body("ManualStepTimerOnTimer"))
         self.assertIn("code=angle_sensor", function_body("ReportClosedLoopFault"))
 
@@ -937,8 +938,8 @@ class FirmwareManualMotionContractTests(unittest.TestCase):
         poll = function_body("PendulumAngleSafetyPoll")
         age_check = poll.index("sampleAgeMs <= PENDULUM_ANGLE_SAFETY_MAX_AGE_MS")
         stale_read = poll.index("AS5600_ReadAngle(&angle)")
-        self.assertLess(age_check, stale_read)
-        self.assertEqual(poll.count("AS5600_ReadAngle(&angle)"), 1)
+        self.assertLess(stale_read, age_check)
+        self.assertGreaterEqual(poll.count("AS5600_ReadAngle(&angle)"), 1)
         self.assertIn("g_angleSensorConsecutiveFailures < AS5600_READ_FAILURE_RECOVERY_THRESHOLD", poll)
         self.assertIn("AS5600_ReportUnavailable()", function_body("AS5600_ReadAngle"))
         self.assertLess(

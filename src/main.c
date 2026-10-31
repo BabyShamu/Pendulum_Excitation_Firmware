@@ -255,6 +255,10 @@ static void AS5600_ReportRecovery(uint8_t success);
 static uint8_t AS5600_StartupProbe(void);
 static void AS5600_ReportUnavailable(void);
 static void AS5600_ReportRestored(void);
+static uint8_t FeedbackControllerIsActive(void);
+static void SetControllerWaitingForSensor(void);
+static void SetControllerResumed(void);
+static uint8_t SensorWaitingHasPendingTarget(void);
 static void SetDirection(uint8_t dir);
 static uint8_t StepOne(uint32_t hz, uint8_t stopUpper, uint8_t stopLower);
 static void Jog(uint8_t dir, uint32_t steps);
@@ -451,6 +455,7 @@ static uint8_t g_servoLatchCommandedState = SERVO_LATCH_STATE_UNKNOWN;
 static uint8_t g_servoLatchPwmInitialized = 0U;
 static uint8_t g_servoLatchPwmActive = 0U;
 static uint8_t g_angleSensorUnavailable = 0U;
+static volatile uint8_t g_controllerWaitingForSensor = 0U;
 static uint8_t g_angleSensorConsecutiveFailures = 0U;
 static uint32_t g_lastI2cRecoveryMs = 0U;
 static uint32_t g_i2cRecoveryCount = 0U;
@@ -821,6 +826,10 @@ static HAL_StatusTypeDef AS5600_ReadAngle(uint16_t *angle)
         g_angleSensorConsecutiveFailures = 0U;
         (void)AS5600_RecordSessionSuccess();
         AS5600_ReportRestored();
+        if (g_closedLoopFault == 0U && g_angleSensorUnavailable == 0U)
+        {
+            SetControllerResumed();
+        }
         return HAL_OK;
     }
 
@@ -866,6 +875,10 @@ static HAL_StatusTypeDef AS5600_ReadAngle(uint16_t *angle)
             g_angleSensorConsecutiveFailures = 0U;
             (void)AS5600_RecordSessionSuccess();
             AS5600_ReportRestored();
+            if (g_closedLoopFault == 0U && g_angleSensorUnavailable == 0U)
+            {
+                SetControllerResumed();
+            }
             return HAL_OK;
         }
         g_as5600RecoveryFailureCount++;
@@ -1227,6 +1240,56 @@ static void AS5600_ReportRestored(void)
     UartPrint(message);
 }
 
+static uint8_t FeedbackControllerIsActive(void)
+{
+    if (g_returnToZeroState != RETURN_TO_ZERO_IDLE)
+    {
+        return 0U;
+    }
+    return (g_parametricClosedLoopRunning != 0U ||
+            g_phaseTrackedSineRunning != 0U ||
+            g_arv2Running != 0U ||
+            g_parametricRunning != 0U ||
+            g_parametricTestRunning != 0U) ? 1U : 0U;
+}
+
+static void SetControllerWaitingForSensor(void)
+{
+    if (g_controllerWaitingForSensor == 0U)
+    {
+        g_controllerWaitingForSensor = 1U;
+        UartPrint("event: type=controller_waiting_for_sensor\r\n");
+    }
+}
+
+static void SetControllerResumed(void)
+{
+    if (g_controllerWaitingForSensor != 0U)
+    {
+        g_controllerWaitingForSensor = 0U;
+        UartPrint("event: type=controller_resumed\r\n");
+    }
+}
+
+static uint8_t SensorWaitingHasPendingTarget(void)
+{
+    if (g_controllerWaitingForSensor == 0U)
+    {
+        return 0U;
+    }
+    if ((g_parametricRunning != 0U && g_parametricV2Enabled != 0U) ||
+        g_arv2Running != 0U)
+    {
+        return (g_parametricV2TargetSteps != g_positionSteps) ? 1U : 0U;
+    }
+    if (g_parametricClosedLoopRunning != 0U ||
+        g_phaseTrackedSineRunning != 0U)
+    {
+        return (g_parametricClosedLoopTargetSteps != g_positionSteps) ? 1U : 0U;
+    }
+    return 0U;
+}
+
 static SensorSessionPolicy SensorSessionCurrentPolicy(void)
 {
     if (g_parametricClosedLoopRunning != 0U ||
@@ -1245,6 +1308,7 @@ static void SensorSessionStart(SensorSessionPolicy policy)
     memset(&g_sensorSession, 0, sizeof(g_sensorSession));
     g_sensorSession.active = 1U;
     g_sensorSession.policy = policy;
+    g_controllerWaitingForSensor = 0U;
     UartPrint(policy == SENSOR_POLICY_CLOSED_LOOP
                   ? "event: type=sensor_session_start policy=complete_target\r\n"
                   : "event: type=sensor_session_start policy=open_loop_transient\r\n");
@@ -1287,6 +1351,7 @@ static void SensorSessionSummary(void)
              (unsigned long)g_sensorSession.sensor_last_outage_ms);
     g_sensorSession.summary_emitted = 1U;
     g_sensorSession.active = 0U;
+    g_controllerWaitingForSensor = 0U;
     UartPrint(message);
 }
 
@@ -1412,6 +1477,29 @@ static uint8_t PendulumAngleSafetyPoll(uint8_t motionActive)
         g_angleSensorConsecutiveFailures >= AS5600_READ_FAILURE_RECOVERY_THRESHOLD)
     {
         g_pendulumAngleSafetyAvailable = 0U;
+        if (motionActive != 0U && FeedbackControllerIsActive() != 0U)
+        {
+            if (g_pendulumAngleSafetyLastPollMs == 0U ||
+                (now - g_pendulumAngleSafetyLastPollMs) >= AS5600_RECOVERY_RETRY_INTERVAL_MS)
+            {
+                g_pendulumAngleSafetyLastPollMs = now;
+                if (AS5600_ReadAngle(&angle) == HAL_OK)
+                {
+                    if (g_closedLoopFault == 0U &&
+                        g_angleSensorUnavailable == 0U)
+                    {
+                        g_pendulumAngleSafetyAvailable = 1U;
+                        return 1U;
+                    }
+                }
+            }
+            if (SensorOutageWithinGrace() != 0U)
+            {
+                return 1U;
+            }
+            SetControllerWaitingForSensor();
+            return 1U;
+        }
         if (motionActive != 0U && SensorOutageWithinGrace() != 0U)
         {
             g_pendulumAngleSafetyAvailable = 1U;
@@ -1466,6 +1554,15 @@ static uint8_t PendulumAngleSafetyPoll(uint8_t motionActive)
         g_angleSensorConsecutiveFailures >= AS5600_READ_FAILURE_RECOVERY_THRESHOLD)
     {
         g_pendulumAngleSafetyAvailable = 0U;
+        if (motionActive != 0U && FeedbackControllerIsActive() != 0U)
+        {
+            if (SensorOutageWithinGrace() != 0U)
+            {
+                return 1U;
+            }
+            SetControllerWaitingForSensor();
+            return 1U;
+        }
         if (motionActive != 0U && SensorOutageWithinGrace() != 0U)
         {
             g_pendulumAngleSafetyAvailable = 1U;
@@ -1703,7 +1800,9 @@ static void ParametricV2OnTimer(void)
     uint32_t periodUs;
 
     if (g_parametricRunning == 0U || g_parametricV2Enabled == 0U ||
-        g_closedLoopFault != 0U || g_pendulumAngleSafetyAvailable == 0U)
+        g_closedLoopFault != 0U ||
+        (g_pendulumAngleSafetyAvailable == 0U &&
+         SensorWaitingHasPendingTarget() == 0U))
     {
         ClosedLoopActuatorStop();
         return;
@@ -1787,7 +1886,9 @@ static void ClosedLoopActuatorOnTimer(void)
         ClosedLoopActuatorStop();
         return;
     }
-    if (g_closedLoopFault != 0U || g_pendulumAngleSafetyAvailable == 0U)
+    if (g_closedLoopFault != 0U ||
+        (g_pendulumAngleSafetyAvailable == 0U &&
+         SensorWaitingHasPendingTarget() == 0U))
     {
         ClosedLoopActuatorStop();
         return;

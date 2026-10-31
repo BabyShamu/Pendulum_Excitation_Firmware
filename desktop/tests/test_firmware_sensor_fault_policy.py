@@ -71,6 +71,34 @@ class FirmwareSensorFaultPolicyTests(unittest.TestCase):
         self.assertIn("PendulumAngleSensorFaultTrip()", safety)
         self.assertRegex(SOURCE, r"#define AS5600_TRANSIENT_OUTAGE_GRACE_MS\s+250U")
 
+    def test_feedback_outage_enters_waiting_and_keeps_recovering(self) -> None:
+        safety = function_body("PendulumAngleSafetyPoll")
+        self.assertIn("FeedbackControllerIsActive()", safety)
+        self.assertIn("SetControllerWaitingForSensor()", safety)
+        self.assertIn("AS5600_RECOVERY_RETRY_INTERVAL_MS", safety)
+        self.assertIn("SensorOutageWithinGrace()", safety)
+        self.assertLess(
+            safety.index("SensorOutageWithinGrace()"),
+            safety.index("SetControllerWaitingForSensor()"),
+        )
+        self.assertIn("return 1U", safety)
+
+    def test_waiting_and_resume_events_are_transition_events(self) -> None:
+        waiting = function_body("SetControllerWaitingForSensor")
+        resumed = function_body("SetControllerResumed")
+        self.assertIn("g_controllerWaitingForSensor == 0U", waiting)
+        self.assertIn("controller_waiting_for_sensor", waiting)
+        self.assertIn("g_controllerWaitingForSensor != 0U", resumed)
+        self.assertIn("controller_resumed", resumed)
+
+    def test_waiting_only_allows_last_target_to_finish(self) -> None:
+        pending = function_body("SensorWaitingHasPendingTarget")
+        for target in ("g_parametricV2TargetSteps", "g_parametricClosedLoopTargetSteps"):
+            self.assertIn(target, pending)
+        for name in ("ParametricV2OnTimer", "ClosedLoopActuatorOnTimer"):
+            timer = function_body(name)
+            self.assertIn("SensorWaitingHasPendingTarget()", timer)
+
     def test_closed_loop_holds_target_on_read_failure(self) -> None:
         for name in ("UpdateAutoResonanceV2", "UpdateParametricClosedLoop"):
             body = function_body(name)
