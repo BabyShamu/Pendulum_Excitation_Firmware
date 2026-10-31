@@ -4889,9 +4889,11 @@ static void ProcessLine(char *line)
             allowed=(int32_t)(g_travelSteps/2U)-
                     (int32_t)lroundf(CLOSED_LOOP_TRAVEL_MARGIN_MM*g_stepsPerMm);
             if (g_stepsPerMm<=0.0f || allowed<=0 ||
-                amp*g_stepsPerMm>=(float)allowed)
+                amp*g_stepsPerMm>=(float)allowed ||
+                g_positionSteps > (int32_t)lroundf(g_stepsPerMm*0.5f) ||
+                g_positionSteps < -(int32_t)lroundf(g_stepsPerMm*0.5f))
             {
-                UartPrint("ar_v2 rejected: unsafe available travel\r\n");
+                UartPrint("ar_v2 rejected: unsafe travel or carriage not centered (+/-0.5 mm)\r\n");
                 return;
             }
             ClosedLoopActuatorStop();
