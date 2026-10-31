@@ -23,6 +23,7 @@
 #define ARV2_AGC_STEP                (0.0005f)
 #define ARV2_SLEW_MM_S               (250.0f)
 #define ARV2_PI                      (3.14159265358979323846f)
+#define ARV2_EXCITATION_SIGN         (-1.0f)
 
 typedef struct
 {
@@ -120,6 +121,10 @@ static inline uint8_t ARV2_Step(ARV2_State *s, float theta_rad,
         if (mode==1U) wave=h1;
         else if (mode==2U) wave=1.15470053838f*(h1+h3/6.0f);
         else wave=1.20713f*h1+0.28101f*h3+0.07389f*h5;
+        /* AR V2's estimator phase is retained for telemetry. Invert only
+         * this waveform so the user-facing phase convention matches the
+         * legacy AR and Parametric V2 controllers. */
+        wave=ARV2_EXCITATION_SIGN*wave;
         s->waveform=wave;
         desired=amplitude_mm*ARV2_Limit(wave,-1.0f,1.0f);
     }

@@ -6,6 +6,9 @@ from pathlib import Path
 FIRMWARE_SOURCE = (
     Path(__file__).resolve().parents[2] / "src" / "main.c"
 ).read_text(encoding="utf-8")
+ARV2_HEADER = (
+    Path(__file__).resolve().parents[2] / "src" / "auto_resonance_v2.h"
+).read_text(encoding="utf-8")
 PLATFORMIO_CONFIG = (
     Path(__file__).resolve().parents[2] / "platformio.ini"
 ).read_text(encoding="utf-8")
@@ -33,6 +36,15 @@ def function_body(name: str) -> str:
 
 
 class FirmwareAutoResonanceV2TrajectoryTests(unittest.TestCase):
+    def test_ar_v2_has_a_local_waveform_polarity_correction(self) -> None:
+        self.assertRegex(ARV2_HEADER, r"#define ARV2_EXCITATION_SIGN\s+\(-1\.0f\)")
+        self.assertIn("wave=ARV2_EXCITATION_SIGN*wave", ARV2_HEADER)
+        self.assertIn("s->measured_phase_rad=alpha", ARV2_HEADER)
+
+    def test_shared_motor_polarity_remains_unchanged(self) -> None:
+        self.assertIn("#define CLOSED_LOOP_COMMAND_SIGN        (-1.0f)", FIRMWARE_SOURCE)
+        self.assertNotIn("ARV2_EXCITATION_SIGN", FIRMWARE_SOURCE)
+
     def test_platformio_enables_float_input_scanning(self) -> None:
         self.assertIn("-Wl,-u,_scanf_float", PLATFORMIO_CONFIG)
 

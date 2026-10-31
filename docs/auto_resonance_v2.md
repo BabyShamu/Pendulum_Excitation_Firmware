@@ -45,6 +45,14 @@ positive and negative displacement must both fit inside the calibrated travel
 after the existing 2 mm safety margin and step quantization are applied.
 The existing actuator output clamp remains **7.5 mm**; a 20 mm configuration
 does not bypass that motor-control safety limit or imply 20 mm physical travel.
+AR V2 applies an internal waveform inversion (`ARV2_EXCITATION_SIGN = -1`)
+before generating its displacement command. This aligns the user-facing phase
+convention with the legacy controllers: entering 22.5 degrees now produces the
+same command as the previous AR V2 implementation with 202.5 degrees. The
+reported `phase_rad` remains the estimated phase including the requested
+offset, while `waveform` and `command_mm` report the corrected excitation.
+`motor_mm` additionally includes the shared motor-coordinate polarity
+conversion.
 No V2 motion starts automatically at boot.
 
 During V2 activity, the CLI rejects other motion commands. The global

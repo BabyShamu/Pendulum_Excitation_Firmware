@@ -14,7 +14,7 @@ STEPS_PER_MM = 40.0
 class ArV2Waveform:
     """Numerical equivalent of ARV2_Step for offline trajectory testing."""
 
-    def __init__(self) -> None:
+    def __init__(self, excitation_sign: float = -1.0) -> None:
         self.dc = 0.0
         self.previous_ac = 0.0
         self.quadrature = 0.0
@@ -22,6 +22,8 @@ class ArV2Waveform:
         self.quadrature_gain = 0.0
         self.initialized = False
         self.command_mm = 0.0
+        self.excitation_sign = excitation_sign
+        self.waveform = 0.0
 
     def step(self, theta_rad: float, amplitude_mm: float, phase: float, mode: int) -> float:
         theta2 = theta_rad * theta_rad
@@ -62,6 +64,8 @@ class ArV2Waveform:
                 wave = 1.15470053838 * (h1 + h3 / 6.0)
             else:
                 wave = 1.20713 * h1 + 0.28101 * h3 + 0.07389 * h5
+            wave = self.excitation_sign * wave
+            self.waveform = wave
             desired = amplitude_mm * max(-1.0, min(1.0, wave))
         slew = 250.0 * 0.005
         self.command_mm += max(-slew, min(slew, desired - self.command_mm))
@@ -174,6 +178,41 @@ class ParametricV2Trajectory:
 
 
 class FirmwareArV2TrajectoryBehaviorTests(unittest.TestCase):
+    def test_corrected_waveform_is_negative_for_all_fourier_modes(self) -> None:
+        for mode in (1, 2, 3):
+            old = ArV2Waveform(excitation_sign=1.0)
+            corrected = ArV2Waveform(excitation_sign=-1.0)
+            samples = [
+                0.3 * math.sin(2.0 * math.pi * index / 37.0)
+                for index in range(120)
+            ]
+            for theta in samples:
+                old.step(theta, 5.0, 0.4, mode)
+                corrected.step(theta, 5.0, 0.4, mode)
+                self.assertAlmostEqual(
+                    corrected.waveform,
+                    -old.waveform,
+                    places=5,
+                )
+
+    def test_corrected_phase_22_5_matches_previous_phase_202_5(self) -> None:
+        corrected = ArV2Waveform(excitation_sign=-1.0)
+        previous = ArV2Waveform(excitation_sign=1.0)
+        samples = [
+            0.3 * math.sin(2.0 * math.pi * index / 37.0)
+            for index in range(120)
+        ]
+        corrected_commands = [
+            corrected.step(theta, 5.0, math.radians(22.5), 1)
+            for theta in samples
+        ]
+        previous_commands = [
+            previous.step(theta, 5.0, math.radians(202.5), 1)
+            for theta in samples
+        ]
+        for actual, expected in zip(corrected_commands, previous_commands):
+            self.assertAlmostEqual(actual, expected, places=5)
+
     def test_sine_f2_and_f3_commands_are_bounded_and_slew_limited(self) -> None:
         for mode in (1, 2, 3):
             controller = ArV2Waveform()
