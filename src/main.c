@@ -5366,6 +5366,7 @@ static void ProcessLine(char *line)
 
     if (g_arv2Running != 0U &&
         strcmp(line,"stop")!=0 && strcmp(line,"ar_v2 stop")!=0 &&
+        strcmp(line,"parametric stop")!=0 &&
         strcmp(line,"status")!=0 && strcmp(line,"diag")!=0 &&
         strcmp(line,"help")!=0 && strncmp(line, "help ", 5U)!=0 &&
         strcmp(line,"angle")!=0 &&
@@ -6038,7 +6039,20 @@ static void ProcessLine(char *line)
                             variant, &amplitude, &phase, &trailing);
         if (parsed == 1 && strcmp(variant, "stop") == 0)
         {
-            (void)StopParametricController(1U);
+            if (g_arv2Running != 0U)
+            {
+                uint8_t wasRunning = g_arv2Running;
+                StopAutoResonanceV2();
+                if (wasRunning != 0U && g_homed != 0U &&
+                    g_closedLoopFault == 0U)
+                {
+                    (void)RequestReturnToZero("experiment_stop");
+                }
+            }
+            else
+            {
+                (void)StopParametricController(1U);
+            }
             UartPrint("parametric stopped\r\n");
             return;
         }

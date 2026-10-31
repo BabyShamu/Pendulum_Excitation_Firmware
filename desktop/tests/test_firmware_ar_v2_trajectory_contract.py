@@ -172,6 +172,28 @@ class FirmwareAutoResonanceV2TrajectoryTests(unittest.TestCase):
         ):
             self.assertIn(required, stop)
 
+    def test_unified_parametric_stop_is_allowed_while_ar_v2_is_active(self) -> None:
+        process_line = function_body("ProcessLine")
+        guard = process_line.split("if (g_arv2Running != 0U", 1)[1].split(
+            'UartPrint("ar_v2 active:', 1
+        )[0]
+        self.assertIn('strcmp(line,"parametric stop")!=0', guard)
+
+        stop = process_line.split(
+            'if (parsed == 1 && strcmp(variant, "stop") == 0)', 1
+        )[1].split(
+            'if (parsed != 3', 1
+        )[0]
+        self.assertIn("StopAutoResonanceV2()", stop)
+        self.assertIn('RequestReturnToZero("experiment_stop")', stop)
+        self.assertIn("g_arv2Running", stop)
+
+    def test_ar_v2_stop_commands_preserve_legacy_and_global_paths(self) -> None:
+        process_line = function_body("ProcessLine")
+        self.assertIn('strcmp(line,"ar_v2 stop")==0', process_line)
+        self.assertIn('strcmp(line, "stop") == 0', process_line)
+        self.assertIn('strcmp(line,"parametric stop")!=0', process_line)
+
     def test_parametric_v2_stop_releases_parametric_owner(self) -> None:
         stop = function_body("StopParametricController")
         self.assertIn("g_tim6TrajectoryOwner == TIM6_TRAJECTORY_OWNER_PARAMETRIC", stop)
