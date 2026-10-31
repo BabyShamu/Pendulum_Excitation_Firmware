@@ -445,14 +445,14 @@ class FirmwareManualMotionContractTests(unittest.TestCase):
         self.assertIn("g_servoLatchCommandedState != SERVO_LATCH_STATE_OPEN", legacy_sine_start)
 
         sine_update = function_body("UpdateSine")
-        self.assertIn("g_positionSteps = 0;", sine_start)
+        self.assertIn("g_parametricV2TargetSteps = g_positionSteps;", sine_start)
+        self.assertIn("TIM6_TRAJECTORY_OWNER_SINE", sine_start)
         self.assertIn("g_sineAmplitudeMm * sinf(phase)", sine_update)
         self.assertIn("lroundf(targetMm * g_stepsPerMm)", sine_update)
-        self.assertIn("while (g_positionSteps != targetSteps)", sine_update)
-        self.assertIn("StepOne(speedHz, 1U, 1U) == 0U", sine_update)
-        self.assertIn("g_stepStopReason == STEP_STOP_REASON_UPPER_LIMIT", sine_update)
-        self.assertIn("g_stepStopReason == STEP_STOP_REASON_LOWER_LIMIT", sine_update)
-        self.assertIn("event: type=sine_motion_stopped reason=%s", sine_update)
+        self.assertIn("g_parametricV2TargetSteps = targetSteps", sine_update)
+        self.assertIn("ClosedLoopActuatorKick()", sine_update)
+        self.assertNotIn("while (g_positionSteps != targetSteps)", sine_update)
+        self.assertNotIn("StepOne(", sine_update)
 
     def test_autores_start_stop_apply_user_values_without_weakening_existing_limits(self) -> None:
         def assert_assigned_before_read(body: str, variable: str) -> None:

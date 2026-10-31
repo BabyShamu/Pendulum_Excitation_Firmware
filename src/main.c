@@ -201,6 +201,13 @@ typedef enum
     RETURN_TO_ZERO_ABORTED = 2U
 } ReturnToZeroState;
 
+typedef enum
+{
+    TIM6_TRAJECTORY_OWNER_NONE = 0U,
+    TIM6_TRAJECTORY_OWNER_SINE = 1U,
+    TIM6_TRAJECTORY_OWNER_PARAMETRIC = 2U
+} Tim6TrajectoryOwner;
+
 typedef struct
 {
     uint32_t sensor_failed_reads;
@@ -403,6 +410,8 @@ static uint32_t g_parametricTestSampleCount = 0U;
 static volatile uint8_t g_parametricClosedLoopRunning = 0U;
 static volatile uint8_t g_phaseTrackedSineRunning = 0U;
 static volatile uint8_t g_arv2Running = 0U;
+static volatile Tim6TrajectoryOwner g_tim6TrajectoryOwner =
+    TIM6_TRAJECTORY_OWNER_NONE;
 static volatile ReturnToZeroState g_returnToZeroState = RETURN_TO_ZERO_IDLE;
 static uint32_t g_returnToZeroStartMs = 0U;
 static uint32_t g_returnToZeroLastProgressMs = 0U;
@@ -512,7 +521,8 @@ void TIM6_DAC_IRQHandler(void)
     if ((TIM6->SR & TIM_SR_UIF) != 0U)
     {
         TIM6->SR = 0U;
-        if (g_parametricV2Enabled != 0U && g_parametricRunning != 0U)
+        if (g_tim6TrajectoryOwner == TIM6_TRAJECTORY_OWNER_SINE ||
+            (g_parametricV2Enabled != 0U && g_parametricRunning != 0U))
         {
             ParametricV2OnTimer();
         }
@@ -1837,18 +1847,32 @@ static void ClosedLoopActuatorStop(void)
 
 static uint8_t ClosedLoopActuatorIsActive(void)
 {
-    return (g_parametricClosedLoopRunning != 0U || g_phaseTrackedSineRunning != 0U || g_arv2Running != 0U ||
+    return (g_tim6TrajectoryOwner != TIM6_TRAJECTORY_OWNER_NONE ||
+            g_parametricClosedLoopRunning != 0U ||
+            g_phaseTrackedSineRunning != 0U || g_arv2Running != 0U ||
             (g_parametricRunning != 0U && g_parametricV2Enabled != 0U)) ? 1U : 0U;
 }
 
 static void ClosedLoopActuatorFault(uint8_t fault)
 {
+    if (g_tim6TrajectoryOwner == TIM6_TRAJECTORY_OWNER_SINE)
+    {
+        const char *reason = (fault == 1U) ? "upper_limit" :
+                             (fault == 2U) ? "lower_limit" : "actuator_fault";
+        char message[96];
+        snprintf(message, sizeof(message),
+                 "event: type=sine_motion_stopped reason=%s\r\n", reason);
+        UartPrint(message);
+        snprintf(message, sizeof(message), "sine stopped: %s\r\n", reason);
+        UartPrint(message);
+    }
     if (g_returnToZeroState == RETURN_TO_ZERO_MOVING)
     {
         AbortReturnToZero((fault == 1U) ? "upper_limit" :
                           (fault == 2U) ? "lower_limit" : "actuator_fault");
     }
     g_arv2Running=0U;
+    g_tim6TrajectoryOwner = TIM6_TRAJECTORY_OWNER_NONE;
     g_parametricRunning = 0U;
     g_parametricV2Enabled = 0U;
     g_parametricV2SpeedHz = 0.0f;
@@ -1878,7 +1902,8 @@ static void ParametricV2OnTimer(void)
     float accelIncrement;
     uint32_t periodUs;
 
-    if (g_parametricRunning == 0U || g_parametricV2Enabled == 0U ||
+    if ((g_tim6TrajectoryOwner != TIM6_TRAJECTORY_OWNER_SINE &&
+         (g_parametricRunning == 0U || g_parametricV2Enabled == 0U)) ||
         g_closedLoopFault != 0U ||
         (g_pendulumAngleSafetyAvailable == 0U &&
          SensorWaitingHasPendingTarget() == 0U))
@@ -2645,6 +2670,7 @@ static void AbortReturnToZero(const char *reason)
     }
     g_returnToZeroAbortReason = reason;
     g_returnToZeroState = RETURN_TO_ZERO_ABORTED;
+    g_tim6TrajectoryOwner = TIM6_TRAJECTORY_OWNER_NONE;
     g_parametricRunning = 0U;
     g_parametricV2Enabled = 0U;
     g_parametricV2SpeedHz = 0.0f;
@@ -2680,6 +2706,7 @@ static uint8_t RequestReturnToZero(const char *reason)
     ClosedLoopActuatorStop();
     g_parametricV2TargetSteps = 0;
     g_parametricV2SpeedHz = 0.0f;
+    g_tim6TrajectoryOwner = TIM6_TRAJECTORY_OWNER_PARAMETRIC;
     g_parametricV2Enabled = 1U;
     g_parametricRunning = 1U;
     g_returnToZeroStartMs = HAL_GetTick();
@@ -2768,47 +2795,27 @@ static void UpdateSine(void)
     float phase = 2.0f * PI_F * g_sineFrequencyHz * elapsedSeconds;
     float targetMm = g_sineAmplitudeMm * sinf(phase);
     int32_t targetSteps = (int32_t)lroundf(targetMm * g_stepsPerMm);
+    int32_t maxCommandSteps = (int32_t)lroundf(
+        (float)g_travelSteps / 2.0f -
+        CLOSED_LOOP_TRAVEL_MARGIN_MM * g_stepsPerMm);
 
-    while (g_positionSteps != targetSteps)
+    if (maxCommandSteps <= 0)
     {
-        uint8_t direction = (targetSteps > g_positionSteps) ? 0U : 1U;
-        float amplitudeSteps = g_sineAmplitudeMm * g_stepsPerMm;
-        uint32_t speedHz = (uint32_t)(2.0f * PI_F * g_sineFrequencyHz *
-                                      amplitudeSteps) + 20U;
-
-        if (speedHz < JOG_SPEED_HZ)
-        {
-            speedHz = JOG_SPEED_HZ;
-        }
-        if (speedHz > 8000U)
-        {
-            speedHz = 8000U;
-        }
-
-        if (g_dir != direction)
-        {
-            SetDirection(direction);
-        }
-        if (StepOne(speedHz, 1U, 1U) == 0U)
-        {
-            g_sineRunning = 0U;
-            g_run = 0U;
-            if (g_stepStopReason == STEP_STOP_REASON_UPPER_LIMIT ||
-                g_stepStopReason == STEP_STOP_REASON_LOWER_LIMIT)
-            {
-                char message[96];
-                const char *reason = StepStopReasonName(g_stepStopReason);
-                snprintf(message, sizeof(message),
-                         "event: type=sine_motion_stopped reason=%s\r\n", reason);
-                UartPrint(message);
-                snprintf(message, sizeof(message), "sine stopped: %s\r\n", reason);
-                UartPrint(message);
-            }
-            return;
-        }
-
-        g_positionSteps += (direction == 0U) ? 1 : -1;
+        g_sineRunning = 0U;
+        g_tim6TrajectoryOwner = TIM6_TRAJECTORY_OWNER_NONE;
+        ClosedLoopActuatorStop();
+        return;
     }
+    if (targetSteps > maxCommandSteps)
+    {
+        targetSteps = maxCommandSteps;
+    }
+    else if (targetSteps < -maxCommandSteps)
+    {
+        targetSteps = -maxCommandSteps;
+    }
+    g_parametricV2TargetSteps = targetSteps;
+    ClosedLoopActuatorKick();
 }
 
 static void UpdateParametric(void)
@@ -4562,7 +4569,9 @@ static uint8_t ProcessMaintenanceCommand(char *arguments)
             g_sineAmplitudeMm = amplitudeMm;
             g_sineFrequencyHz = frequencyHz;
             g_parametricTestRunning = 0U;
-            g_positionSteps = 0;
+            g_parametricV2TargetSteps = g_positionSteps;
+            g_parametricV2SpeedHz = 0.0f;
+            g_tim6TrajectoryOwner = TIM6_TRAJECTORY_OWNER_SINE;
             g_sineStartMs = HAL_GetTick();
             g_sineRunning = 1U;
             g_parametricRunning = 0U;
@@ -4581,6 +4590,7 @@ static uint8_t ProcessMaintenanceCommand(char *arguments)
     {
         uint8_t wasRunning = g_sineRunning;
         g_sineRunning = 0U;
+        g_tim6TrajectoryOwner = TIM6_TRAJECTORY_OWNER_NONE;
         g_run = 0U;
         if (wasRunning != 0U && g_homed != 0U && g_closedLoopFault == 0U)
         {
@@ -5754,6 +5764,7 @@ static void ProcessLine(char *line)
             g_phaseTrackedSineRunning = 0U;
             ClosedLoopActuatorStop();
             g_sineRunning = 0U;
+            g_tim6TrajectoryOwner = TIM6_TRAJECTORY_OWNER_NONE;
             g_run = 0U;
             if (g_homed != 0U && g_closedLoopFault == 0U)
             {
@@ -5812,7 +5823,9 @@ static void ProcessLine(char *line)
         g_phaseTrackedSineRunning = 0U;
         ClosedLoopActuatorStop();
         g_parametricTestRunning = 0U;
-        g_positionSteps = 0;
+        g_parametricV2TargetSteps = g_positionSteps;
+        g_parametricV2SpeedHz = 0.0f;
+        g_tim6TrajectoryOwner = TIM6_TRAJECTORY_OWNER_SINE;
         g_sineStartMs = HAL_GetTick();
         g_sineRunning = 1U;
         g_parametricRunning = 0U;

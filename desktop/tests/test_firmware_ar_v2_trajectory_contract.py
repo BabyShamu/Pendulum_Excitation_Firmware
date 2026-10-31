@@ -82,6 +82,63 @@ class FirmwareAutoResonanceV2TrajectoryTests(unittest.TestCase):
         self.assertIn("g_parametricRunning=1U", start)
         self.assertIn("g_parametricV2TargetSteps=g_positionSteps", start)
 
+    def test_ar_v2_start_resets_estimator_and_preserves_sample_deadline(self) -> None:
+        start = FIRMWARE_SOURCE.split(
+            'if (strncmp(line,"ar_v2 start ",12U)==0', 1
+        )[1].split('UartPrint("ar_v2 started', 1)[0]
+        update = function_body("UpdateAutoResonanceV2")
+        for required in (
+            "ARV2_Reset(&g_arv2)",
+            "g_arv2ReadFailures=0U",
+            "g_arv2Samples=0U",
+            "g_arv2Start=HAL_GetTick()",
+            "g_arv2Next=g_arv2Start+PARAMETRIC_TEST_PERIOD_MS",
+        ):
+            self.assertIn(required, start)
+        for required in (
+            "if ((int32_t)(now-g_arv2Next)<0) return;",
+            "g_arv2Next+=PARAMETRIC_TEST_PERIOD_MS",
+            "AS5600_ReadAngle(&raw)",
+            "ARV2_Step(&g_arv2",
+        ):
+            self.assertIn(required, update)
+        self.assertRegex(FIRMWARE_SOURCE, r"#define PARAMETRIC_TEST_PERIOD_MS\s+5U")
+
+    def test_healthy_sensor_path_does_not_wait_or_inhibit_tim6(self) -> None:
+        timer = function_body("ParametricV2OnTimer")
+        self.assertIn("g_closedLoopFault != 0U", timer)
+        self.assertIn("g_pendulumAngleSafetyAvailable == 0U", timer)
+        self.assertIn("SensorWaitingHasPendingTarget() == 0U", timer)
+        waiting = function_body("SensorWaitingHasPendingTarget")
+        self.assertIn("g_controllerWaitingForSensor == 0U", waiting)
+
+    def test_sine_has_exclusive_tim6_ownership_without_parametric_flags(self) -> None:
+        timer = function_body("ParametricV2OnTimer")
+        active = function_body("ClosedLoopActuatorIsActive")
+        update = function_body("UpdateSine")
+        irq = FIRMWARE_SOURCE.split("void TIM6_DAC_IRQHandler(void)", 1)[1].split(
+            "void TIM7_DAC_IRQHandler", 1
+        )[0]
+        self.assertIn("TIM6_TRAJECTORY_OWNER_SINE", irq)
+        self.assertIn("TIM6_TRAJECTORY_OWNER_SINE", timer)
+        self.assertIn("TIM6_TRAJECTORY_OWNER_NONE", active)
+        self.assertIn("g_parametricV2TargetSteps = targetSteps", update)
+        self.assertIn("ClosedLoopActuatorKick()", update)
+        self.assertNotIn("StepOne(", update)
+
+    def test_sine_stop_releases_tim6_before_return_to_zero(self) -> None:
+        process_line = function_body("ProcessLine")
+        stop = process_line.split('if (strncmp(line, "sine", 4) == 0', 1)[1]
+        stop = stop.split("// TEMPORARY UART/PARSER DEBUG", 1)[0]
+        self.assertIn("g_tim6TrajectoryOwner = TIM6_TRAJECTORY_OWNER_NONE", stop)
+        self.assertIn("ClosedLoopActuatorStop()", stop)
+        self.assertIn("ReturnToCenter()", stop)
+
+    def test_ar_v2_modes_are_distinct_fourier_waveforms(self) -> None:
+        self.assertIn("if (mode==1U) wave=h1", ARV2_HEADER)
+        self.assertIn("else if (mode==2U)", ARV2_HEADER)
+        self.assertIn("else wave=1.20713f*h1+0.28101f*h3+0.07389f*h5", ARV2_HEADER)
+
     def test_ar_v2_stop_clears_trajectory_state_and_timer(self) -> None:
         stop = function_body("StopAutoResonanceV2")
         for required in (
