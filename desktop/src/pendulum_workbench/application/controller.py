@@ -22,6 +22,7 @@ from pendulum_workbench.infrastructure.serial_client import (
     TelemetrySequenceGap,
 )
 from pendulum_workbench.infrastructure.firmware_protocol import DeviceEvent
+from pendulum_workbench.infrastructure.runtime_diagnostics import RuntimeDiagnostics
 from pendulum_workbench.experiments.repository import ExperimentRepository, LoadedExperiment
 
 
@@ -37,9 +38,12 @@ class WorkbenchController(QObject):
         experiment_repository: ExperimentRepository | None = None,
     ) -> None:
         super().__init__()
+        self.runtime_diagnostics = RuntimeDiagnostics(self)
         self.state = state or ApplicationStateModel()
         self.mock_source = mock_source or MockTelemetrySource()
-        self.serial_client = serial_client or SerialTelemetryClient()
+        self.serial_client = serial_client or SerialTelemetryClient(
+            diagnostics=self.runtime_diagnostics
+        )
         self.experiment_recorder = ExperimentRecordingService(
             self.state,
             self.serial_client,
@@ -56,6 +60,7 @@ class WorkbenchController(QObject):
             self.experiment_recorder,
             self.firmware_commands,
             self.maintenance,
+            self.runtime_diagnostics,
         )
         self._loaded_experiment: LoadedExperiment | None = None
         self._disconnect_requested = False
@@ -213,6 +218,7 @@ class WorkbenchController(QObject):
         self.stop_mock()
         self.experiment_recorder.shutdown()
         self.serial_client.shutdown()
+        self.runtime_diagnostics.close()
 
     def open_experiment(self, source: Path | str) -> LoadedExperiment:
         if self.experiment_recorder.is_recording:

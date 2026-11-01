@@ -13,6 +13,7 @@ from serial.tools import list_ports
 
 from pendulum_workbench.domain.models import HardwareStatus, TelemetrySample
 from pendulum_workbench.infrastructure.raw_capture import RawSerialCapture, default_capture_root
+from pendulum_workbench.infrastructure.runtime_diagnostics import RuntimeDiagnostics
 from pendulum_workbench.infrastructure.telemetry_parser import (
     ParsedLineKind,
     TelemetryParser,
@@ -27,6 +28,7 @@ SERIAL_BAUD_RATE = 115200
 SERIAL_READ_TIMEOUT_S = 0.02
 SERIAL_STARTUP_DELAY_S = 2.0
 TELEMETRY_STALE_AFTER_S = 1.5
+SERIAL_DISPATCH_BATCH_SIZE = 64
 _LOGGER = logging.getLogger(__name__)
 
 
@@ -105,6 +107,7 @@ class SerialWorker(QThread):
     connection_failed = Signal(str)
     connection_closed = Signal(str)
     line_received = Signal(object)
+    lines_received = Signal(object)
     command_written = Signal(str)
 
     def __init__(
@@ -252,6 +255,7 @@ class SerialWorker(QThread):
         capture: RawSerialCapture,
         session_start: float,
     ) -> None:
+        received_lines: list[ReceivedSerialLine] = []
         for line in lines:
             received_at = datetime.now(timezone.utc)
             received_elapsed_s = time.monotonic() - session_start
@@ -272,15 +276,19 @@ class SerialWorker(QThread):
                     if len(self._maintenance_response_receipts) > 32:
                         oldest_id = next(iter(self._maintenance_response_receipts))
                         self._maintenance_response_receipts.pop(oldest_id, None)
-            self.line_received.emit(
-                ReceivedSerialLine(
-                    payload=line.payload,
-                    received_at=received_at,
-                    received_elapsed_s=received_elapsed_s,
-                    rx_line_index=rx_line_index,
-                    terminator=line.terminator,
-                    partial=line.partial,
-                )
+            received_line = ReceivedSerialLine(
+                payload=line.payload,
+                received_at=received_at,
+                received_elapsed_s=received_elapsed_s,
+                rx_line_index=rx_line_index,
+                terminator=line.terminator,
+                partial=line.partial,
+            )
+            received_lines.append(received_line)
+            self.line_received.emit(received_line)
+        for offset in range(0, len(received_lines), SERIAL_DISPATCH_BATCH_SIZE):
+            self.lines_received.emit(
+                received_lines[offset:offset + SERIAL_DISPATCH_BATCH_SIZE]
             )
 
 
@@ -307,6 +315,7 @@ class SerialTelemetryClient(QObject):
         serial_factory: Callable[..., object] | None = None,
         stale_after_s: float = TELEMETRY_STALE_AFTER_S,
         startup_delay_s: float = SERIAL_STARTUP_DELAY_S,
+        diagnostics: RuntimeDiagnostics | None = None,
     ) -> None:
         super().__init__()
         if stale_after_s <= 0:
@@ -317,6 +326,7 @@ class SerialTelemetryClient(QObject):
         self._serial_factory = serial_factory
         self._stale_after_s = stale_after_s
         self._startup_delay_s = startup_delay_s
+        self._diagnostics = diagnostics
         self._parser = TelemetryParser()
         self._worker: SerialWorker | None = None
         self._sample_index = 0
@@ -361,7 +371,7 @@ class SerialTelemetryClient(QObject):
         worker.connection_opened.connect(self._on_connection_opened)
         worker.connection_failed.connect(self.connection_failed)
         worker.connection_closed.connect(self._on_connection_closed)
-        worker.line_received.connect(self._on_line_received)
+        worker.lines_received.connect(self._on_lines_received)
         worker.command_written.connect(self.command_written)
         self._worker = worker
         worker.start()
@@ -496,6 +506,17 @@ class SerialTelemetryClient(QObject):
             self.malformed_line_received.emit(result.message)
         elif result.message:
             self.device_message_received.emit(result.message)
+
+    def _on_lines_received(self, received_lines: list[ReceivedSerialLine]) -> None:
+        started = time.monotonic()
+        for received_line in received_lines:
+            self._on_line_received(received_line)
+        if self._diagnostics is not None:
+            self._diagnostics.record(
+                "serial_batch",
+                line_count=len(received_lines),
+                duration_ms=(time.monotonic() - started) * 1000.0,
+            )
 
     def _check_telemetry_freshness(self) -> None:
         anchor = self._last_valid_monotonic or self._connected_monotonic

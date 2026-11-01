@@ -50,6 +50,7 @@ from pendulum_workbench.domain.models import (
     RecordingState,
 )
 from pendulum_workbench.infrastructure.serial_client import TELEMETRY_STALE_AFTER_S
+from pendulum_workbench.infrastructure.runtime_diagnostics import RuntimeDiagnostics
 
 
 FIRMWARE_MAX_SINE_FREQUENCY_HZ = 10.0
@@ -68,12 +69,14 @@ class ExperimentRunService(QObject):
         recorder: ExperimentRecordingService,
         commands: FirmwareCommandService,
         maintenance: MaintenanceService,
+        diagnostics: RuntimeDiagnostics | None = None,
     ) -> None:
         super().__init__()
         self.state = state
         self.recorder = recorder
         self.commands = commands
         self.maintenance = maintenance
+        self._diagnostics = diagnostics
         self._snapshot = ExperimentRunSnapshot()
         self._phase = ""
         self._experiment_id: str | None = None
@@ -250,7 +253,6 @@ class ExperimentRunService(QObject):
                 )
             else:
                 self._issue_sine_stop()
-
     def _validate_start_conditions(self, definition: ExperimentDefinition) -> None:
         snapshot = self.state.snapshot
         maintenance = self.maintenance.snapshot
@@ -457,6 +459,16 @@ class ExperimentRunService(QObject):
                     self._sine_started_monotonic = time.monotonic()
                     self._phase = "running"
                     self._timer.start()
+                    if self._diagnostics is not None:
+                        self._diagnostics.record(
+                            "experiment_started",
+                            experiment_id=self._experiment_id,
+                            experiment_start_time_monotonic=self._sine_started_monotonic,
+                            requested_excitation_duration_s=self._definition.duration_s,
+                            expected_stop_time_monotonic=(
+                                self._sine_started_monotonic + self._definition.duration_s
+                            ),
+                        )
                     self._set_snapshot(
                         state=ExperimentRunState.RUNNING,
                         started_at=datetime.now().astimezone().isoformat(),
@@ -505,6 +517,17 @@ class ExperimentRunService(QObject):
                 self._sine_started_monotonic = time.monotonic()
                 self._phase = "running"
                 self._timer.start()
+                if self._diagnostics is not None:
+                    definition = self._require_definition()
+                    self._diagnostics.record(
+                        "experiment_started",
+                        experiment_id=self._experiment_id,
+                        experiment_start_time_monotonic=self._sine_started_monotonic,
+                        requested_excitation_duration_s=definition.duration_s,
+                        expected_stop_time_monotonic=(
+                            self._sine_started_monotonic + definition.duration_s
+                        ),
+                    )
                 self._set_snapshot(
                     state=ExperimentRunState.RUNNING,
                     started_at=datetime.now().astimezone().isoformat(),
@@ -520,6 +543,15 @@ class ExperimentRunService(QObject):
             FirmwareCommand.PHASE_TRACKED_SINE_STOP,
         )
         if stop_command:
+            if self._diagnostics is not None:
+                self._diagnostics.record(
+                    "stop_acknowledged",
+                    experiment_id=self._experiment_id,
+                    request_id=response.request_id,
+                    stop_acknowledgment_time_monotonic=time.monotonic(),
+                    mode=response.fields.get("mode"),
+                    active=response.fields.get("active"),
+                )
             expects_inactive_mode = command in (
                 FirmwareCommand.PARAMETRIC_STOP,
                 FirmwareCommand.AUTO_RESONANCE_STOP,
@@ -605,6 +637,12 @@ class ExperimentRunService(QObject):
             )
             return
         self._phase = "sine_stop"
+        if self._diagnostics is not None:
+            self._diagnostics.record(
+                "stop_command_dispatch",
+                experiment_id=self._experiment_id,
+                actual_stop_command_time_monotonic=time.monotonic(),
+            )
         try:
             definition = self._require_definition()
             if isinstance(definition, (AutoResonanceDefinition, UnifiedParametricDefinition)):
@@ -705,6 +743,12 @@ class ExperimentRunService(QObject):
             )
             return
         self._phase = "post_stop_observation"
+        if self._diagnostics is not None:
+            self._diagnostics.record(
+                "free_swing_started",
+                experiment_id=self._experiment_id,
+                free_swing_start_time_monotonic=time.monotonic(),
+            )
         self.state.report_event(
             EventSeverity.INFO,
             "Excitation stopped; recording 5 additional seconds of free swing.",
@@ -743,6 +787,13 @@ class ExperimentRunService(QObject):
     def _on_recording_finished(self, experiment_id: str, status: str) -> None:
         if experiment_id != self._experiment_id:
             return
+        if self._diagnostics is not None:
+            self._diagnostics.record(
+                "recording_finalized",
+                experiment_id=experiment_id,
+                status=status,
+                recording_finalization_time_monotonic=time.monotonic(),
+            )
         if status == "INTERRUPTED" and self._pending_final_state == ExperimentRunState.COMPLETE:
             self._pending_final_state = ExperimentRunState.INTERRUPTED
             if not self._pending_completion_reason:
@@ -873,6 +924,12 @@ class ExperimentRunService(QObject):
                 )
             else:
                 self._issue_sine_stop()
+            if self._diagnostics is not None:
+                self._diagnostics.record(
+                    "experiment_timer_callback",
+                    experiment_id=self._experiment_id,
+                    duration_ms=(time.monotonic() - timer_started) * 1000.0,
+                )
             return
         if self._phase in ("sine_start", "parametric_start", "phase_sine_start"):
             self._stop_requested = True
@@ -975,6 +1032,7 @@ class ExperimentRunService(QObject):
             self._begin_recording_finalization(final_state, reason)
 
     def _on_timer(self) -> None:
+        timer_started = time.monotonic()
         if self._snapshot.state != ExperimentRunState.RUNNING or self._sine_started_monotonic is None:
             return
         elapsed = max(0.0, time.monotonic() - self._sine_started_monotonic)
