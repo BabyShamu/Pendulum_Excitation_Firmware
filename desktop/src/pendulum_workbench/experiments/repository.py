@@ -277,11 +277,17 @@ class ExperimentRepository:
         if isinstance(experiment_details, dict):
             experiment_details["maximum_angle_deg"] = manifest["maximum_angle_deg"]
             experiment_details["max_angle_valid"] = manifest["max_angle_valid"]
+        target_details = manifest.get("experiment")
+        completion_reason = (
+            target_details.get("completion_reason")
+            if isinstance(target_details, dict)
+            else None
+        )
         if peak_angle is None:
             manifest["outcome"] = "INVALID"
         elif abs(peak_angle) >= 90.0:
             manifest["outcome"] = "SUCCESS"
-        elif completion_status == "OPERATOR_STOPPED":
+        elif interruption_reason == "operator_stop" or completion_reason == "operator_stop":
             manifest["outcome"] = "STOPPED"
         elif completion_status in ("FAULT", "INTERRUPTED"):
             manifest["outcome"] = "FAILED"
@@ -291,7 +297,6 @@ class ExperimentRepository:
             experiment_details["outcome"] = manifest["outcome"]
         # This is a whole-recording peak, not yet a post-stop-only peak.
 
-        target_details = manifest.get("experiment")
         _LOGGER.info(
             "Finalizing experiment manifest before write: experiment_id=%s "
             "maximum_angle=%s outcome=%s completion_reason=%s "

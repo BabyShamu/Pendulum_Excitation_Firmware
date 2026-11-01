@@ -520,7 +520,7 @@ class ExperimentRunService(QObject):
             FirmwareCommand.PHASE_TRACKED_SINE_STOP,
         )
         if stop_command:
-            expects_idle_mode = command in (
+            expects_inactive_mode = command in (
                 FirmwareCommand.PARAMETRIC_STOP,
                 FirmwareCommand.AUTO_RESONANCE_STOP,
                 FirmwareCommand.PHASE_TRACKED_SINE_STOP,
@@ -533,7 +533,7 @@ class ExperimentRunService(QObject):
             if command == FirmwareCommand.PARAMETRIC_STOP:
                 accepted_inactive_modes.add("parametric")
             if response.fields.get("active") != "0" or (
-                expects_idle_mode and reported_mode not in accepted_inactive_modes
+                expects_inactive_mode and reported_mode not in accepted_inactive_modes
             ):
                 if self._pending_completion_reason != PENDULUM_ANGLE_LIMIT_COMPLETION_REASON:
                     self._pending_final_state = ExperimentRunState.FAULT

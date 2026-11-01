@@ -17,6 +17,7 @@ from pendulum_workbench.domain.experiment_run import (
     ExperimentMode,
     ExperimentRunState,
     PhaseTrackedSineDefinition,
+    UnifiedParametricDefinition,
     VerticalSineDefinition,
 )
 from pendulum_workbench.domain.maintenance import BitResultState, PendulumLatchState, ReadinessState
@@ -240,6 +241,15 @@ class SineExperimentSerial:
                         f"{'mode=' + response_mode if self.unified_parametric_stop_response else 'active_mode=' + response_mode} "
                         "active=0\r\n"
                     )
+                    if self.unified_parametric_stop_response:
+                        self._enqueue(
+                            "event: type=return_to_zero_started reason=experiment_stop "
+                            "position_steps=-283\r\n"
+                        )
+                        self._enqueue(
+                            "event: type=return_to_zero_completed position_steps=0 "
+                            "duration_ms=135\r\n"
+                        )
                 if command == "parametric_stop":
                     self._enqueue("event: type=limit_state_changed upper=0 lower=0\r\n")
             elif command == "phase_sine_start":
@@ -708,6 +718,64 @@ class ExperimentRunTests(unittest.TestCase):
         self.assertAlmostEqual(run.snapshot.max_angle_deg, 51.15)
         self.assertEqual(run._pending_completion_reason, "")
         self.assertEqual(device.protocol_actions.count("parametric_stop"), 0)
+
+    def test_ar2_unified_stop_mode_is_confirmed_and_recorded_peak_is_authoritative(self) -> None:
+        directory = self.temporary_directory()
+        controller, device, repository = self.create_connected_controller(
+            directory,
+            unified_parametric_stop_response=True,
+        )
+        self.addCleanup(controller.shutdown)
+        events = []
+        controller.state.event_added.connect(events.append)
+        self.prepare_ready_held_system(controller, device)
+
+        experiment_id = controller.experiment_run.start(
+            UnifiedParametricDefinition(7.5, 22.5, 20.0, "ar2")
+        )
+        self.assertTrue(
+            self.wait_for(
+                lambda: controller.experiment_run.snapshot.state == ExperimentRunState.RUNNING
+            )
+        )
+        run = controller.experiment_run
+        controller.state.publish_sample(TelemetrySample(100, 1.0, 58.10, 0.0, "real"))
+        controller.state.publish_sample(TelemetrySample(101, 1.1, 59.68, 0.0, "real"))
+
+        controller.experiment_run.stop()
+        self.assertTrue(
+            self.wait_for(
+                lambda: controller.experiment_run.snapshot.state
+                in (ExperimentRunState.COMPLETE, ExperimentRunState.OPERATOR_STOPPED)
+            )
+        )
+        self.assertTrue(
+            self.wait_for(
+                lambda: not controller.experiment_run.is_active
+                and controller.state.snapshot.recording == RecordingState.INTERRUPTED
+            ),
+        )
+
+        completed_session = controller.experiment_recorder.last_completed_session
+        self.assertIsNotNone(completed_session)
+        manifest = repository.load(completed_session.directory).manifest
+        self.assertEqual(manifest["experiment"]["controller_variant"], "ar2")
+        self.assertEqual(manifest["experiment"]["completion_reason"], "operator_stop")
+        self.assertEqual(manifest["experiment"]["maximum_angle_deg"], 59.68)
+        self.assertEqual(manifest["maximum_angle_deg"], 59.68)
+        self.assertEqual(manifest["outcome"], "STOPPED")
+        self.assertEqual(manifest["experiment"]["outcome"], "STOPPED")
+        self.assertEqual(controller.experiment_run.snapshot.max_angle_deg, 59.68)
+        self.assertTrue(
+            any("return_to_zero_started" in event.message for event in events)
+        )
+        self.assertTrue(
+            any("return_to_zero_completed" in event.message for event in events)
+        )
+        self.assertNotEqual(
+            manifest["experiment"]["completion_reason"],
+            "controller_stop_unconfirmed",
+        )
 
 
     def test_phase_tracked_sine_uses_its_own_correlated_lifecycle_and_metadata(self) -> None:
