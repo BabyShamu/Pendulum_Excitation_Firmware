@@ -261,6 +261,41 @@ class FirmwareAutoResonanceV2TrajectoryTests(unittest.TestCase):
         self.assertIn('if (strcmp(line, "accel") == 0)', function_body("ProcessLine"))
         self.assertIn('if (strncmp(line, "accel ", 6) == 0)', function_body("ProcessLine"))
 
+    def test_trajectory_speed_keeps_baseline_default_and_bounded_experimental_limit(self) -> None:
+        process_line = function_body("ProcessLine")
+        trajectory = function_body("ParametricV2OnTimer")
+        self.assertRegex(FIRMWARE_SOURCE, r"#define PARAMETRIC_V2_MAX_HZ\s+4000\.0f")
+        self.assertRegex(FIRMWARE_SOURCE, r"#define PARAMETRIC_V2_MAX_HZ_LIMIT\s+5000\.0f")
+        self.assertIn('strcmp(line, "trajectory_speed") == 0', process_line)
+        self.assertIn('strncmp(line, "trajectory_speed ", 17) == 0', process_line)
+        self.assertIn("value < PARAMETRIC_V2_START_HZ", process_line)
+        self.assertIn("value > PARAMETRIC_V2_MAX_HZ_LIMIT", process_line)
+        self.assertIn("value > (float)CLOSED_LOOP_MAX_STEP_HZ", process_line)
+        self.assertIn("g_parametricV2MaxHz = value", process_line)
+        self.assertIn("fminf(g_parametricV2MaxHz, brakingHz)", trajectory)
+
+    def test_trajectory_timer_configuration_supports_five_thousand_steps_per_second(self) -> None:
+        timer = function_body("ClosedLoopStepTimerInit")
+        trajectory = function_body("ParametricV2OnTimer")
+        self.assertIn("TIM6->PSC = (timerClockHz / 1000000U) - 1U", timer)
+        self.assertIn("#define CLOSED_LOOP_STEP_PULSE_US        5U", FIRMWARE_SOURCE)
+        self.assertIn("#define CLOSED_LOOP_DIR_SETUP_US         10U", FIRMWARE_SOURCE)
+        self.assertIn("#define CLOSED_LOOP_MAX_STEP_HZ          6000U", FIRMWARE_SOURCE)
+        self.assertIn("periodUs - CLOSED_LOOP_STEP_PULSE_US", trajectory)
+
+    def test_diagnostics_report_configured_trajectory_limits_in_steps_and_mm(self) -> None:
+        diagnostics = function_body("PrintDiagnostics")
+        for field in (
+            "trajectory_max_speed_steps_s",
+            "trajectory_max_speed_mm_s",
+            "trajectory_acceleration_steps_s2",
+            "trajectory_acceleration_mm_s2",
+            "trajectory_start_speed_steps_s",
+            "trajectory_start_speed_mm_s",
+        ):
+            self.assertIn(field, diagnostics)
+        self.assertIn("g_parametricV2MaxHz / g_stepsPerMm", diagnostics)
+
     def test_status_and_diagnostics_report_tim6_ownership(self) -> None:
         self.assertIn("trajectory_owner=%s", function_body("PrintStatus"))
         self.assertIn("return_zero_state=%u", function_body("PrintStatus"))

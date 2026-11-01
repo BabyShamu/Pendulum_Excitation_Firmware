@@ -110,7 +110,7 @@ class FirmwareManualMotionContractTests(unittest.TestCase):
         self.assertIn("g_lastLiveMs = now;", telemetry)
         self.assertEqual(telemetry.count("sampleIndex = ++g_liveSampleIndex;"), 1)
         self.assertNotIn("g_manualMotionDirection", telemetry)
-        self.assertIn("UartPrint(msg);", telemetry)
+        self.assertIn("UartTryEnqueue(msg, strlen(msg))", telemetry)
 
     def test_uart_tx_ring_enqueues_complete_messages_and_reports_drops(self) -> None:
         enqueue = function_body("UartTryEnqueue")

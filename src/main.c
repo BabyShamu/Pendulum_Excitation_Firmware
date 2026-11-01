@@ -66,6 +66,7 @@
 #define PARAMETRIC_SPEED_HZ 4000U
 /* Experimental timer-driven stepper: validate on bench before physical use. */
 #define PARAMETRIC_V2_MAX_HZ 4000.0f
+#define PARAMETRIC_V2_MAX_HZ_LIMIT 5000.0f
 #define PARAMETRIC_V2_START_HZ 150.0f
 #define PARAMETRIC_V2_ACCEL_DEFAULT_HZ_S 100000.0f
 #define PARAMETRIC_V2_ACCEL_MIN_HZ_S 6000.0f
@@ -380,6 +381,7 @@ static uint8_t g_parametricRunning = 0U;
 static volatile uint8_t g_parametricV2Enabled = 0U;
 static volatile int32_t g_parametricV2TargetSteps = 0;
 static volatile float g_parametricV2SpeedHz = 0.0f;
+static volatile float g_parametricV2MaxHz = PARAMETRIC_V2_MAX_HZ;
 static float g_parametricV2AccelHzS = PARAMETRIC_V2_ACCEL_DEFAULT_HZ_S;
 static uint32_t g_parametricV2TraceCount = 0U;
 static uint8_t g_v2TestRunning = 0U;
@@ -1956,7 +1958,7 @@ static void ParametricV2OnTimer(void)
      * This is a per-step trapezoidal profile, not a jerk-limited S-curve.
      */
     brakingHz = sqrtf(2.0f * g_parametricV2AccelHzS * (float)labs((long)error));
-    demandedHz = fminf(PARAMETRIC_V2_MAX_HZ, brakingHz);
+    demandedHz = fminf(g_parametricV2MaxHz, brakingHz);
     accelIncrement = g_parametricV2AccelHzS / g_parametricV2SpeedHz;
     if (g_parametricV2SpeedHz < demandedHz)
     {
@@ -3980,7 +3982,7 @@ static void PrintHelp(void)
     UartPrint("  diag [param start|param stop|trajectory <amp> <freq> <duration>]\r\n");
     UartPrint("  param_trace 0|1 | ar_trace 0|10|20|...|50\r\n");
     UartPrint("MOTION AND CONFIGURATION:\r\n");
-    UartPrint("  home | go_zero | scale <steps/mm> | accel [steps/s2]\r\n");
+    UartPrint("  home | go_zero | scale <steps/mm> | accel [steps/s2] | trajectory_speed [steps/s]\r\n");
     UartPrint("SENSORS AND SAFETY:\r\n");
     UartPrint("  angle | zero | switches | stop\r\n");
     UartPrint("  help <controllers|diagnostics|motion|configuration|sensors|latch|telemetry|maintenance|safety>\r\n");
@@ -4016,8 +4018,9 @@ static void PrintHelpCategory(const char *category)
     if (strcmp(category, "motion") == 0 || strcmp(category, "configuration") == 0)
     {
         UartPrint("MOTION AND CONFIGURATION\r\n");
-        UartPrint("home | go_zero | scale <steps/mm> | accel [steps/s2]\r\n");
+        UartPrint("home | go_zero | scale <steps/mm> | accel [steps/s2] | trajectory_speed [steps/s]\r\n");
         UartPrint("accel accepts 6000..1000000 steps/s2 and only changes while idle.\r\n");
+        UartPrint("trajectory_speed accepts 150..5000 steps/s and only changes while idle.\r\n");
         return;
     }
     if (strcmp(category, "sensors") == 0)
@@ -4075,7 +4078,7 @@ static void PrintStatus(void)
 
 static void PrintDiagnostics(void)
 {
-    char timerMsg[300];
+    char timerMsg[520];
     char as5600Msg[640];
     char telemetryMsg[240];
     AS5600LineState lines;
@@ -4083,7 +4086,14 @@ static void PrintDiagnostics(void)
     snprintf(
         timerMsg,
         sizeof(timerMsg),
-        "diag: closed_loop_sign=%.0f phase=%u owner=%s return_zero_state=%u position_steps=%ld target_steps=%ld speed_hz=%.1f accel_hz_s=%.0f kick=%lu arm=%lu irq=%lu callback=%lu step_high=%lu step_complete=%lu TIM6_CR1=0x%08lX DIER=0x%08lX SR=0x%08lX CNT=%lu PSC=%lu ARR=%lu\r\n",
+        "diag: closed_loop_sign=%.0f phase=%u owner=%s return_zero_state=%u "
+        "position_steps=%ld target_steps=%ld speed_hz=%.1f "
+        "trajectory_max_speed_steps_s=%.0f trajectory_max_speed_mm_s=%.1f "
+        "trajectory_acceleration_steps_s2=%.0f trajectory_acceleration_mm_s2=%.1f "
+        "trajectory_start_speed_steps_s=%.0f trajectory_start_speed_mm_s=%.1f "
+        "kick=%lu arm=%lu irq=%lu callback=%lu "
+        "step_high=%lu step_complete=%lu TIM6_CR1=0x%08lX DIER=0x%08lX "
+        "SR=0x%08lX CNT=%lu PSC=%lu ARR=%lu\r\n",
         (double)CLOSED_LOOP_COMMAND_SIGN,
         (unsigned int)g_closedLoopActuatorPhase,
         Tim6TrajectoryOwnerName(),
@@ -4091,7 +4101,12 @@ static void PrintDiagnostics(void)
         (long)g_positionSteps,
         (long)g_parametricV2TargetSteps,
         (double)g_parametricV2SpeedHz,
+        (double)g_parametricV2MaxHz,
+        (double)(g_parametricV2MaxHz / g_stepsPerMm),
         (double)g_parametricV2AccelHzS,
+        (double)(g_parametricV2AccelHzS / g_stepsPerMm),
+        (double)PARAMETRIC_V2_START_HZ,
+        (double)(PARAMETRIC_V2_START_HZ / g_stepsPerMm),
         (unsigned long)g_closedLoopKickCount,
         (unsigned long)g_closedLoopTimerArmCount,
         (unsigned long)g_tim6IrqCount,
@@ -6152,6 +6167,44 @@ static void ProcessLine(char *line)
         g_v2TestMaxSpeedHz = 0.0f;
         g_v2TestRunning = 1U;
         UartPrint("v2_test started: tracking is step-count estimate; auto-stop at duration\r\n");
+        return;
+    }
+
+    if (strcmp(line, "trajectory_speed") == 0)
+    {
+        char msg[120];
+        snprintf(msg, sizeof(msg),
+                 "trajectory_speed: steps_per_s=%.0f mm_per_s=%.1f\r\n",
+                 (double)g_parametricV2MaxHz,
+                 (double)(g_parametricV2MaxHz / g_stepsPerMm));
+        UartPrint(msg);
+        return;
+    }
+    if (strncmp(line, "trajectory_speed ", 17) == 0)
+    {
+        char *end;
+        float value = strtof(line + 17, &end);
+        char msg[128];
+        while (*end == ' ' || *end == '\t') { end++; }
+        if (*end != '\0' || !isfinite(value) ||
+            value < PARAMETRIC_V2_START_HZ ||
+            value > PARAMETRIC_V2_MAX_HZ_LIMIT ||
+            value > (float)CLOSED_LOOP_MAX_STEP_HZ)
+        {
+            UartPrint("trajectory_speed rejected: expected 150..5000 steps/s\r\n");
+            return;
+        }
+        if (PivotMotionIsActive() != 0U || ClosedLoopActuatorIsActive() != 0U ||
+            g_closedLoopFault != 0U)
+        {
+            UartPrint("trajectory_speed rejected: motion or fault active\r\n");
+            return;
+        }
+        g_parametricV2MaxHz = value;
+        snprintf(msg, sizeof(msg),
+                 "trajectory_speed set: steps_per_s=%.0f mm_per_s=%.1f\r\n",
+                 (double)value, (double)(value / g_stepsPerMm));
+        UartPrint(msg);
         return;
     }
 
