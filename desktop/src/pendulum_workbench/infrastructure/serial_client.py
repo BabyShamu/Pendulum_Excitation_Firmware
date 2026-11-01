@@ -560,7 +560,6 @@ class SerialTelemetryClient(QObject):
         elif result.kind == ParsedLineKind.CONTROLLER_DIAGNOSTIC:
             self._diagnostic_line_count += 1
             self.controller_diagnostic_received.emit(result)
-            self.diagnostic_received.emit(text)
             if self._diagnostics is not None:
                 self._diagnostic_emit_processing_s += time.monotonic() - emit_started
                 self._diagnostic_processing_s += time.monotonic() - line_started

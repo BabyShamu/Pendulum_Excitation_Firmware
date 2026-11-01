@@ -45,6 +45,7 @@ class TelemetryParser:
         "normalized_sine", "target_mm", "motor_target_mm", "actual_mm", "target_steps",
         "actual_steps", "step_error",
     )
+    _tagged_controller_diagnostic_prefix = "controller_diag:"
 
     def __init__(self) -> None:
         self._controller_diagnostic_schema: tuple[str, ...] | None = None
@@ -64,6 +65,9 @@ class TelemetryParser:
 
         if text.startswith("> "):
             text = text[2:].lstrip()
+
+        if text.startswith(self._tagged_controller_diagnostic_prefix):
+            return self._parse_tagged_controller_diagnostic(text)
 
         if text in ("live telemetry enabled", "live telemetry disabled"):
             return ParsedLine(ParsedLineKind.DEVICE_MESSAGE, message=text)
@@ -168,6 +172,49 @@ class TelemetryParser:
             ParsedLineKind.CONTROLLER_DIAGNOSTIC,
             diagnostic_fields=values,
             diagnostic_schema=schema,
+        )
+
+    def _parse_tagged_controller_diagnostic(self, text: str) -> ParsedLine:
+        fields = dict(
+            self._field_pattern.findall(
+                text[len(self._tagged_controller_diagnostic_prefix):]
+            )
+        )
+        required = (
+            "mode", "time_s", "angle_deg", "command_mm", "motor_mm",
+            "actual_mm", "phase_rad", "waveform",
+        )
+        missing = [name for name in required if name not in fields]
+        if missing:
+            return ParsedLine(
+                ParsedLineKind.MALFORMED,
+                message=(
+                    "Incomplete tagged controller diagnostic; missing "
+                    f"{', '.join(missing)}: {text}"
+                ),
+            )
+        for name in required[1:]:
+            value = fields[name]
+            if name == "angle_deg" and value.lower() in ("nan", "na", "unavailable"):
+                continue
+            try:
+                number = float(value)
+            except ValueError:
+                return ParsedLine(
+                    ParsedLineKind.MALFORMED,
+                    message=f"Invalid tagged controller diagnostic value for {name}: {text}",
+                )
+            if not math.isfinite(number):
+                if name == "angle_deg" and math.isnan(number):
+                    continue
+                return ParsedLine(
+                    ParsedLineKind.MALFORMED,
+                    message=f"Non-finite tagged controller diagnostic value for {name}: {text}",
+                )
+        return ParsedLine(
+            ParsedLineKind.CONTROLLER_DIAGNOSTIC,
+            diagnostic_fields=fields,
+            diagnostic_schema=("mode",) + required[1:],
         )
 
     def _parse_device_telemetry(

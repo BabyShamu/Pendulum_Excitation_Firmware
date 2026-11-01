@@ -51,9 +51,12 @@ class FirmwareAutoResonanceV2TrajectoryTests(unittest.TestCase):
     def test_ar_start_diagnostic_reports_selected_mode(self) -> None:
         start = FIRMWARE_SOURCE.split(
             'if (strncmp(line,"ar_v2 start ",12U)==0', 1
-        )[1].split('UartPrint("time_s,angle_deg', 1)[0]
+        )[1].split(
+            'if (strncmp(line, "parametric_test"', 1
+        )[0]
         self.assertIn("ar_v2 started mode=%u", start)
         self.assertIn("mode", start)
+        self.assertIn("controller_diag: mode=ar%u", FIRMWARE_SOURCE)
 
     def test_ar_v2_has_a_local_waveform_polarity_correction(self) -> None:
         self.assertRegex(ARV2_HEADER, r"#define ARV2_EXCITATION_SIGN\s+\(-1\.0f\)")

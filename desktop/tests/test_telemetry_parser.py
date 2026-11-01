@@ -106,6 +106,20 @@ class TelemetryParserTests(unittest.TestCase):
         self.assertEqual(result.diagnostic_fields["angle_deg"], "58.10")
         self.assertEqual(result.diagnostic_fields["waveform"], "0.923")
 
+    def test_parses_tagged_ar_controller_diagnostic(self) -> None:
+        for mode in ("ar1", "ar2", "ar3"):
+            with self.subTest(mode=mode):
+                result = self.parse(
+                    f"controller_diag: mode={mode} time_s=1.250 angle_deg=58.10 "
+                    "command_mm=7.500 motor_mm=-7.500 actual_mm=0.200 "
+                    "phase_rad=1.5708 waveform=0.923"
+                )
+
+                self.assertEqual(result.kind, ParsedLineKind.CONTROLLER_DIAGNOSTIC)
+                self.assertEqual(result.diagnostic_fields["mode"], mode)
+                self.assertEqual(result.diagnostic_fields["command_mm"], "7.500")
+                self.assertEqual(result.diagnostic_schema[0], "mode")
+
     def test_parses_phase_tracked_diagnostics_and_allows_missing_angle(self) -> None:
         header = (
             "phase_sine_time_s,angle_measured_deg,angle_source,phase2_raw_rad,"

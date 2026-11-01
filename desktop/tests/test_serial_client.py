@@ -247,9 +247,11 @@ class SerialWorkerTests(unittest.TestCase):
         )
         samples = []
         diagnostics = []
+        routine_diagnostics = []
         malformed = []
         client.telemetry_received.connect(samples.append)
         client.controller_diagnostic_received.connect(diagnostics.append)
+        client.diagnostic_received.connect(routine_diagnostics.append)
         client.malformed_line_received.connect(malformed.append)
         client.connect_to_port("COM_DIAGNOSTICS")
 
@@ -259,6 +261,7 @@ class SerialWorkerTests(unittest.TestCase):
         self.assertEqual(samples[0].device_sample_index, 100)
         self.assertEqual(diagnostics[0].diagnostic_fields["target_steps"], "50")
         self.assertEqual(diagnostics[1].diagnostic_fields["angle_source"], "acquiring")
+        self.assertEqual(routine_diagnostics, [])
         self.assertEqual(malformed, [])
         client.disconnect()
         self.assertTrue(self.wait_for(lambda: not client.is_running))

@@ -3340,7 +3340,10 @@ static void UpdateAutoResonanceV2(void)
     {
         g_arv2Samples = 0U;
     }
-    snprintf(line,sizeof(line),"%.3f,%.2f,%.3f,%.3f,%.3f,%.4f,%.4f\r\n",
+    snprintf(line,sizeof(line),
+      "controller_diag: mode=ar%u time_s=%.3f angle_deg=%.2f command_mm=%.3f "
+      "motor_mm=%.3f actual_mm=%.3f phase_rad=%.4f waveform=%.4f\r\n",
+      (unsigned int)g_arv2Mode,
       (double)(now-g_arv2Start)/1000.0,(double)angleDeg,(double)cmd,
       (double)motor,(double)g_positionSteps/g_stepsPerMm,
       (double)g_arv2.measured_phase_rad,(double)g_arv2.waveform);
@@ -5827,7 +5830,6 @@ static void ProcessLine(char *line)
                          mode);
                 UartPrint(startMessage);
             }
-            UartPrint("time_s,angle_deg,command_mm,motor_mm,actual_mm,phase_rad,waveform\r\n");
             return;
         }
         UartPrint("usage: ar_v2 start <amp_mm> <phase_deg> <mode 1..3> | ar_v2 stop\r\n");
