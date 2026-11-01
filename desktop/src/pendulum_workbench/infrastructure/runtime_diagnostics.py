@@ -1,6 +1,7 @@
 import faulthandler
 import json
 import os
+import queue
 import threading
 import time
 from pathlib import Path
@@ -16,7 +17,8 @@ class RuntimeDiagnostics(QObject):
         super().__init__(parent)
         configured_path = os.environ.get("PENDULUM_WORKBENCH_DIAGNOSTICS")
         self._file = None
-        self._lock = threading.Lock()
+        self._records: queue.Queue[dict[str, Any] | None] = queue.Queue()
+        self._writer: threading.Thread | None = None
         self._last_heartbeat = time.monotonic()
         self._timer = QTimer(self)
         self._timer.setInterval(self._HEARTBEAT_INTERVAL_MS)
@@ -27,6 +29,12 @@ class RuntimeDiagnostics(QObject):
             self._file = path.open("a", encoding="utf-8", buffering=1)
             faulthandler.enable(self._file)
             faulthandler.dump_traceback_later(5.0, repeat=True, file=self._file)
+            self._writer = threading.Thread(
+                target=self._write_records,
+                name="pendulum-runtime-diagnostics",
+                daemon=True,
+            )
+            self._writer.start()
             self._timer.start()
             self.record("diagnostics_started", path=str(path))
 
@@ -43,8 +51,16 @@ class RuntimeDiagnostics(QObject):
             "event": event,
             **fields,
         }
-        with self._lock:
-            self._file.write(json.dumps(payload, default=str) + "\n")
+        self._records.put_nowait(payload)
+
+    def _write_records(self) -> None:
+        while True:
+            payload = self._records.get()
+            if payload is None:
+                return
+            file = self._file
+            if file is not None:
+                file.write(json.dumps(payload, default=str) + "\n")
 
     def _heartbeat(self) -> None:
         now = time.monotonic()
@@ -62,5 +78,8 @@ class RuntimeDiagnostics(QObject):
         faulthandler.cancel_dump_traceback_later()
         faulthandler.disable()
         self.record("diagnostics_stopped")
+        self._records.put(None)
+        if self._writer is not None:
+            self._writer.join(timeout=1.0)
         self._file.close()
         self._file = None

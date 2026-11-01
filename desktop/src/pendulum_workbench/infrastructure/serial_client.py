@@ -2,6 +2,7 @@ import logging
 import queue
 import threading
 import time
+from collections import deque
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -29,6 +30,7 @@ SERIAL_READ_TIMEOUT_S = 0.02
 SERIAL_STARTUP_DELAY_S = 2.0
 TELEMETRY_STALE_AFTER_S = 1.5
 SERIAL_DISPATCH_BATCH_SIZE = 64
+SERIAL_EVENT_LOOP_BATCH_SIZE = 16
 _LOGGER = logging.getLogger(__name__)
 
 
@@ -335,6 +337,21 @@ class SerialTelemetryClient(QObject):
         self._connected_monotonic: float | None = None
         self._last_valid_monotonic: float | None = None
         self._is_stale = False
+        self._pending_lines: deque[ReceivedSerialLine] = deque()
+        self._dispatch_timer = QTimer(self)
+        self._dispatch_timer.setInterval(0)
+        self._dispatch_timer.timeout.connect(self._drain_pending_lines)
+        self._diagnostic_line_count = 0
+        self._diagnostic_processing_s = 0.0
+        self._dispatch_line_count = 0
+        self._dispatch_callback_count = 0
+        self._dispatch_processing_s = 0.0
+        self._dispatch_max_pending = 0
+        self._dispatch_max_callback_lines = 0
+        self._raw_emit_processing_s = 0.0
+        self._parse_processing_s = 0.0
+        self._telemetry_emit_processing_s = 0.0
+        self._diagnostic_emit_processing_s = 0.0
         self._watchdog = QTimer(self)
         self._watchdog.setInterval(250)
         self._watchdog.timeout.connect(self._check_telemetry_freshness)
@@ -361,6 +378,17 @@ class SerialTelemetryClient(QObject):
         self._angle_sensor_available = None
         self._connected_monotonic = None
         self._last_valid_monotonic = None
+        self._diagnostic_line_count = 0
+        self._diagnostic_processing_s = 0.0
+        self._dispatch_line_count = 0
+        self._dispatch_callback_count = 0
+        self._dispatch_processing_s = 0.0
+        self._dispatch_max_pending = 0
+        self._dispatch_max_callback_lines = 0
+        self._raw_emit_processing_s = 0.0
+        self._parse_processing_s = 0.0
+        self._telemetry_emit_processing_s = 0.0
+        self._diagnostic_emit_processing_s = 0.0
         self._set_stale(False)
         worker = SerialWorker(
             port,
@@ -432,13 +460,37 @@ class SerialTelemetryClient(QObject):
 
     def _on_connection_closed(self, reason: str) -> None:
         self._watchdog.stop()
+        if self._diagnostics is not None:
+            self._diagnostics.record(
+                "serial_summary",
+                diagnostic_line_count=self._diagnostic_line_count,
+                diagnostic_processing_ms=self._diagnostic_processing_s * 1000.0,
+                dispatch_line_count=self._dispatch_line_count,
+                dispatch_callback_count=self._dispatch_callback_count,
+                dispatch_processing_ms=self._dispatch_processing_s * 1000.0,
+                dispatch_max_pending=self._dispatch_max_pending,
+                dispatch_max_callback_lines=self._dispatch_max_callback_lines,
+                raw_emit_processing_ms=self._raw_emit_processing_s * 1000.0,
+                parse_processing_ms=self._parse_processing_s * 1000.0,
+                telemetry_emit_processing_ms=(
+                    self._telemetry_emit_processing_s * 1000.0
+                ),
+                diagnostic_emit_processing_ms=(
+                    self._diagnostic_emit_processing_s * 1000.0
+                ),
+            )
         self._connected_monotonic = None
         self._last_valid_monotonic = None
         self.connection_closed.emit(reason)
         self._set_stale(False)
 
     def _on_line_received(self, received_line: ReceivedSerialLine) -> None:
+        line_started = time.monotonic() if self._diagnostics is not None else 0.0
+        emit_started = line_started
         self.raw_line_received.emit(received_line)
+        if self._diagnostics is not None:
+            emit_started = time.monotonic()
+            self._raw_emit_processing_s += emit_started - line_started
         if received_line.partial:
             self.malformed_line_received.emit(
                 "Unterminated partial serial line preserved in raw capture."
@@ -464,6 +516,7 @@ class SerialTelemetryClient(QObject):
             _LOGGER.debug("Firmware diagnostic: %s", diagnostic.text)
             self.diagnostic_received.emit(diagnostic.text)
             return
+        parse_started = time.monotonic() if self._diagnostics is not None else 0.0
         result = self._parser.parse_line(
             text,
             sample_index=self._sample_index + 1,
@@ -471,6 +524,9 @@ class SerialTelemetryClient(QObject):
             received_at=received_line.received_at,
             rx_line_index=received_line.rx_line_index,
         )
+        if self._diagnostics is not None:
+            emit_started = time.monotonic()
+            self._parse_processing_s += emit_started - parse_started
         if result.kind == ParsedLineKind.TELEMETRY and result.telemetry is not None:
             self._sample_index += 1
             angle_available = result.telemetry.angle_deg is not None
@@ -497,26 +553,67 @@ class SerialTelemetryClient(QObject):
             self._last_valid_monotonic = time.monotonic()
             self._set_stale(False)
             self.telemetry_received.emit(result.telemetry)
+            if self._diagnostics is not None:
+                self._telemetry_emit_processing_s += time.monotonic() - emit_started
         elif result.kind == ParsedLineKind.HARDWARE_STATUS and result.hardware_status is not None:
             self.hardware_status_received.emit(result.hardware_status)
         elif result.kind == ParsedLineKind.CONTROLLER_DIAGNOSTIC:
+            self._diagnostic_line_count += 1
             self.controller_diagnostic_received.emit(result)
             self.diagnostic_received.emit(text)
+            if self._diagnostics is not None:
+                self._diagnostic_emit_processing_s += time.monotonic() - emit_started
+                self._diagnostic_processing_s += time.monotonic() - line_started
         elif result.kind == ParsedLineKind.MALFORMED:
             self.malformed_line_received.emit(result.message)
         elif result.message:
             self.device_message_received.emit(result.message)
 
     def _on_lines_received(self, received_lines: list[ReceivedSerialLine]) -> None:
-        started = time.monotonic()
+        priority_lines: list[ReceivedSerialLine] = []
+        normal_lines: list[ReceivedSerialLine] = []
         for received_line in received_lines:
+            if self._is_priority_line(received_line):
+                priority_lines.append(received_line)
+            else:
+                normal_lines.append(received_line)
+        for received_line in reversed(priority_lines):
+            self._pending_lines.appendleft(received_line)
+        self._pending_lines.extend(normal_lines)
+        if not self._dispatch_timer.isActive():
+            self._dispatch_timer.start()
+        self._drain_pending_lines()
+
+    @staticmethod
+    def _is_priority_line(received_line: ReceivedSerialLine) -> bool:
+        payload = received_line.payload.lstrip()
+        if payload.startswith(b">"):
+            payload = payload[1:].lstrip()
+        return payload.startswith((b"maintenance:", b"response:"))
+
+    def _drain_pending_lines(self) -> None:
+        started = time.monotonic()
+        processed = 0
+        while (
+            self._pending_lines
+            and processed < SERIAL_EVENT_LOOP_BATCH_SIZE
+        ):
+            received_line = self._pending_lines.popleft()
             self._on_line_received(received_line)
-        if self._diagnostics is not None:
-            self._diagnostics.record(
-                "serial_batch",
-                line_count=len(received_lines),
-                duration_ms=(time.monotonic() - started) * 1000.0,
-            )
+            processed += 1
+        self._dispatch_line_count += processed
+        self._dispatch_callback_count += 1
+        self._dispatch_processing_s += time.monotonic() - started
+        self._dispatch_max_pending = max(
+            self._dispatch_max_pending,
+            len(self._pending_lines),
+        )
+        self._dispatch_max_callback_lines = max(
+            self._dispatch_max_callback_lines,
+            processed,
+        )
+        if not self._pending_lines:
+            self._dispatch_timer.stop()
 
     def _check_telemetry_freshness(self) -> None:
         anchor = self._last_valid_monotonic or self._connected_monotonic

@@ -1,5 +1,6 @@
 import base64
 import json
+import os
 import tempfile
 import time
 import unittest
@@ -23,6 +24,7 @@ from pendulum_workbench.infrastructure.serial_client import (
     SerialTelemetryClient,
     SerialWorker,
 )
+from pendulum_workbench.infrastructure.runtime_diagnostics import RuntimeDiagnostics
 
 
 class SerialLineFramerTests(unittest.TestCase):
@@ -285,6 +287,35 @@ class SerialWorkerTests(unittest.TestCase):
         ])
         client.disconnect()
         self.assertTrue(self.wait_for(lambda: not client.is_running))
+
+    def test_ar_replay_with_diagnostics_keeps_dispatch_instrumentation_off_gui_thread(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            diagnostics_path = Path(temporary_directory) / "runtime.jsonl"
+            with patch.dict(
+                os.environ,
+                {"PENDULUM_WORKBENCH_DIAGNOSTICS": str(diagnostics_path)},
+            ):
+                diagnostics = RuntimeDiagnostics()
+            client = SerialTelemetryClient(
+                capture_root=Path(temporary_directory),
+                serial_factory=ARDiagnosticReplaySerial,
+                startup_delay_s=0.0,
+                diagnostics=diagnostics,
+            )
+            diagnostic_rows = []
+            client.controller_diagnostic_received.connect(diagnostic_rows.append)
+            client.connect_to_port("COM_AR_REPLAY_DIAGNOSTICS")
+            self.assertTrue(
+                self.wait_for(lambda: len(diagnostic_rows) == 1417, timeout_s=5.0)
+            )
+            client.disconnect()
+            self.assertTrue(
+                self.wait_for(lambda: not client.is_running, timeout_s=2.0)
+            )
+            diagnostics.close()
+            records = diagnostics_path.read_text(encoding="utf-8")
+            self.assertIn('"event": "serial_summary"', records)
+            self.assertEqual(len(diagnostic_rows), 1417)
 
     def test_device_sample_gap_is_reported_without_generating_routine_events(self) -> None:
         temporary_directory = tempfile.TemporaryDirectory()
