@@ -1,4 +1,4 @@
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QTimer, Qt
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QApplication,
@@ -55,6 +55,11 @@ class MaintenancePage(QWidget):
         super().__init__()
         self.controller = controller
         self.maintenance = controller.maintenance
+        self._pending_manual_position_mm: float | None = None
+        self._manual_position_timer = QTimer(self)
+        self._manual_position_timer.setInterval(100)
+        self._manual_position_timer.timeout.connect(self._flush_manual_position)
+        self._manual_position_timer.start()
 
         outer_layout = QVBoxLayout(self)
         outer_layout.setContentsMargins(0, 0, 0, 0)
@@ -561,7 +566,14 @@ class MaintenancePage(QWidget):
     def _update_manual_position(self, sample) -> None:
         if sample.source != "real" or sample.position_mm is None:
             return
-        self.manual_position_value.setText(f"Current pivot position: {sample.position_mm:+.2f} mm")
+        self._pending_manual_position_mm = sample.position_mm
+
+    def _flush_manual_position(self) -> None:
+        position_mm = self._pending_manual_position_mm
+        if position_mm is None:
+            return
+        self._pending_manual_position_mm = None
+        self.manual_position_value.setText(f"Current pivot position: {position_mm:+.2f} mm")
 
     def hideEvent(self, event) -> None:
         self._stop_manual_motion("maintenance_page_left")

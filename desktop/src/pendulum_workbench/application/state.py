@@ -1,5 +1,6 @@
 from dataclasses import replace
 from datetime import datetime, timezone
+import time
 
 from PySide6.QtCore import QObject, Signal
 
@@ -18,6 +19,8 @@ from pendulum_workbench.domain.models import (
 
 
 class ApplicationStateModel(QObject):
+    _TELEMETRY_SNAPSHOT_INTERVAL_S = 0.1
+
     snapshot_changed = Signal(object)
     telemetry_received = Signal(object)
     event_added = Signal(object)
@@ -25,6 +28,7 @@ class ApplicationStateModel(QObject):
     def __init__(self) -> None:
         super().__init__()
         self._snapshot = ApplicationSnapshot()
+        self._last_telemetry_snapshot_emit = 0.0
 
     @property
     def snapshot(self) -> ApplicationSnapshot:
@@ -34,6 +38,7 @@ class ApplicationStateModel(QObject):
         self._update(mock_source_active=active)
 
     def set_data_source(self, mode: DataSourceMode) -> None:
+        self._last_telemetry_snapshot_emit = 0.0
         self._update(
             connection=ConnectionState.DISCONNECTED,
             real_port=None,
@@ -58,6 +63,7 @@ class ApplicationStateModel(QObject):
         self._update(**changes)
 
     def begin_serial_session(self, port: str) -> None:
+        self._last_telemetry_snapshot_emit = 0.0
         self._update(
             connection=ConnectionState.CONNECTING,
             real_port=port,
@@ -154,13 +160,22 @@ class ApplicationStateModel(QObject):
 
     def publish_sample(self, sample: TelemetrySample) -> None:
         received_at = sample.received_at or datetime.now(timezone.utc)
-        self._update(
+        self._snapshot = replace(
+            self._snapshot,
             samples_received=self._snapshot.samples_received + 1,
             latest_sample=sample,
             last_valid_telemetry_at=received_at,
             telemetry_stale=False,
         )
         self.telemetry_received.emit(sample)
+        now = time.monotonic()
+        if (
+            self._last_telemetry_snapshot_emit == 0.0
+            or now - self._last_telemetry_snapshot_emit
+            >= self._TELEMETRY_SNAPSHOT_INTERVAL_S
+        ):
+            self._last_telemetry_snapshot_emit = now
+            self.snapshot_changed.emit(self._snapshot)
 
     def report_event(self, severity: EventSeverity, message: str) -> None:
         self.event_added.emit(AppEvent.now(severity, message))

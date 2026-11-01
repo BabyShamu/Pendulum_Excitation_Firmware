@@ -39,6 +39,33 @@ class ApplicationStateTests(unittest.TestCase):
         self.assertEqual(state.snapshot.latest_sample, sample)
         self.assertEqual(received, [sample])
 
+    def test_high_rate_samples_remain_full_resolution_while_snapshots_are_coalesced(self) -> None:
+        state = ApplicationStateModel()
+        received = []
+        snapshots = []
+        state.telemetry_received.connect(received.append)
+        state.snapshot_changed.connect(snapshots.append)
+
+        for index in range(1000):
+            state.publish_sample(TelemetrySample(index + 1, index / 1000.0, 1.0, 0.0))
+
+        self.assertEqual(len(received), 1000)
+        self.assertEqual(state.snapshot.samples_received, 1000)
+        self.assertEqual(state.snapshot.latest_sample.sample_index, 1000)
+        self.assertLess(len(snapshots), 20)
+
+    def test_new_serial_session_emits_its_first_sample_immediately(self) -> None:
+        state = ApplicationStateModel()
+        snapshots = []
+        state.snapshot_changed.connect(snapshots.append)
+
+        state.publish_sample(TelemetrySample(1, 0.1, 1.0, 0.0))
+        state.begin_serial_session("COM1")
+        state.publish_sample(TelemetrySample(1, 0.1, 2.0, 0.0))
+
+        self.assertEqual(len(snapshots), 3)
+        self.assertEqual(snapshots[-1].latest_sample.angle_deg, 2.0)
+
     def test_switch_updates_preserve_unknown_fault_and_other_status_fields(self) -> None:
         state = ApplicationStateModel()
         state.set_hardware_status(

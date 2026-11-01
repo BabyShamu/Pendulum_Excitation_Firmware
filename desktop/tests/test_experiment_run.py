@@ -49,6 +49,7 @@ class SineExperimentSerial:
         defer_latch_hold: bool = False,
         defer_latch_open: bool = False,
         suppress_parametric_stop_response: bool = False,
+        unified_parametric_stop_response: bool = False,
         **kwargs: object,
     ) -> None:
         del port, baud_rate, kwargs
@@ -58,6 +59,7 @@ class SineExperimentSerial:
         self.defer_latch_hold = defer_latch_hold
         self.defer_latch_open = defer_latch_open
         self.suppress_parametric_stop_response = suppress_parametric_stop_response
+        self.unified_parametric_stop_response = unified_parametric_stop_response
         self._chunks: list[bytes] = []
         self._live_enabled = False
         self._next_sample_index = 1
@@ -224,8 +226,19 @@ class SineExperimentSerial:
                     self._enqueue("0.020,1.0,0.5,0.5,0.4,20,16,4\r\n")
                     self._enqueue("telemetry sample_index=90 time_s=2.0 angle_deg=14.8 position_mm=0.4\r\n")
                 if not (command == "parametric_stop" and self.suppress_parametric_stop_response):
+                    response_type = (
+                        "controller_stop"
+                        if self.unified_parametric_stop_response
+                        else command
+                    )
+                    response_mode = (
+                        "stop" if self.unified_parametric_stop_response else "idle"
+                    )
+                    prefix = "response:" if self.unified_parametric_stop_response else "maintenance:"
                     self._enqueue(
-                        f"maintenance: id={request_id} type={command} ok=1 active=0 active_mode=idle\r\n"
+                        f"{prefix} id={request_id} type={response_type} ok=1 "
+                        f"{'mode=' + response_mode if self.unified_parametric_stop_response else 'active_mode=' + response_mode} "
+                        "active=0\r\n"
                     )
                 if command == "parametric_stop":
                     self._enqueue("event: type=limit_state_changed upper=0 lower=0\r\n")
@@ -536,7 +549,7 @@ class ExperimentRunTests(unittest.TestCase):
         self.assertEqual(session.manifest["experiment"]["requested_duration_s"], 30.0)
         self.assertNotIn("latch_hold", device.protocol_actions)
         self.assertNotIn("target_initial_angle_deg", session.manifest["experiment"])
-        self.assertTrue((repository.root / experiment_id / "serial_capture.log").exists())
+        self.assertTrue((session.directory / "serial_capture.log").exists())
         self.assertTrue(self.wait_for(lambda: controller.experiment_run.snapshot.sample_count > 0))
         self.assertGreater(controller.experiment_run._samples_at_start, 0)
 
@@ -550,7 +563,9 @@ class ExperimentRunTests(unittest.TestCase):
         self.assertFalse(device.sine_active)
         self.assertEqual(device.latch_state, "open")
         self.assertNotIn("latch_hold", device.protocol_actions)
-        manifest = repository.load(repository.root / experiment_id).manifest
+        completed_session = controller.experiment_recorder.last_completed_session
+        self.assertIsNotNone(completed_session)
+        manifest = repository.load(completed_session.directory).manifest
         self.assertEqual(manifest["completion_status"], "INTERRUPTED")
         self.assertEqual(manifest["experiment"]["completion_reason"], "operator_stop")
         self.assertEqual(manifest["experiment"]["measured_initial_angle_deg"], 14.8)
@@ -652,7 +667,9 @@ class ExperimentRunTests(unittest.TestCase):
             ["latch_open", "parametric_start"],
         )
 
-        manifest_before_stop = repository.load(repository.root / experiment_id).manifest
+        active_session = controller.experiment_recorder.active_session
+        self.assertIsNotNone(active_session)
+        manifest_before_stop = repository.load(active_session.directory).manifest
         self.assertEqual(
             manifest_before_stop["experiment"]["commanded_amplitude_mm"],
             6.0,

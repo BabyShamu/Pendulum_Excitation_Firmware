@@ -273,6 +273,10 @@ class ExperimentRepository:
         )
         manifest["maximum_angle_deg"] = manifest["peak_absolute_angle_deg"]
         manifest["max_angle_valid"] = peak_angle is not None
+        experiment_details = manifest.get("experiment")
+        if isinstance(experiment_details, dict):
+            experiment_details["maximum_angle_deg"] = manifest["maximum_angle_deg"]
+            experiment_details["max_angle_valid"] = manifest["max_angle_valid"]
         if peak_angle is None:
             manifest["outcome"] = "INVALID"
         elif abs(peak_angle) >= 90.0:
@@ -283,6 +287,8 @@ class ExperimentRepository:
             manifest["outcome"] = "FAILED"
         else:
             manifest["outcome"] = "COMPLETED"
+        if isinstance(experiment_details, dict):
+            experiment_details["outcome"] = manifest["outcome"]
         # This is a whole-recording peak, not yet a post-stop-only peak.
 
         target_details = manifest.get("experiment")

@@ -1,4 +1,5 @@
 import math
+import time
 from datetime import datetime, timezone
 from typing import Callable
 
@@ -91,6 +92,7 @@ class MaintenanceService(QObject):
         self._previous_connection = state.snapshot.connection
         self._previous_source = state.snapshot.data_source
         self._last_snapshot = self._build_snapshot()
+        self._last_telemetry_snapshot_emit = 0.0
 
         state.snapshot_changed.connect(self._on_application_snapshot)
         state.telemetry_received.connect(self._on_telemetry_sample)
@@ -1041,7 +1043,7 @@ class MaintenanceService(QObject):
             self._position_mm = sample.position_mm
             changed = True
         if changed:
-            self._emit_snapshot()
+            self._emit_snapshot(force=False)
 
     def _on_application_snapshot(self, snapshot: ApplicationSnapshot) -> None:
         if (
@@ -1203,8 +1205,18 @@ class MaintenanceService(QObject):
             latch_message=self._latch_message,
         )
 
-    def _emit_snapshot(self) -> None:
+    def _emit_snapshot(self, *, force: bool = True) -> None:
         snapshot = self._build_snapshot()
+        now = time.monotonic()
+        if (
+            force
+            or self._last_telemetry_snapshot_emit == 0.0
+            or now - self._last_telemetry_snapshot_emit >= 0.1
+        ):
+            self._last_telemetry_snapshot_emit = now
+        else:
+            self._last_snapshot = snapshot
+            return
         if snapshot != self._last_snapshot:
             self._last_snapshot = snapshot
             self.snapshot_changed.emit(snapshot)

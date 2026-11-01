@@ -1,7 +1,7 @@
 from collections import deque
 from pathlib import Path
 
-from PySide6.QtCore import QSettings, QUrl, Qt
+from PySide6.QtCore import QSettings, QTimer, QUrl, Qt
 from PySide6.QtGui import QColor, QDesktopServices
 from PySide6.QtWidgets import (
     QComboBox,
@@ -61,6 +61,16 @@ class ExperimentPage(QWidget):
         self._plot_samples: deque[TelemetrySample] = deque(maxlen=180)
         self._plot_source: DataSourceMode | None = None
         self._plot_connection: ConnectionState | None = None
+        self._plot_dirty = False
+        self._plot_timer = QTimer(self)
+        self._plot_timer.setInterval(50)
+        self._plot_timer.timeout.connect(self._flush_plot)
+        self._plot_timer.start()
+        self._pending_numeric_sample: TelemetrySample | None = None
+        self._numeric_timer = QTimer(self)
+        self._numeric_timer.setInterval(100)
+        self._numeric_timer.timeout.connect(self._flush_numeric_indicators)
+        self._numeric_timer.start()
 
         outer_layout = QVBoxLayout(self)
         outer_layout.setContentsMargins(0, 0, 0, 0)
@@ -483,6 +493,12 @@ class ExperimentPage(QWidget):
         if sample.angle_deg is None or sample.position_mm is None:
             return
         self._plot_samples.append(sample)
+        self._plot_dirty = True
+
+    def _flush_plot(self) -> None:
+        if not self._plot_dirty:
+            return
+        self._plot_dirty = False
         self.angle_plot.set_samples(
             [(item.elapsed_s, item.angle_deg) for item in self._plot_samples]
         )
@@ -817,6 +833,13 @@ class ExperimentPage(QWidget):
     def _update_run_live_values(self, sample) -> None:
         if sample.source != "real":
             return
+        self._pending_numeric_sample = sample
+
+    def _flush_numeric_indicators(self) -> None:
+        sample = self._pending_numeric_sample
+        if sample is None:
+            return
+        self._pending_numeric_sample = None
         self.run_angle_value.setText(
             "Angle: unavailable" if sample.angle_deg is None else f"Angle: {sample.angle_deg:+.2f} deg"
         )

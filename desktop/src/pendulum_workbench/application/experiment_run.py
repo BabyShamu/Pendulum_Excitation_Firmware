@@ -525,12 +525,19 @@ class ExperimentRunService(QObject):
                 FirmwareCommand.AUTO_RESONANCE_STOP,
                 FirmwareCommand.PHASE_TRACKED_SINE_STOP,
             )
+            reported_mode = response.fields.get(
+                "active_mode",
+                response.fields.get("mode"),
+            )
+            accepted_inactive_modes = {"idle", "stop"}
+            if command == FirmwareCommand.PARAMETRIC_STOP:
+                accepted_inactive_modes.add("parametric")
             if response.fields.get("active") != "0" or (
-                expects_idle_mode and response.fields.get("active_mode", response.fields.get("mode")) not in ("idle", "parametric")
+                expects_idle_mode and reported_mode not in accepted_inactive_modes
             ):
                 if self._pending_completion_reason != PENDULUM_ANGLE_LIMIT_COMPLETION_REASON:
                     self._pending_final_state = ExperimentRunState.FAULT
-                    self._pending_completion_reason = "sine_stop_unconfirmed"
+                    self._pending_completion_reason = "controller_stop_unconfirmed"
             self._set_motion_after_sine_stop()
             self._observe_after_successful_stop()
 
@@ -740,6 +747,14 @@ class ExperimentRunService(QObject):
             self._pending_final_state = ExperimentRunState.INTERRUPTED
             if not self._pending_completion_reason:
                 self._pending_completion_reason = "recording_interrupted"
+        completed_session = self.recorder.last_completed_session
+        if completed_session is not None:
+            recorded_maximum = completed_session.manifest.get("maximum_angle_deg")
+            if (
+                isinstance(recorded_maximum, (int, float))
+                and math.isfinite(float(recorded_maximum))
+            ):
+                self._max_angle_deg = float(recorded_maximum)
         self._phase = "terminal"
         self._timer.stop()
         try:
