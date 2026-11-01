@@ -30,6 +30,8 @@ from pendulum_workbench.domain.experiment_run import (
     ExperimentDefinition,
     ExperimentRunSnapshot,
     ExperimentRunState,
+    ExperimentOutcome,
+    SUCCESS_ANGLE_DEG,
     VerticalSineDefinition,
     PhaseTrackedSineDefinition,
 )
@@ -46,7 +48,6 @@ from pendulum_workbench.domain.models import (
     MotionState,
     RecordingState,
 )
-from pendulum_workbench.experiments.target_crossing import TargetCrossingDetector
 from pendulum_workbench.infrastructure.serial_client import TELEMETRY_STALE_AFTER_S
 
 
@@ -81,8 +82,7 @@ class ExperimentRunService(QObject):
         self._pending_completion_reason = ""
         self._sine_started_monotonic: float | None = None
         self._stop_requested_monotonic: float | None = None
-        self._target_reached_monotonic: float | None = None
-        self._target_detector: TargetCrossingDetector | None = None
+        self._max_angle_deg: float | None = None
         self._samples_at_start = 0
         self._angle_predictor: AngleDropoutPredictor | None = None
         self._angle_prediction_rows: list[dict[str, object]] = []
@@ -165,9 +165,7 @@ class ExperimentRunService(QObject):
         self._pending_completion_reason = ""
         self._sine_started_monotonic = None
         self._stop_requested_monotonic = None
-        self._target_reached_monotonic = None
-        self._target_detector = (None if isinstance(definition, FreeSwingDefinition)
-                                 else TargetCrossingDetector(definition.target_angle_deg))
+        self._max_angle_deg = None
         self._angle_predictor = AngleDropoutPredictor(
             max_prediction_age_s=definition.duration_s
         )
@@ -178,6 +176,8 @@ class ExperimentRunService(QObject):
             definition=definition,
             experiment_id=None,
             generated_name=definition.partial_name(),
+            max_angle_deg=None,
+            outcome=None,
             directory=None,
             measured_initial_angle_deg=None,
             elapsed_s=0.0,
@@ -411,7 +411,6 @@ class ExperimentRunService(QObject):
                 self.commands.start_parametric(
                     definition.amplitude_mm,
                     definition.phase_deg,
-                    definition.target_angle_deg,
                 )
             elif isinstance(definition, PhaseTrackedSineDefinition):
                 self._phase = "phase_sine_start"
@@ -617,11 +616,6 @@ class ExperimentRunService(QObject):
         if self._sine_started_monotonic is not None:
             actual_duration = self._stop_requested_monotonic or time.monotonic()
             actual_duration = max(0.0, actual_duration - self._sine_started_monotonic)
-            if self._target_reached_monotonic is not None:
-                actual_duration = max(
-                    actual_duration,
-                    self._target_reached_monotonic - self._sine_started_monotonic,
-                )
         else:
             actual_duration = 0.0
         self._set_snapshot(
@@ -654,19 +648,10 @@ class ExperimentRunService(QObject):
                 actual_elapsed_duration_s=actual_duration,
                 completion_reason=reason,
             )
-            # Both times use the same Workbench monotonic start reference.
-            # Target time is the first confirmed threshold sample, not the
-            # end of the five-second post-stop observation recording.
-            if self._sine_started_monotonic is not None:
-                metadata["target_time_source"] = "workbench_monotonic_motor_start_ack"
-                metadata["target_achieved"] = (
-                    final_state == ExperimentRunState.COMPLETE
-                    and self._target_reached_monotonic is not None
-                )
-                metadata["target_time_s"] = (
-                    max(0.0, self._target_reached_monotonic - self._sine_started_monotonic)
-                    if metadata["target_achieved"] else None
-                )
+            outcome = self._classify_outcome(final_state, reason)
+            metadata["maximum_angle_deg"] = self._max_angle_deg
+            metadata["max_angle_valid"] = self._max_angle_deg is not None
+            metadata["outcome"] = outcome.value
             self.recorder.update_run_metadata(
                 self._experiment_id,
                 name=final_name,
@@ -753,62 +738,16 @@ class ExperimentRunService(QObject):
         )
 
     def _on_telemetry_sample(self, sample) -> None:
-        # A target is reached only by a valid, measured angle while actively running.
-        # Never reinterpret a firmware safety fault as a successful target event.
-        # A genuine turning-point peak may exceed the target for only one
-        # telemetry sample. Validate it against the samples immediately
-        # before and after; firmware safety stopping remains independent.
-        target_observation_active = (
-            self._phase == "running"
-            and self._snapshot.state == ExperimentRunState.RUNNING
-        ) or (
-            self._phase == "sine_stop"
-            and self._snapshot.state == ExperimentRunState.STOPPING
-            and self._pending_final_state == ExperimentRunState.COMPLETE
-            and self._pending_completion_reason in ("duration_elapsed", "TARGET_REACHED")
+        valid_angle = (
+            sample.source == "real"
+            and sample.angle_deg is not None
+            and math.isfinite(sample.angle_deg)
         )
-        running = (
-            target_observation_active
-            and self._definition is not None
-            and not isinstance(self._definition, FreeSwingDefinition)
-            and self._sine_started_monotonic is not None
-        )
-        if running and self._target_detector is not None:
-            valid_angle = (
-                sample.source == "real"
-                and sample.angle_deg is not None
-                and math.isfinite(sample.angle_deg)
-            )
-            hardware = self.state.snapshot.hardware_status
-            if valid_angle and not (hardware.fault_known and hardware.fault):
-                now = time.monotonic()
-                crossing = self._target_detector.observe(now, sample.angle_deg)
-                if crossing is not None:
-                    self._target_reached_monotonic = crossing
-                    _LOGGER.info(
-                        "Validated target crossing: experiment_id=%s target_angle=%s "
-                        "target_achieved=%s target_time_monotonic=%s "
-                        "completion_reason=%s recording_state=%s",
-                        self._experiment_id,
-                        self._definition.target_angle_deg if self._definition is not None else None,
-                        True,
-                        crossing,
-                        self._pending_completion_reason,
-                        self.state.snapshot.recording.value,
-                    )
-                    self._pending_final_state = ExperimentRunState.COMPLETE
-                    self._pending_completion_reason = "TARGET_REACHED"
-                    if self._stop_requested_monotonic is None:
-                        self._stop_requested_monotonic = now
-                    if self._phase == "running":
-                        self._set_snapshot(
-                            state=ExperimentRunState.STOPPING,
-                            completion_reason="TARGET_REACHED",
-                        )
-                        self._issue_sine_stop()
-                    return
-            else:
-                self._target_detector.reset()
+        if valid_angle:
+            maximum = abs(float(sample.angle_deg))
+            if self._max_angle_deg is None or maximum > self._max_angle_deg:
+                self._max_angle_deg = maximum
+                self._set_snapshot(max_angle_deg=maximum)
         if (
             self._phase not in ("metadata_before_open", "latch_open", "sine_start", "running")
             or self._angle_predictor is None
@@ -944,24 +883,6 @@ class ExperimentRunService(QObject):
     def _on_device_event(self, event) -> None:
         if not self.is_active:
             return
-        if event.name == "experiment_target_reached":
-            # Firmware can report the target after a telemetry sample has already
-            # initiated the desktop stop. Do not issue a duplicate stop request.
-            self.state.report_event(
-                EventSeverity.INFO,
-                "STM32 confirmed target angle reached"
-                + (f" at {event.fields['angle_deg']} deg" if event.fields.get("angle_deg") else "")
-                + ".",
-            )
-            if (self._phase == "running"
-                    and self._snapshot.state == ExperimentRunState.RUNNING
-                    and not isinstance(self._definition, FreeSwingDefinition)):
-                self._pending_final_state = ExperimentRunState.COMPLETE
-                self._pending_completion_reason = "TARGET_REACHED"
-                self._stop_requested_monotonic = time.monotonic()
-                self._set_snapshot(state=ExperimentRunState.STOPPING, completion_reason="TARGET_REACHED")
-                self._issue_sine_stop()
-            return
         if event.name == "sine_motion_stopped":
             self._handle_safety_interruption(
                 f"sine_motion_stopped:{event.fields.get('reason', 'unknown')}",
@@ -1052,6 +973,7 @@ class ExperimentRunService(QObject):
     ) -> None:
         self._phase = "terminal"
         self._timer.stop()
+        outcome = self._classify_outcome(state, reason)
         self._set_snapshot(
             state=state,
             elapsed_s=actual_duration,
@@ -1059,7 +981,24 @@ class ExperimentRunService(QObject):
             completion_reason=reason,
             error_message=error_message,
             recording_state=recording_state or self.state.snapshot.recording.value,
+            max_angle_deg=self._max_angle_deg,
+            outcome=outcome,
         )
+
+    def _classify_outcome(
+        self, state: ExperimentRunState, reason: str
+    ) -> ExperimentOutcome:
+        if self._max_angle_deg is None:
+            return ExperimentOutcome.INVALID
+        if self._max_angle_deg >= SUCCESS_ANGLE_DEG:
+            return ExperimentOutcome.SUCCESS
+        if state == ExperimentRunState.OPERATOR_STOPPED:
+            return ExperimentOutcome.STOPPED
+        if state in (ExperimentRunState.FAULT, ExperimentRunState.INTERRUPTED):
+            return ExperimentOutcome.FAILED
+        if reason == "duration_elapsed":
+            return ExperimentOutcome.COMPLETED
+        return ExperimentOutcome.COMPLETED
 
     def _require_definition(self) -> ExperimentDefinition:
         if self._definition is None:

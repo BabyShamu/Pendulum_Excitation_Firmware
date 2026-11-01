@@ -96,7 +96,7 @@ class ExperimentRecordingTests(unittest.TestCase):
             self.assertNotIn("target_initial_angle_deg", reopened.manifest["experiment"])
             self.assertEqual(len(reopened.telemetry), 1)
 
-    def test_target_metadata_survives_save_reload_and_library_refresh(self) -> None:
+    def test_historical_target_metadata_survives_save_reload_and_uses_new_result(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             state = ApplicationStateModel()
             state.set_mock_source_active(True)
@@ -145,11 +145,11 @@ class ExperimentRecordingTests(unittest.TestCase):
             page = ExperimentManagerPage(controller)
             self.addCleanup(controller.shutdown)
             self.addCleanup(page.close)
-            self.assertEqual(page.table.item(0, 7).text(), "Yes")
-            self.assertEqual(page.table.item(0, 8).text(), "14.76 s")
+            self.assertEqual(page.table.item(0, 6).text(), "82.62°")
+            self.assertEqual(page.table.item(0, 7).text(), "COMPLETED")
             page.table.selectRow(0)
-            self.assertEqual(page.detail_labels["Target achieved"].text(), "Yes")
-            self.assertEqual(page.detail_labels["Target time"].text(), "14.76 s")
+            self.assertEqual(page.detail_labels["Maximum angle"].text(), "82.62°")
+            self.assertEqual(page.detail_labels["Result"].text(), "COMPLETED")
 
     def wait_for(self, predicate, timeout_s: float = 2.0) -> bool:
         deadline = time.monotonic() + timeout_s

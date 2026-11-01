@@ -1,192 +1,41 @@
-"""Target crossing metrics from physical telemetry."""
 import tempfile
 import unittest
 from pathlib import Path
 
-from PySide6.QtWidgets import QApplication
-
-from pendulum_workbench.application.controller import WorkbenchController
-from pendulum_workbench.domain.models import DataSourceMode
-from pendulum_workbench.experiments.repository import ExperimentRepository
 from pendulum_workbench.experiments.target_metrics import target_metrics
-from pendulum_workbench.ui.pages.experiment_manager_page import ExperimentManagerPage
 
 
-class TargetMetricsTests(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls):
-        cls.qt_app = QApplication.instance() or QApplication([])
-
-    def setUp(self):
-        self.temp = tempfile.TemporaryDirectory()
-        self.addCleanup(self.temp.cleanup)
-        self.path = Path(self.temp.name)
-        (self.path / "telemetry.csv").write_text(
-            "time_s,angle_deg,position_mm\n"
-            "100.0,5,0\n"
-            "100.2,15,0\n"
-            "100.4,35,0\n"
-            "100.6,-38,0\n",
-            encoding="utf-8",
-        )
-
-    def test_interpolates_first_crossing(self):
-        result = target_metrics(self.path, {"experiment": {"target_angle_deg": 30}})
-        self.assertTrue(result["target_achieved"])
-        self.assertAlmostEqual(result["target_time_s"], 0.35)
-
-    def test_no_target_is_not_failure(self):
-        result = target_metrics(self.path, {"experiment": {}})
-        self.assertIsNone(result["target_achieved"])
-        self.assertIsNone(result["target_time_s"])
-
-    def test_recorded_monotonic_target_overrides_post_stop_telemetry(self):
-        manifest = {"experiment": {
-            "target_angle_deg": 30,
-            "actual_elapsed_duration_s": 14.3,
-            "target_time_source": "workbench_monotonic_motor_start_ack",
-            "target_achieved": True,
-            "target_time_s": 14.27,
-        }}
-        result = target_metrics(self.path, manifest)
-        self.assertTrue(result["target_achieved"])
-        self.assertAlmostEqual(result["target_time_s"], 14.27)
-
-    def test_saved_target_result_without_source_marker_is_displayable(self):
-        manifest = {"experiment": {
-            "target_angle_deg": 60.0,
-            "actual_elapsed_duration_s": 15.0,
-            "target_achieved": True,
-            "target_time_s": 14.760349899996072,
-        }}
-        result = target_metrics(self.path, manifest)
-        self.assertTrue(result["target_achieved"])
-        self.assertAlmostEqual(result["target_time_s"], 14.760349899996072)
-
-    def test_saved_false_target_result_is_displayable(self):
-        result = target_metrics(self.path, {"experiment": {
-            "target_angle_deg": 60.0,
-            "target_achieved": False,
-            "target_time_s": None,
-        }})
-        self.assertFalse(result["target_achieved"])
-        self.assertIsNone(result["target_time_s"])
-
-    def test_null_saved_target_result_is_unknown(self):
-        result = target_metrics(self.path, {"experiment": {
-            "target_angle_deg": 60.0,
-            "target_achieved": None,
-        }})
-        self.assertIsNone(result["target_achieved"])
-        self.assertIsNone(result["target_time_s"])
-
-    def test_post_stop_angle_does_not_create_target(self):
-        manifest = {"experiment": {
-            "target_angle_deg": 30,
-            "actual_elapsed_duration_s": 10.0,
-            "target_time_source": "workbench_monotonic_motor_start_ack",
-            "target_achieved": False,
-            "target_time_s": None,
-        }}
-        result = target_metrics(self.path, manifest)
-        self.assertFalse(result["target_achieved"])
-        self.assertIsNone(result["target_time_s"])
-
-    def test_inconsistent_recorded_target_is_not_silently_accepted(self):
-        manifest = {"experiment": {
-            "target_angle_deg": 30,
-            "actual_elapsed_duration_s": 14.3,
-            "target_time_source": "workbench_monotonic_motor_start_ack",
-            "target_achieved": True,
-            "target_time_s": 14.83,
-        }}
-        result = target_metrics(self.path, manifest)
-        self.assertIsNone(result["target_achieved"])
-        self.assertEqual(result["time_source"], "invalid_recorded_event")
-
-    def test_completed_51_15_degree_run_persists_target_status_after_reload(self):
-        with tempfile.TemporaryDirectory() as temporary_directory:
-            repository = ExperimentRepository(Path(temporary_directory))
-            session = repository.create(
-                name="completed target",
-                notes="",
-                data_source=DataSourceMode.REAL,
-                serial_port="COM6",
-                experiment_id="7cae9c7e-d72a-4edf-92d5-3e5928e12abe",
-                experiment_metadata={
-                    "target_angle_deg": 50.0,
-                    "actual_elapsed_duration_s": 12.1,
-                    "target_time_source": "workbench_monotonic_motor_start_ack",
-                    "target_achieved": True,
-                    "target_time_s": 12.075,
-                    "measured_initial_angle_deg": 16.35,
-                },
+class MaximumAngleMetricsTests(unittest.TestCase):
+    def test_uses_validated_samples_and_fixed_success_threshold(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory)
+            (path / "telemetry.csv").write_text(
+                "time_s,angle_deg,quality\n"
+                "0,35.1,valid\n"
+                "1,35.8,valid\n"
+                "2,117.4,rejected\n"
+                "3,36.5,valid\n"
+                "4,37.2,valid\n",
+                encoding="utf-8",
             )
-            with (session.directory / "telemetry.csv").open(
-                "a", encoding="utf-8", newline=""
-            ) as telemetry_file:
-                telemetry_file.write(
-                    "1,0.0,16.35,0,,,,valid\n"
-                    "2,12.075,51.15,0,,,,valid\n"
-                )
-            repository.finalize(
-                session,
-                completion_status="COMPLETED",
-                sample_count=2,
-                raw_line_count=2,
-            )
+            result = target_metrics(path, {"experiment": {}})
+        self.assertEqual(result["maximum_angle_deg"], 37.2)
+        self.assertEqual(result["outcome"], "COMPLETED")
 
-            reloaded = repository.load(session.directory)
-            result = target_metrics(session.directory, reloaded.manifest)
-            self.assertTrue(result["target_achieved"])
-            self.assertAlmostEqual(result["target_time_s"], 12.075)
-            self.assertEqual(reloaded.manifest["completion_status"], "COMPLETED")
-
-            listed = repository.list_manifests()
-            self.assertEqual(len(listed), 1)
-            self.assertTrue(target_metrics(listed[0][0], listed[0][1])["target_achieved"])
-
-            controller = WorkbenchController(experiment_repository=repository)
-            page = ExperimentManagerPage(controller)
-            self.addCleanup(controller.shutdown)
-            self.addCleanup(page.close)
-            self.assertEqual(page.table.item(0, 7).text(), "Yes")
-            self.assertEqual(page.table.item(0, 8).text(), "12.07 s")
-            page.table.selectRow(0)
-            self.assertEqual(page.detail_labels["Target achieved"].text(), "Yes")
-            self.assertEqual(page.detail_labels["Target time"].text(), "12.07 s")
-
-            refreshed_manifest = dict(listed[0][1])
-            refreshed_details = dict(refreshed_manifest["experiment"])
-            refreshed_details.update(target_achieved=False, target_time_s=None)
-            refreshed_manifest["experiment"] = refreshed_details
-            repository.write_manifest(session.directory, refreshed_manifest)
-            page.refresh()
-            self.assertEqual(page.table.item(0, 7).text(), "No")
-            self.assertEqual(page.table.item(0, 8).text(), "—")
-            self.assertEqual(page.detail_labels["Target achieved"].text(), "No")
-            self.assertEqual(page.detail_labels["Target time"].text(), "—")
-
-    def test_unreached_target(self):
-        result = target_metrics(self.path, {"experiment": {"target_angle_deg": 65}})
-        self.assertFalse(result["target_achieved"])
-        self.assertIsNone(result["target_time_s"])
-
-    def test_rejected_outlier_is_excluded_from_target_analysis(self):
-        filtered = self.path / "telemetry.csv"
-        filtered.write_text(
-            "sample_index,time_s,angle_deg,position_mm,quality\n"
-            "1,0.0,35.1,0,valid\n"
-            "2,0.1,35.8,0,valid\n"
-            "3,0.2,117.4,0,rejected_plausibility\n"
-            "4,0.3,36.5,0,valid\n"
-            "5,0.4,37.2,0,valid\n",
-            encoding="utf-8",
+    def test_threshold_and_missing_samples(self):
+        self.assertEqual(
+            target_metrics(Path(tempfile.mkdtemp()), {
+                "maximum_angle_deg": 90.0,
+            })["outcome"],
+            "SUCCESS",
         )
-        result = target_metrics(self.path, {"experiment": {"target_angle_deg": 100}})
-        self.assertFalse(result["target_achieved"])
-        self.assertIsNone(result["target_time_s"])
-
-
-if __name__ == "__main__":
-    unittest.main()
+        self.assertEqual(
+            target_metrics(Path(tempfile.mkdtemp()), {
+                "maximum_angle_deg": 89.9,
+            })["outcome"],
+            "COMPLETED",
+        )
+        self.assertEqual(
+            target_metrics(Path(tempfile.mkdtemp()), {"experiment": {}})["outcome"],
+            "INVALID",
+        )

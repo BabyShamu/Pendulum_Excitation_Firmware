@@ -661,30 +661,22 @@ class ExperimentRunTests(unittest.TestCase):
         self.assertEqual(manifest["completion_status"], "COMPLETED")
         self.assertEqual(manifest["experiment"]["completion_reason"], "duration_elapsed")
 
-    def test_autoresonance_target_crossing_during_firmware_target_stop_is_saved(self) -> None:
+    def test_autoresonance_validated_maximum_is_preserved_without_target_stop(self) -> None:
         directory = self.temporary_directory()
         controller, device, _repository = self.create_connected_controller(directory)
         self.addCleanup(controller.shutdown)
         self.prepare_ready_held_system(controller, device)
 
-        controller.experiment_run.start(AutoResonanceDefinition(6.0, 0.0, 20.0, target_angle_deg=50.0))
+        controller.experiment_run.start(AutoResonanceDefinition(6.0, 0.0, 20.0))
         self.assertTrue(
             self.wait_for(lambda: controller.experiment_run.snapshot.state == ExperimentRunState.RUNNING)
         )
 
         run = controller.experiment_run
-        run._target_detector.reset()
         run._on_telemetry_sample(TelemetrySample(100, 12.055, 49.4, 0.0, "real"))
         run._on_telemetry_sample(TelemetrySample(101, 12.075, 51.15, 0.0, "real"))
-        run._pending_final_state = ExperimentRunState.COMPLETE
-        run._pending_completion_reason = "TARGET_REACHED"
-        run._phase = "sine_stop"
-        run._set_snapshot(state=ExperimentRunState.STOPPING)
-        run._on_telemetry_sample(TelemetrySample(102, 12.095, 50.8, 0.0, "real"))
-
-        self.assertIsNotNone(run._target_reached_monotonic)
-        self.assertEqual(run._pending_completion_reason, "TARGET_REACHED")
-        self.assertEqual(run._pending_final_state, ExperimentRunState.COMPLETE)
+        self.assertAlmostEqual(run.snapshot.max_angle_deg, 51.15)
+        self.assertEqual(run._pending_completion_reason, "")
         self.assertEqual(device.protocol_actions.count("parametric_stop"), 0)
 
 

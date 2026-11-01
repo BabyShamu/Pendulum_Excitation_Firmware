@@ -22,7 +22,7 @@ class FreeSwingDefinitionTests(unittest.TestCase):
         self.assertIsNone(data["commanded_amplitude_mm"])
         self.assertIsNone(data["commanded_frequency_hz"])
         self.assertIsNone(data["commanded_phase_deg"])
-        self.assertIsNone(data["target_angle_deg"])
+        self.assertNotIn("target_angle_deg", data)
 
     def test_duration_must_be_positive(self):
         for duration in (0, -1, float("nan"), float("inf")):

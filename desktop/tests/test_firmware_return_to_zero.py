@@ -125,7 +125,7 @@ class FirmwareReturnToZeroTests(unittest.TestCase):
         self.assertIn("ReturnToCenter()", function_body("ProcessMaintenanceCommand"))
         self.assertNotIn("RequestReturnToZero(", function_body("StopAutoResonanceV2"))
         self.assertIn('RequestReturnToZero("operator_stop")', source)
-        self.assertIn('RequestReturnToZero("target_angle_reached")', source)
+        self.assertIn("PENDULUM_ANGLE_LIMIT_DEG", source)
 
     def test_ar_v2_stop_cleans_up_before_arming_return(self) -> None:
         process_line = function_body("ProcessLine")
