@@ -178,6 +178,31 @@ class ParametricV2Trajectory:
 
 
 class FirmwareArV2TrajectoryBehaviorTests(unittest.TestCase):
+    def test_all_ar_modes_generate_nonzero_targets_for_motion(self) -> None:
+        for mode in (1, 2, 3):
+            controller = ArV2Waveform()
+            commands = [
+                controller.step(
+                    0.3 * math.sin(2.0 * math.pi * index / 37.0),
+                    5.0,
+                    0.4,
+                    mode,
+                )
+                for index in range(1, 121)
+            ]
+            self.assertTrue(
+                any(abs(command) > 0.025 for command in commands),
+                f"AR mode {mode} did not produce a step-sized target",
+            )
+
+            trajectory = ParametricV2Trajectory()
+            trajectory.set_target(round(commands[-1] * STEPS_PER_MM))
+            trajectory.run_until(500_000)
+            self.assertTrue(
+                trajectory.rising_edges,
+                f"AR mode {mode} did not schedule TIM6-equivalent steps",
+            )
+
     def test_corrected_waveform_is_negative_for_all_fourier_modes(self) -> None:
         for mode in (1, 2, 3):
             old = ArV2Waveform(excitation_sign=1.0)

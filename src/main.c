@@ -3276,7 +3276,13 @@ static void UpdateParametricTest(void)
              (long)targetSteps);
     UartPrint(msg);
 }
-
+static uint8_t AutoResonanceModeFromVariant(const char *variant)
+{
+    if (strcmp(variant, "ar1") == 0) { return 1U; }
+    if (strcmp(variant, "ar2") == 0) { return 2U; }
+    if (strcmp(variant, "ar3") == 0) { return 3U; }
+    return 0U;
+}
 
 static void UpdateAutoResonanceV2(void)
 {
@@ -3293,6 +3299,7 @@ static void UpdateAutoResonanceV2(void)
         g_arv2ReadFailures++;
         return;
     }
+
     g_arv2ReadFailures=0U;
     angleDeg=RelativeAngleDegrees(raw);
     (void)ARV2_Step(&g_arv2,angleDeg*(PI_F/180.0f),
@@ -5740,7 +5747,13 @@ static void ProcessLine(char *line)
             g_tim6TrajectoryOwner=TIM6_TRAJECTORY_OWNER_PARAMETRIC;
             g_arv2Running=1U;
             g_suppressPromptOnce=1U;
-            UartPrint("ar_v2 started (EXPERIMENTAL: max 20 mm configurable; actuator clamp 7.5 mm)\r\n");
+            {
+                char startMessage[128];
+                snprintf(startMessage, sizeof(startMessage),
+                         "ar_v2 started mode=%u (EXPERIMENTAL: max 20 mm configurable; actuator clamp 7.5 mm)\r\n",
+                         mode);
+                UartPrint(startMessage);
+            }
             UartPrint("time_s,angle_deg,command_mm,motor_mm,actual_mm,phase_rad,waveform\r\n");
             return;
         }
@@ -6164,7 +6177,7 @@ static void ProcessLine(char *line)
             strcmp(variant, "ar3") == 0)
         {
             char delegated[80];
-            unsigned int mode = (variant[2] - '0');
+            uint8_t mode = AutoResonanceModeFromVariant(variant);
             snprintf(delegated, sizeof(delegated),
                      "ar_v2 start %.9g %.9g %u",
                      (double)amplitude, (double)phase, mode);

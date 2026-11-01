@@ -36,6 +36,25 @@ def function_body(name: str) -> str:
 
 
 class FirmwareAutoResonanceV2TrajectoryTests(unittest.TestCase):
+    def test_unified_ar_variants_use_explicit_mode_numbers(self) -> None:
+        dispatch = FIRMWARE_SOURCE.split(
+            "static uint8_t AutoResonanceModeFromVariant", 1
+        )[1].split("static void UpdateAutoResonanceV2", 1)[0]
+        for variant, mode in (("ar1", "1U"), ("ar2", "2U"), ("ar3", "3U")):
+            self.assertIn(f'strcmp(variant, "{variant}") == 0', dispatch)
+            self.assertIn(f"return {mode}", dispatch)
+
+        process_line = function_body("ProcessLine")
+        self.assertIn("AutoResonanceModeFromVariant(variant)", process_line)
+        self.assertNotIn("(variant[2] - '0')", process_line)
+
+    def test_ar_start_diagnostic_reports_selected_mode(self) -> None:
+        start = FIRMWARE_SOURCE.split(
+            'if (strncmp(line,"ar_v2 start ",12U)==0', 1
+        )[1].split('UartPrint("time_s,angle_deg', 1)[0]
+        self.assertIn("ar_v2 started mode=%u", start)
+        self.assertIn("mode", start)
+
     def test_ar_v2_has_a_local_waveform_polarity_correction(self) -> None:
         self.assertRegex(ARV2_HEADER, r"#define ARV2_EXCITATION_SIGN\s+\(-1\.0f\)")
         self.assertIn("wave=ARV2_EXCITATION_SIGN*wave", ARV2_HEADER)
