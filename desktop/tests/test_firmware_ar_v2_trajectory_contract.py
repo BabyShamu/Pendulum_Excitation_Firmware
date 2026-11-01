@@ -145,6 +145,27 @@ class FirmwareAutoResonanceV2TrajectoryTests(unittest.TestCase):
             self.assertIn(required, update)
         self.assertRegex(FIRMWARE_SOURCE, r"#define PARAMETRIC_TEST_PERIOD_MS\s+5U")
 
+    def test_ar_diagnostic_rate_is_configurable_without_changing_control_period(self) -> None:
+        process_line = function_body("ProcessLine")
+        update = function_body("UpdateAutoResonanceV2")
+        self.assertRegex(FIRMWARE_SOURCE, r"#define AR_DIAGNOSTIC_DEFAULT_RATE_HZ\s+50U")
+        self.assertRegex(FIRMWARE_SOURCE, r"#define AR_DIAGNOSTIC_MAX_RATE_HZ\s+50U")
+        self.assertIn('strncmp(line, "ar_trace ", 9) == 0', process_line)
+        self.assertIn("g_arv2TraceRateHz = (uint32_t)rate", process_line)
+        self.assertIn("rate > AR_DIAGNOSTIC_MAX_RATE_HZ", process_line)
+        self.assertIn("if (g_arv2TraceRateHz == 0U)", update)
+        self.assertIn("tracePeriodMs = 1000U / g_arv2TraceRateHz", update)
+        self.assertIn("PARAMETRIC_TEST_PERIOD_MS", update)
+        self.assertIn("g_arDiagnosticDroppedMessages++", update)
+
+    def test_ar_and_standard_telemetry_statistics_are_exposed_by_diag(self) -> None:
+        diagnostics = function_body("PrintDiagnostics")
+        self.assertIn("standard_telemetry=%lu", diagnostics)
+        self.assertIn("ar_diagnostic=%lu", diagnostics)
+        self.assertIn("ar_diagnostic_dropped=%lu", diagnostics)
+        self.assertIn("uart_rx_overflow=%lu", diagnostics)
+        self.assertIn("g_uartTxDroppedMessages", diagnostics)
+
     def test_healthy_sensor_path_does_not_wait_or_inhibit_tim6(self) -> None:
         timer = function_body("ParametricV2OnTimer")
         self.assertIn("g_closedLoopFault != 0U", timer)

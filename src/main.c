@@ -75,6 +75,8 @@
 #define PARAMETRIC_UPDATE_PERIOD_MS   10U
 #define PARAMETRIC_TEST_PERIOD_MS      5U
 #define PARAMETRIC_TEST_TELEMETRY_DECIMATION 4U
+#define AR_DIAGNOSTIC_DEFAULT_RATE_HZ  50U
+#define AR_DIAGNOSTIC_MAX_RATE_HZ      50U
 #define PARAMETRIC_TEST_AGC_STEP       0.0005f
 #define PARAMETRIC_TEST_AGC_Z_EPSILON  1e-20f
 #define PARAMETRIC_TEST_AGC_MAX_LOG_GAIN 6.9077553f
@@ -353,6 +355,9 @@ static volatile uint8_t g_uartTxBusy = 0U;
 static volatile uint16_t g_uartTxInFlight = 0U;
 static volatile uint32_t g_uartTxDroppedMessages = 0U;
 static volatile uint32_t g_uartTxDroppedBytes = 0U;
+static volatile uint32_t g_standardTelemetryMessages = 0U;
+static volatile uint32_t g_arDiagnosticMessages = 0U;
+static volatile uint32_t g_arDiagnosticDroppedMessages = 0U;
 
 static uint32_t g_targetHz = DEFAULT_TARGET_HZ;
 static uint32_t g_currentHz = 50U;
@@ -424,6 +429,8 @@ static ARV2_State g_arv2={0};
 static float g_arv2AmpMm=0.0f, g_arv2Phase=0.0f;
 static uint8_t g_arv2Mode=1U, g_arv2ReadFailures=0U;
 static uint32_t g_arv2Next=0U, g_arv2Start=0U, g_arv2Samples=0U;
+static uint32_t g_arv2TraceNextMs = 0U;
+static uint32_t g_arv2TraceRateHz = AR_DIAGNOSTIC_DEFAULT_RATE_HZ;
 static volatile uint8_t g_parametricClosedLoopExperimentMode = 0U;
 static volatile int32_t g_parametricClosedLoopTargetSteps = 0;
 static float g_parametricClosedLoopAmplitudeMm = 0.0f;
@@ -3291,6 +3298,7 @@ static void UpdateAutoResonanceV2(void)
     float angleDeg,cmd,motor;
     int32_t steps,halfTravel,margin;
     char line[190];
+    uint32_t tracePeriodMs;
     if ((int32_t)(now-g_arv2Next)<0) return;
     do { g_arv2Next+=PARAMETRIC_TEST_PERIOD_MS; }
     while ((int32_t)(now-g_arv2Next)>=0);
@@ -3314,13 +3322,36 @@ static void UpdateAutoResonanceV2(void)
     if (steps< -halfTravel) steps= -halfTravel;
     g_parametricV2TargetSteps=steps;
     ClosedLoopActuatorKick();
-    if ((g_arv2Samples++%PARAMETRIC_TEST_TELEMETRY_DECIMATION)!=0U)
+    if (g_arv2TraceRateHz == 0U)
+    {
         return;
+    }
+    tracePeriodMs = 1000U / g_arv2TraceRateHz;
+    if (tracePeriodMs == 0U)
+    {
+        tracePeriodMs = 1U;
+    }
+    if ((int32_t)(now - g_arv2TraceNextMs) < 0)
+    {
+        return;
+    }
+    g_arv2TraceNextMs = now + tracePeriodMs;
+    if (g_arv2Samples++ == UINT32_MAX)
+    {
+        g_arv2Samples = 0U;
+    }
     snprintf(line,sizeof(line),"%.3f,%.2f,%.3f,%.3f,%.3f,%.4f,%.4f\r\n",
       (double)(now-g_arv2Start)/1000.0,(double)angleDeg,(double)cmd,
       (double)motor,(double)g_positionSteps/g_stepsPerMm,
       (double)g_arv2.measured_phase_rad,(double)g_arv2.waveform);
-    UartPrint(line);
+    if (UartTryEnqueue(line, strlen(line)) != 0U)
+    {
+        g_arDiagnosticMessages++;
+    }
+    else
+    {
+        g_arDiagnosticDroppedMessages++;
+    }
 }
 
 static void UpdateParametricClosedLoop(void)
@@ -3944,7 +3975,7 @@ static void PrintHelp(void)
     UartPrint("  sine <amp_mm> <frequency_hz> | sine stop\r\n");
     UartPrint("DIAGNOSTICS:\r\n");
     UartPrint("  diag [param start|param stop|trajectory <amp> <freq> <duration>]\r\n");
-    UartPrint("  param_trace 0|1 | status\r\n");
+    UartPrint("  param_trace 0|1 | ar_trace 0|10|20|...|50\r\n");
     UartPrint("MOTION AND CONFIGURATION:\r\n");
     UartPrint("  home | go_zero | scale <steps/mm> | accel [steps/s2]\r\n");
     UartPrint("SENSORS AND SAFETY:\r\n");
@@ -3974,6 +4005,7 @@ static void PrintHelpCategory(const char *category)
         UartPrint("DIAGNOSTICS\r\n");
         UartPrint("diag - low-level firmware diagnostics\r\n");
         UartPrint("param_trace 0|1 - parametric trace output\r\n");
+        UartPrint("ar_trace 0|10|20|...|50 - AR diagnostic rows per second; 0 disables\r\n");
         UartPrint("v2_test <amp_mm> <frequency_hz> <duration_s> - timed trajectory test\r\n");
         UartPrint("parametric_test 0|1 - signal-processing diagnostic without motion\r\n");
         return;
@@ -4042,6 +4074,7 @@ static void PrintDiagnostics(void)
 {
     char timerMsg[300];
     char as5600Msg[640];
+    char telemetryMsg[240];
     AS5600LineState lines;
     AS5600_SampleLineStates(&lines);
     snprintf(
@@ -4095,6 +4128,20 @@ static void PrintDiagnostics(void)
         (unsigned int)lines.scl,
         (unsigned long)HAL_GetTick());
     UartPrint(as5600Msg);
+    snprintf(
+        telemetryMsg,
+        sizeof(telemetryMsg),
+        "diag: standard_telemetry=%lu ar_diagnostic=%lu ar_diagnostic_dropped=%lu "
+        "uart_rx_overflow=%lu uart_tx_dropped=%lu uart_tx_dropped_bytes=%lu "
+        "ar_trace_rate_hz=%lu\r\n",
+        (unsigned long)g_standardTelemetryMessages,
+        (unsigned long)g_arDiagnosticMessages,
+        (unsigned long)g_arDiagnosticDroppedMessages,
+        (unsigned long)g_uartRxOverflowCount,
+        (unsigned long)g_uartTxDroppedMessages,
+        (unsigned long)g_uartTxDroppedBytes,
+        (unsigned long)g_arv2TraceRateHz);
+    UartPrint(telemetryMsg);
 }
 
 static const char *ActiveModeName(void)
@@ -5256,7 +5303,10 @@ static void PrintLiveTelemetry(void)
                      (double)((float)g_positionSteps / g_stepsPerMm));
         }
     }
-    UartPrint(msg);
+    if (UartTryEnqueue(msg, strlen(msg)) != 0U)
+    {
+        g_standardTelemetryMessages++;
+    }
 }
 
 static void PrintSwitches(void)
@@ -5449,6 +5499,7 @@ static void ProcessLine(char *line)
         strcmp(line,"parametric stop")!=0 &&
         strcmp(line,"status")!=0 && strcmp(line,"diag")!=0 &&
         strcmp(line,"help")!=0 && strncmp(line, "help ", 5U)!=0 &&
+        strncmp(line, "ar_trace ", 9U)!=0 &&
         strcmp(line,"angle")!=0 &&
         strcmp(line,"switches")!=0)
     {
@@ -5535,6 +5586,27 @@ static void ProcessLine(char *line)
     if (strcmp(line, "status") == 0)
     {
         PrintStatus();
+        return;
+    }
+
+    if (strncmp(line, "ar_trace ", 9) == 0)
+    {
+        char *endptr;
+        unsigned long rate = strtoul(line + 9, &endptr, 10);
+        if (endptr == line + 9 || *endptr != '\0' ||
+            rate > AR_DIAGNOSTIC_MAX_RATE_HZ)
+        {
+            UartPrint("usage: ar_trace 0|10|20|...|50\r\n");
+            return;
+        }
+        g_arv2TraceRateHz = (uint32_t)rate;
+        g_arv2TraceNextMs = HAL_GetTick();
+        {
+            char response[80];
+            snprintf(response, sizeof(response),
+                     "ar_trace rate_hz=%lu\r\n", rate);
+            UartPrint(response);
+        }
         return;
     }
 
@@ -5740,6 +5812,7 @@ static void ProcessLine(char *line)
             g_arv2Samples=0U;
             g_arv2Start=HAL_GetTick();
             g_arv2Next=g_arv2Start+PARAMETRIC_TEST_PERIOD_MS;
+            g_arv2TraceNextMs=g_arv2Start;
             g_parametricV2TargetSteps=g_positionSteps;
             g_parametricV2SpeedHz=0.0f;
             g_parametricV2Enabled=1U;
