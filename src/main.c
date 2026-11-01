@@ -316,6 +316,7 @@ static float ParametricTestAgc(float input, float *logGain);
 static void DelayUs(uint32_t us);
 static void PollUart(void);
 static void ProcessLine(char *line);
+static uint8_t ProcessControllerRequest(char *line);
 static void PrintHelp(void);
 static void PrintHelpCategory(const char *category);
 static void PrintStatus(void);
@@ -5288,6 +5289,122 @@ static void ReportSwitchChanges(void)
     }
 }
 
+static uint8_t ProcessControllerRequest(char *line)
+{
+    unsigned long requestId;
+    char command[24];
+    char mapped[96];
+    char *cursor;
+    char response[160];
+    int parsed;
+    uint8_t isStop = 0U;
+    uint8_t accepted = 0U;
+    const char *mode = "unknown";
+
+    if (strncmp(line, "req ", 4U) != 0)
+    {
+        return 0U;
+    }
+
+    parsed = sscanf(line + 4U, "%lu %23s", &requestId, command);
+    if (parsed != 2 || requestId == 0U)
+    {
+        UartPrint("response: id=0 type=controller_request ok=0 error=invalid_request\r\n");
+        return 1U;
+    }
+
+    cursor = line + 4U;
+    while (*cursor != '\0' && *cursor != ' ') { cursor++; }
+    while (*cursor == ' ') { cursor++; }
+    while (*cursor != '\0' && *cursor != ' ') { cursor++; }
+    while (*cursor == ' ') { cursor++; }
+
+    if (strcmp(command, "sine") == 0)
+    {
+        mode = "sine";
+        snprintf(mapped, sizeof(mapped), "sine %s", cursor);
+        isStop = (strcmp(cursor, "stop") == 0);
+    }
+    else if (strcmp(command, "parametric") == 0)
+    {
+        char variant[16];
+        if (sscanf(cursor, "%15s", variant) != 1)
+        {
+            snprintf(response, sizeof(response),
+                     "response: id=%lu type=controller_request ok=0 error=invalid_parameters\r\n",
+                     requestId);
+            UartPrint(response);
+            return 1U;
+        }
+        mode = variant;
+        isStop = (strcmp(variant, "stop") == 0);
+        snprintf(mapped, sizeof(mapped), "parametric %s", cursor);
+    }
+    else
+    {
+        snprintf(response, sizeof(response),
+                 "response: id=%lu type=controller_request ok=0 error=unsupported_controller\r\n",
+                 requestId);
+        UartPrint(response);
+        return 1U;
+    }
+
+    ProcessLine(mapped);
+
+    if (isStop != 0U)
+    {
+        accepted = (g_sineRunning == 0U && g_parametricRunning == 0U &&
+                    g_arv2Running == 0U && g_parametricClosedLoopRunning == 0U &&
+                    g_phaseTrackedSineRunning == 0U) ? 1U : 0U;
+        snprintf(response, sizeof(response),
+                 "response: id=%lu type=controller_stop ok=%u mode=%s active=%u\r\n",
+                 requestId, (unsigned int)accepted, mode,
+                 (unsigned int)(accepted == 0U));
+    }
+    else if (strcmp(mode, "sine") == 0)
+    {
+        accepted = g_sineRunning;
+        snprintf(response, sizeof(response),
+                 "response: id=%lu type=controller_start ok=%u mode=sine active=%u error=%s\r\n",
+                 requestId, (unsigned int)accepted, (unsigned int)accepted,
+                 accepted != 0U ? "none" : "controller_rejected");
+    }
+    else if (strcmp(mode, "classic") == 0)
+    {
+        accepted = (g_parametricRunning != 0U && g_parametricV2Enabled == 0U);
+        snprintf(response, sizeof(response),
+                 "response: id=%lu type=controller_start ok=%u mode=classic active=%u error=%s\r\n",
+                 requestId, (unsigned int)accepted, (unsigned int)accepted,
+                 accepted != 0U ? "none" : "controller_rejected");
+    }
+    else if (strcmp(mode, "enhanced") == 0)
+    {
+        accepted = (g_parametricRunning != 0U && g_parametricV2Enabled != 0U &&
+                    g_arv2Running == 0U);
+        snprintf(response, sizeof(response),
+                 "response: id=%lu type=controller_start ok=%u mode=enhanced active=%u error=%s\r\n",
+                 requestId, (unsigned int)accepted, (unsigned int)accepted,
+                 accepted != 0U ? "none" : "controller_rejected");
+    }
+    else if (strcmp(mode, "ar1") == 0 || strcmp(mode, "ar2") == 0 ||
+             strcmp(mode, "ar3") == 0)
+    {
+        accepted = (g_arv2Running != 0U);
+        snprintf(response, sizeof(response),
+                 "response: id=%lu type=controller_start ok=%u mode=%s active=%u error=%s\r\n",
+                 requestId, (unsigned int)accepted, mode, (unsigned int)accepted,
+                 accepted != 0U ? "none" : "controller_rejected");
+    }
+    else
+    {
+        snprintf(response, sizeof(response),
+                 "response: id=%lu type=controller_start ok=0 mode=%s active=0 error=unsupported_controller\r\n",
+                 requestId, mode);
+    }
+    UartPrint(response);
+    return 1U;
+}
+
 static void ProcessLine(char *line)
 {
     uint32_t value;
@@ -5311,6 +5428,11 @@ static void ProcessLine(char *line)
     }
 
     if (length == 0U)
+    {
+        return;
+    }
+
+    if (ProcessControllerRequest(line) != 0U)
     {
         return;
     }

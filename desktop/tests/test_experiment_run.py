@@ -14,6 +14,7 @@ from pendulum_workbench.application.firmware_commands import FirmwareCommand
 from pendulum_workbench.domain.angle_prediction import AngleSource
 from pendulum_workbench.domain.experiment_run import (
     AutoResonanceDefinition,
+    ExperimentMode,
     ExperimentRunState,
     PhaseTrackedSineDefinition,
     VerticalSineDefinition,
@@ -90,6 +91,18 @@ class SineExperimentSerial:
         if text == "live 1":
             self._live_enabled = True
             self._chunks.append(b"\r\nlive telemetry enabled\r\n")
+        elif len(fields) >= 3 and fields[0] == "req":
+            request_id = fields[1]
+            if fields[2] == "sine":
+                command = "sine_stop" if len(fields) == 4 and fields[3] == "stop" else "sine_start"
+                arguments = fields[3:]
+            elif fields[2] == "parametric":
+                command = "parametric_stop" if len(fields) == 4 and fields[3] == "stop" else "parametric_start"
+                arguments = fields[4:] if command == "parametric_start" else []
+            else:
+                return len(data)
+            self.write(f"maint {request_id} {command} {' '.join(arguments)}\r\n".encode("ascii"))
+            return len(data)
         elif len(fields) >= 3 and fields[0] == "maint":
             request_id, command = fields[1], fields[2]
             self.protocol_actions.append(command)
@@ -1404,7 +1417,7 @@ class ExperimentRunTests(unittest.TestCase):
         window = MainWindow(controller)
         page = window.experiment_page
 
-        self.assertEqual(page.experiment_mode_selector.count(), 3)
+        self.assertEqual(page.experiment_mode_selector.count(), 9)
         self.assertEqual(page.experiment_mode_selector.currentText(), "Vertical Sinusoidal Excitation")
         self.assertTrue(all(hasattr(page, name) for name in (
             "amplitude_input",
@@ -1458,7 +1471,9 @@ class ExperimentRunTests(unittest.TestCase):
         page.amplitude_input.setText("5.0")
         page.frequency_input.setText("1.8")
         page.duration_input.setText("20")
-        page.experiment_mode_selector.setCurrentIndex(1)
+        page.experiment_mode_selector.setCurrentIndex(
+            page.experiment_mode_selector.findData(ExperimentMode.AUTO_RESONANCE_PARAMETRIC)
+        )
 
         self.assertEqual(page.experiment_mode_selector.currentText(), "Auto-Resonance")
         self.assertEqual(page.amplitude_input.text(), "7.5")
@@ -1475,14 +1490,20 @@ class ExperimentRunTests(unittest.TestCase):
         self.assertTrue(page.primary_run_button.isEnabled())
         self.assertAlmostEqual(page._definition_from_fields().phase_deg, -12.5)
 
-        page.experiment_mode_selector.setCurrentIndex(0)
+        page.experiment_mode_selector.setCurrentIndex(
+            page.experiment_mode_selector.findData(
+                ExperimentMode.VERTICAL_SINUSOIDAL_EXCITATION
+            )
+        )
         self.assertEqual(page.amplitude_input.text(), "5.0")
         self.assertEqual(page.frequency_input.text(), "1.8")
         self.assertFalse(page.frequency_input.isHidden())
         self.assertTrue(page.phase_input.isHidden())
         self.assertTrue(page.primary_run_button.isEnabled())
 
-        page.experiment_mode_selector.setCurrentIndex(1)
+        page.experiment_mode_selector.setCurrentIndex(
+            page.experiment_mode_selector.findData(ExperimentMode.AUTO_RESONANCE_PARAMETRIC)
+        )
         self.assertEqual(page.amplitude_input.text(), "7.5")
         self.assertEqual(page.phase_input.text(), "22.5")
         self.assertTrue(page.primary_run_button.isEnabled())
@@ -1499,7 +1520,11 @@ class ExperimentRunTests(unittest.TestCase):
         page.amplitude_input.setText("4.0")
         page.frequency_input.setText("1.7")
         page.duration_input.setText("12")
-        page.experiment_mode_selector.setCurrentIndex(2)
+        page.experiment_mode_selector.setCurrentIndex(
+            page.experiment_mode_selector.findData(
+                ExperimentMode.PHASE_TRACKED_SINE_AUTO_RESONANCE
+            )
+        )
 
         self.assertEqual(
             page.experiment_mode_selector.currentText(),
@@ -1520,7 +1545,11 @@ class ExperimentRunTests(unittest.TestCase):
         self.assertEqual(definition.phase_deg, 25.0)
         self.assertTrue(page.primary_run_button.isEnabled())
 
-        page.experiment_mode_selector.setCurrentIndex(0)
+        page.experiment_mode_selector.setCurrentIndex(
+            page.experiment_mode_selector.findData(
+                ExperimentMode.VERTICAL_SINUSOIDAL_EXCITATION
+            )
+        )
         self.assertEqual(page.amplitude_input.text(), "4.0")
         self.assertEqual(page.frequency_input.text(), "1.7")
         self.assertTrue(page.phase_input.isHidden())

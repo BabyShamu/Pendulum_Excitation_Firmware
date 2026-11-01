@@ -4,6 +4,17 @@ from pendulum_workbench.infrastructure.firmware_protocol import FirmwareProtocol
 
 
 class FirmwareProtocolParserTests(unittest.TestCase):
+    def test_parses_correlated_unified_controller_response(self) -> None:
+        response = FirmwareProtocolParser.parse_maintenance_response(
+            "response: id=42 type=controller_start ok=1 mode=ar1 active=1 error=none\r\n"
+        )
+
+        self.assertIsNotNone(response)
+        self.assertEqual(response.request_id, 42)
+        self.assertEqual(response.response_type, "controller_start")
+        self.assertTrue(response.ok)
+        self.assertEqual(response.fields["mode"], "ar1")
+
     def test_parses_correlated_maintenance_response(self) -> None:
         response = FirmwareProtocolParser.parse_maintenance_response(
             "maintenance: id=42 type=switches ok=1 upper=0 lower=1\r\n"

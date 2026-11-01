@@ -132,26 +132,43 @@ class FirmwareCommandService(QObject):
         if not math.isfinite(frequency_hz) or frequency_hz <= 0.0:
             raise ValueError("excitation frequency must be finite and greater than zero")
         arguments = f"{amplitude_mm:.9g} {frequency_hz:.9g}"
-        return self._request(FirmwareCommand.SINE_START, arguments=arguments)
+        return self._request(
+            FirmwareCommand.SINE_START,
+            arguments=arguments,
+            wire_command=f"req {{id}} sine {arguments}",
+        )
 
     def stop_vertical_sine(self) -> int:
         return self._request(
             FirmwareCommand.SINE_STOP,
             timeout_ms=self._SINE_STOP_TIMEOUT_MS,
+            wire_command="req {id} sine stop",
         )
 
     def start_parametric(self, amplitude_mm: float, phase_deg: float) -> int:
+        return self.start_unified_parametric("ar1", amplitude_mm, phase_deg)
+
+    def start_unified_parametric(
+        self, variant: str, amplitude_mm: float, phase_deg: float
+    ) -> int:
+        if variant not in ("classic", "enhanced", "ar1", "ar2", "ar3"):
+            raise ValueError("unsupported parametric controller variant")
         if not math.isfinite(amplitude_mm) or amplitude_mm <= 0.0:
             raise ValueError("pivot amplitude must be finite and greater than zero")
         if not math.isfinite(phase_deg):
             raise ValueError("phase must be finite")
+        arguments = f"{amplitude_mm:.9g} {phase_deg:.9g}"
         return self._request(
             FirmwareCommand.PARAMETRIC_START,
-            arguments=f"{amplitude_mm:.9g} {phase_deg:.9g}",
+            arguments=arguments,
+            wire_command=f"req {{id}} parametric {variant} {arguments}",
         )
 
     def stop_parametric(self) -> int:
-        return self._request(FirmwareCommand.PARAMETRIC_STOP)
+        return self._request(
+            FirmwareCommand.PARAMETRIC_STOP,
+            wire_command="req {id} parametric stop",
+        )
 
     def start_parametric_closed_loop(self, amplitude_mm: float, phase_deg: float) -> int:
         if not math.isfinite(amplitude_mm) or amplitude_mm <= 0.0:
@@ -199,6 +216,7 @@ class FirmwareCommandService(QObject):
         *,
         timeout_ms: int | None = None,
         arguments: str = "",
+        wire_command: str | None = None,
     ) -> int:
         if self.state.snapshot.connection != ConnectionState.CONNECTED:
             raise RuntimeError("Connect to the STM32 before sending a maintenance command")
@@ -215,7 +233,11 @@ class FirmwareCommandService(QObject):
         try:
             self.serial_client.send_maintenance_command(
                 str(request_id),
-                f"maint {request_id} {command.value}{f' {arguments}' if arguments else ''}",
+                (
+                    wire_command.format(id=request_id)
+                    if wire_command is not None
+                    else f"maint {request_id} {command.value}{f' {arguments}' if arguments else ''}"
+                ),
             )
         except (RuntimeError, ValueError, OSError) as error:
             self._fail(str(error))
@@ -245,7 +267,17 @@ class FirmwareCommandService(QObject):
         self.serial_client.clear_maintenance_response(response.request_id)
         if self._active_request_id != response.request_id:
             return
-        if self._active_command is None or response.response_type != self._active_command.value:
+        unified_response = response.response_type in ("controller_start", "controller_stop")
+        expected_unified = self._active_command in (
+            FirmwareCommand.SINE_START,
+            FirmwareCommand.SINE_STOP,
+            FirmwareCommand.PARAMETRIC_START,
+            FirmwareCommand.PARAMETRIC_STOP,
+        )
+        if self._active_command is None or (
+            response.response_type != self._active_command.value
+            and not (expected_unified and unified_response)
+        ):
             self._fail(
                 f"Unexpected maintenance response type {response.response_type!r} "
                 f"for request {response.request_id}."

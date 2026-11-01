@@ -32,9 +32,12 @@ class FirmwareProtocolParser:
     @classmethod
     def parse_maintenance_response(cls, line: str) -> MaintenanceResponse | None:
         text = line.strip()
-        if not text.startswith("maintenance:"):
+        if text.startswith("response:"):
+            fields = dict(cls._field_pattern.findall(text[len("response:"):]))
+        elif text.startswith("maintenance:"):
+            fields = dict(cls._field_pattern.findall(text[len("maintenance:"):]))
+        else:
             return None
-        fields = dict(cls._field_pattern.findall(text[len("maintenance:"):]))
         try:
             request_id = int(fields["id"])
             response_type = fields["type"]

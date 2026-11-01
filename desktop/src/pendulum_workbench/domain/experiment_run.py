@@ -12,6 +12,11 @@ class ExperimentMode(str, Enum):
     AUTO_RESONANCE_PARAMETRIC = "Auto-Resonance"
     AUTO_RESONANCE_PARAMETRIC_CLOSED_LOOP = "Auto-Resonance"
     PHASE_TRACKED_SINE_AUTO_RESONANCE = "Phase-Tracked Sinusoidal Auto-Resonance"
+    PARAMETRIC_CLASSIC = "Parametric Classic"
+    PARAMETRIC_ENHANCED = "Parametric Enhanced"
+    AUTO_RESONANCE_AR1 = "Auto-Resonance AR1"
+    AUTO_RESONANCE_AR2 = "Auto-Resonance AR2"
+    AUTO_RESONANCE_AR3 = "Auto-Resonance AR3"
 
 
 class ExperimentRunState(str, Enum):
@@ -277,6 +282,67 @@ class AutoResonanceDefinition:
 
 
 @dataclass(frozen=True, slots=True)
+class UnifiedParametricDefinition:
+    amplitude_mm: float
+    phase_deg: float
+    duration_s: float
+    variant: str
+    label: str = ""
+    notes: str = ""
+
+    @property
+    def mode(self) -> ExperimentMode:
+        return {
+            "classic": ExperimentMode.PARAMETRIC_CLASSIC,
+            "enhanced": ExperimentMode.PARAMETRIC_ENHANCED,
+            "ar1": ExperimentMode.AUTO_RESONANCE_AR1,
+            "ar2": ExperimentMode.AUTO_RESONANCE_AR2,
+            "ar3": ExperimentMode.AUTO_RESONANCE_AR3,
+        }[self.variant]
+
+    def validate(self) -> None:
+        if self.variant not in ("classic", "enhanced", "ar1", "ar2", "ar3"):
+            raise ValueError("unsupported parametric controller variant")
+        for name, value in (
+            ("pivot amplitude", self.amplitude_mm),
+            ("phase", self.phase_deg),
+            ("duration", self.duration_s),
+        ):
+            if not math.isfinite(value):
+                raise ValueError(f"{name} must be finite")
+        if self.amplitude_mm <= 0.0 or self.duration_s <= 0.0:
+            raise ValueError("amplitude and duration must be greater than zero")
+
+    def partial_name(self) -> str:
+        return f"{self.variant}_A{self.amplitude_mm:g}_P{self.phase_deg:g}_T{self.duration_s:g}s"
+
+    def final_name(self, measured_initial_angle_deg: float) -> str:
+        return f"{self.partial_name()}_Theta{measured_initial_angle_deg:g}"
+
+    def manifest_values(
+        self, *, measured_initial_angle_deg: float | None,
+        actual_elapsed_duration_s: float | None = None,
+        completion_reason: str | None = None,
+    ) -> dict[str, object]:
+        return {
+            "experiment_mode": self.mode.name,
+            "controller_variant": self.variant,
+            "commanded_amplitude_mm": self.amplitude_mm,
+            "commanded_phase_deg": self.phase_deg,
+            "requested_duration_s": self.duration_s,
+            "actual_elapsed_duration_s": actual_elapsed_duration_s,
+            "measured_initial_angle_deg": measured_initial_angle_deg,
+            "optional_label": self.label.strip(),
+            "notes": self.notes.strip(),
+            "generated_run_name": (
+                self.partial_name() if measured_initial_angle_deg is None
+                else self.final_name(measured_initial_angle_deg)
+            ),
+            "completion_reason": completion_reason,
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class PhaseTrackedSineDefinition:
     amplitude_mm: float
     phase_deg: float
@@ -362,4 +428,7 @@ class PhaseTrackedSineDefinition:
         return text if text not in ("", "-0") else "0"
 
 
-ExperimentDefinition = FreeSwingDefinition | VerticalSineDefinition | AutoResonanceDefinition | PhaseTrackedSineDefinition
+ExperimentDefinition = (
+    FreeSwingDefinition | VerticalSineDefinition | AutoResonanceDefinition |
+    UnifiedParametricDefinition | PhaseTrackedSineDefinition
+)

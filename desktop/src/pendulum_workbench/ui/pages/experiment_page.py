@@ -39,6 +39,7 @@ from pendulum_workbench.domain.experiment_run import (
     ExperimentMode,
     ExperimentRunState,
     PhaseTrackedSineDefinition,
+    UnifiedParametricDefinition,
     VerticalSineDefinition,
 )
 from pendulum_workbench.domain.maintenance import PendulumLatchState
@@ -133,8 +134,20 @@ class ExperimentPage(QWidget):
         mode_label.setObjectName("sectionTitle")
         self.experiment_mode_selector = QComboBox()
         self.experiment_mode_selector.addItem("Free Swing", ExperimentMode.FREE_SWING)
-        self.experiment_mode_selector.addItem("Sinusoidal Excitation", ExperimentMode.VERTICAL_SINUSOIDAL_EXCITATION)
+        self.experiment_mode_selector.addItem(
+            "Vertical Sinusoidal Excitation",
+            ExperimentMode.VERTICAL_SINUSOIDAL_EXCITATION,
+        )
+        self.experiment_mode_selector.addItem(
+            "Phase-Tracked Sinusoidal Auto-Resonance",
+            ExperimentMode.PHASE_TRACKED_SINE_AUTO_RESONANCE,
+        )
         self.experiment_mode_selector.addItem("Auto-Resonance", ExperimentMode.AUTO_RESONANCE_PARAMETRIC)
+        self.experiment_mode_selector.addItem("Parametric Classic", ExperimentMode.PARAMETRIC_CLASSIC)
+        self.experiment_mode_selector.addItem("Parametric Enhanced", ExperimentMode.PARAMETRIC_ENHANCED)
+        self.experiment_mode_selector.addItem("Auto-Resonance AR1", ExperimentMode.AUTO_RESONANCE_AR1)
+        self.experiment_mode_selector.addItem("Auto-Resonance AR2", ExperimentMode.AUTO_RESONANCE_AR2)
+        self.experiment_mode_selector.addItem("Auto-Resonance AR3", ExperimentMode.AUTO_RESONANCE_AR3)
         self.experiment_mode_selector.setMinimumHeight(38)
         mode_row.addWidget(mode_label)
         mode_row.addWidget(self.experiment_mode_selector, 1)
@@ -383,6 +396,11 @@ class ExperimentPage(QWidget):
         self.duration_input.textChanged.connect(self._update_setup_validity)
         self.phase_input.textChanged.connect(self._update_setup_validity)
         self.experiment_name_input.textChanged.connect(self._update_name_preview)
+        self.experiment_mode_selector.setCurrentIndex(
+            self.experiment_mode_selector.findData(
+                ExperimentMode.VERTICAL_SINUSOIDAL_EXCITATION
+            )
+        )
         self.experiment_mode_selector.currentIndexChanged.connect(self._on_experiment_mode_changed)
         self._on_experiment_mode_changed(self.experiment_mode_selector.currentIndex())
         self.controller.experiment_loaded.connect(self._show_saved_experiment)
@@ -521,7 +539,15 @@ class ExperimentPage(QWidget):
             )
             definition.validate()
             return definition
-        if self.experiment_mode_selector.currentData() == ExperimentMode.AUTO_RESONANCE_PARAMETRIC:
+        mode = self.experiment_mode_selector.currentData()
+        unified_variants = {
+            ExperimentMode.PARAMETRIC_CLASSIC: "classic",
+            ExperimentMode.PARAMETRIC_ENHANCED: "enhanced",
+            ExperimentMode.AUTO_RESONANCE_AR1: "ar1",
+            ExperimentMode.AUTO_RESONANCE_AR2: "ar2",
+            ExperimentMode.AUTO_RESONANCE_AR3: "ar3",
+        }
+        if mode in unified_variants:
             try:
                 amplitude = float(self.amplitude_input.text().strip())
                 phase = float(self.phase_input.text().strip())
@@ -529,6 +555,26 @@ class ExperimentPage(QWidget):
             except ValueError as error:
                 raise ValueError("Enter numeric amplitude, phase, and duration values") from error
             definition = AutoResonanceDefinition(
+                amplitude, phase, duration,
+                label=self.experiment_name_input.text(),
+                notes=self.experiment_notes_input.text(),
+            )
+            if mode != ExperimentMode.AUTO_RESONANCE_PARAMETRIC:
+                definition = UnifiedParametricDefinition(
+                    amplitude, phase, duration, unified_variants[mode],
+                    label=self.experiment_name_input.text(),
+                    notes=self.experiment_notes_input.text(),
+                )
+            definition.validate()
+            return definition
+        if mode == ExperimentMode.PHASE_TRACKED_SINE_AUTO_RESONANCE:
+            try:
+                amplitude = float(self.amplitude_input.text().strip())
+                phase = float(self.phase_input.text().strip())
+                duration = float(self.duration_input.text().strip())
+            except ValueError as error:
+                raise ValueError("Enter numeric amplitude, phase, and duration values") from error
+            definition = PhaseTrackedSineDefinition(
                 amplitude,
                 phase,
                 duration,
@@ -560,12 +606,24 @@ class ExperimentPage(QWidget):
             self._vertical_frequency_text = self.frequency_input.text()
 
         is_free = mode == ExperimentMode.FREE_SWING
-        is_resonance = mode == ExperimentMode.AUTO_RESONANCE_PARAMETRIC
+        is_resonance = mode in (
+            ExperimentMode.AUTO_RESONANCE_PARAMETRIC,
+            ExperimentMode.PHASE_TRACKED_SINE_AUTO_RESONANCE,
+            ExperimentMode.PARAMETRIC_CLASSIC,
+            ExperimentMode.PARAMETRIC_ENHANCED,
+            ExperimentMode.AUTO_RESONANCE_AR1,
+            ExperimentMode.AUTO_RESONANCE_AR2,
+            ExperimentMode.AUTO_RESONANCE_AR3,
+        )
         self._active_experiment_mode = mode
 
         if is_resonance:
-            self.amplitude_input.setText("7.5")
-            self.phase_input.setText("22.5")
+            if mode == ExperimentMode.PHASE_TRACKED_SINE_AUTO_RESONANCE:
+                self.amplitude_input.setText("10.0")
+                self.phase_input.setText("0.0")
+            else:
+                self.amplitude_input.setText("7.5")
+                self.phase_input.setText("22.5")
         elif mode == ExperimentMode.VERTICAL_SINUSOIDAL_EXCITATION:
             self.amplitude_input.setText(self._vertical_amplitude_text)
             self.frequency_input.setText(self._vertical_frequency_text)

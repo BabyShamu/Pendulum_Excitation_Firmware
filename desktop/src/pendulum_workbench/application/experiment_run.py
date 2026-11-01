@@ -34,6 +34,7 @@ from pendulum_workbench.domain.experiment_run import (
     SUCCESS_ANGLE_DEG,
     VerticalSineDefinition,
     PhaseTrackedSineDefinition,
+    UnifiedParametricDefinition,
 )
 from pendulum_workbench.domain.maintenance import (
     CheckName,
@@ -130,7 +131,14 @@ class ExperimentRunService(QObject):
             return False
         if definition.mode == ExperimentMode.VERTICAL_SINUSOIDAL_EXCITATION:
             return self.is_open_loop_vertical_sine_running
-        if definition.mode == ExperimentMode.AUTO_RESONANCE_PARAMETRIC_CLOSED_LOOP:
+        if definition.mode in (
+            ExperimentMode.AUTO_RESONANCE_PARAMETRIC_CLOSED_LOOP,
+            ExperimentMode.PARAMETRIC_CLASSIC,
+            ExperimentMode.PARAMETRIC_ENHANCED,
+            ExperimentMode.AUTO_RESONANCE_AR1,
+            ExperimentMode.AUTO_RESONANCE_AR2,
+            ExperimentMode.AUTO_RESONANCE_AR3,
+        ):
             return (
                 self.is_active
                 and self._snapshot.measured_initial_angle_deg is not None
@@ -290,7 +298,7 @@ class ExperimentRunService(QObject):
                 )
             if definition.amplitude_mm * 2.0 * steps_per_mm >= span_steps:
                 raise ValueError("Pivot amplitude must remain strictly within the homed travel")
-        elif isinstance(definition, AutoResonanceDefinition):
+        elif isinstance(definition, (AutoResonanceDefinition, UnifiedParametricDefinition)):
             if definition.amplitude_mm * 2.0 * steps_per_mm >= span_steps:
                 raise ValueError(
                     "Pivot amplitude must remain strictly within the proven parametric half-travel limit"
@@ -406,12 +414,16 @@ class ExperimentRunService(QObject):
     def _issue_sine_start(self) -> None:
         definition = self._require_definition()
         try:
-            if isinstance(definition, AutoResonanceDefinition):
+            if isinstance(definition, (AutoResonanceDefinition, UnifiedParametricDefinition)):
                 self._phase = "parametric_start"
-                self.commands.start_parametric(
-                    definition.amplitude_mm,
-                    definition.phase_deg,
-                )
+                if isinstance(definition, UnifiedParametricDefinition):
+                    self.commands.start_unified_parametric(
+                        definition.variant, definition.amplitude_mm, definition.phase_deg
+                    )
+                else:
+                    self.commands.start_parametric(
+                        definition.amplitude_mm, definition.phase_deg
+                    )
             elif isinstance(definition, PhaseTrackedSineDefinition):
                 self._phase = "phase_sine_start"
                 self.commands.start_phase_tracked_sine(
@@ -465,7 +477,9 @@ class ExperimentRunService(QObject):
         )
         if start_command:
             expected_mode = (
-                "parametric"
+                self._definition.variant
+                if isinstance(self._definition, UnifiedParametricDefinition)
+                else "ar1"
                 if command == FirmwareCommand.PARAMETRIC_START
                 else "phase_tracked_sine"
                 if command == FirmwareCommand.PHASE_TRACKED_SINE_START
@@ -475,7 +489,12 @@ class ExperimentRunService(QObject):
                 response.fields.get("active") != "1"
                 or (
                     expected_mode is not None
-                    and response.fields.get("active_mode") != expected_mode
+                    and response.fields.get("active_mode", response.fields.get("mode")) != expected_mode
+                    and not (
+                        command == FirmwareCommand.PARAMETRIC_START
+                        and response.response_type == FirmwareCommand.PARAMETRIC_START.value
+                        and response.fields.get("active_mode") == "parametric"
+                    )
                 )
             ):
                 self._issue_sine_stop_after_uncertain_start("sine_start_unconfirmed")
@@ -507,7 +526,7 @@ class ExperimentRunService(QObject):
                 FirmwareCommand.PHASE_TRACKED_SINE_STOP,
             )
             if response.fields.get("active") != "0" or (
-                expects_idle_mode and response.fields.get("active_mode") != "idle"
+                expects_idle_mode and response.fields.get("active_mode", response.fields.get("mode")) not in ("idle", "parametric")
             ):
                 if self._pending_completion_reason != PENDULUM_ANGLE_LIMIT_COMPLETION_REASON:
                     self._pending_final_state = ExperimentRunState.FAULT
@@ -581,7 +600,7 @@ class ExperimentRunService(QObject):
         self._phase = "sine_stop"
         try:
             definition = self._require_definition()
-            if isinstance(definition, AutoResonanceDefinition):
+            if isinstance(definition, (AutoResonanceDefinition, UnifiedParametricDefinition)):
                 self.commands.stop_parametric()
             elif isinstance(definition, PhaseTrackedSineDefinition):
                 self.commands.stop_phase_tracked_sine()
