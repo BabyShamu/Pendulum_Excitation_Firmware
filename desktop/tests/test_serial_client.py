@@ -125,6 +125,29 @@ class StructuredEventSerial(FakeSerial):
         ]
 
 
+class ARDiagnosticReplaySerial(FakeSerial):
+    def __init__(self, port: str, baud_rate: int, **kwargs: object) -> None:
+        super().__init__(port, baud_rate, **kwargs)
+        rows = [
+            f"{index * 0.005:.3f},{58.1 + (index % 10) * 0.1:.2f},"
+            "7.5,7.4,0.2,1.5708,0.923\r\n"
+            for index in range(1417)
+        ]
+        self._ar_payload = (
+            b"telemetry sample_index=1 time_s=0.000 angle_deg=14.8 position_mm=0.0\r\n"
+            b"time_s,angle_deg,command_mm,motor_mm,actual_mm,phase_rad,waveform\r\n"
+            + "".join(rows).encode("ascii")
+            + b"event: type=return_to_zero_started reason=experiment_stop position_steps=-283\r\n"
+            b"event: type=return_to_zero_completed position_steps=0 duration_ms=135\r\n"
+        )
+
+    def write(self, data: bytes) -> int:
+        result = super().write(data)
+        if data.decode("ascii", errors="replace").strip() == "live 1":
+            self._chunks.append(self._ar_payload)
+        return result
+
+
 class ControllerDiagnosticSerial(FakeSerial):
     def __init__(self, port: str, baud_rate: int, **kwargs: object) -> None:
         super().__init__(port, baud_rate, **kwargs)
@@ -235,6 +258,31 @@ class SerialWorkerTests(unittest.TestCase):
         self.assertEqual(diagnostics[0].diagnostic_fields["target_steps"], "50")
         self.assertEqual(diagnostics[1].diagnostic_fields["angle_source"], "acquiring")
         self.assertEqual(malformed, [])
+        client.disconnect()
+        self.assertTrue(self.wait_for(lambda: not client.is_running))
+
+    def test_ar_diagnostic_replay_does_not_generate_malformed_event_storm(self) -> None:
+        temporary_directory = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary_directory.cleanup)
+        client = SerialTelemetryClient(
+            capture_root=Path(temporary_directory.name),
+            serial_factory=ARDiagnosticReplaySerial,
+            startup_delay_s=0.0,
+        )
+        diagnostics = []
+        malformed = []
+        events = []
+        client.controller_diagnostic_received.connect(diagnostics.append)
+        client.malformed_line_received.connect(malformed.append)
+        client.device_event_received.connect(events.append)
+        client.connect_to_port("COM_AR_REPLAY")
+
+        self.assertTrue(self.wait_for(lambda: len(diagnostics) == 1417, timeout_s=5.0))
+        self.assertEqual(malformed, [])
+        self.assertEqual([event.name for event in events], [
+            "return_to_zero_started",
+            "return_to_zero_completed",
+        ])
         client.disconnect()
         self.assertTrue(self.wait_for(lambda: not client.is_running))
 

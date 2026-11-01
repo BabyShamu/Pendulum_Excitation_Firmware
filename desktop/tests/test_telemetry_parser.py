@@ -96,6 +96,16 @@ class TelemetryParserTests(unittest.TestCase):
         self.assertEqual(result.diagnostic_fields["target_steps"], "50")
         self.assertEqual(result.diagnostic_schema[0], "time_s")
 
+    def test_parses_ar_controller_diagnostic_stream_without_malformed_rows(self) -> None:
+        header = "time_s,angle_deg,command_mm,motor_mm,actual_mm,phase_rad,waveform"
+        self.assertEqual(self.parse(header).kind, ParsedLineKind.DEVICE_MESSAGE)
+
+        result = self.parse("0.005,58.10,7.5,7.4,0.2,1.5708,0.923")
+
+        self.assertEqual(result.kind, ParsedLineKind.CONTROLLER_DIAGNOSTIC)
+        self.assertEqual(result.diagnostic_fields["angle_deg"], "58.10")
+        self.assertEqual(result.diagnostic_fields["waveform"], "0.923")
+
     def test_parses_phase_tracked_diagnostics_and_allows_missing_angle(self) -> None:
         header = (
             "phase_sine_time_s,angle_measured_deg,angle_source,phase2_raw_rad,"

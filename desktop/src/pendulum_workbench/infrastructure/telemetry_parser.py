@@ -35,6 +35,10 @@ class TelemetryParser:
         "time_s", "theta_deg", "controller_mm", "motor_target_mm", "actual_mm",
         "target_steps", "actual_steps", "step_error",
     )
+    _ar_diagnostic_header = (
+        "time_s", "angle_deg", "command_mm", "motor_mm", "actual_mm",
+        "phase_rad", "waveform",
+    )
     _phase_sine_diagnostic_header = (
         "phase_sine_time_s", "angle_measured_deg", "angle_source", "phase2_raw_rad",
         "phase2_tracked_rad", "omega_2x_rad_s", "phase_magnitude", "phase_error_rad",
@@ -72,6 +76,7 @@ class TelemetryParser:
         normalized_header = tuple(field.strip() for field in fields)
         if normalized_header in (
             self._autores_diagnostic_header,
+            self._ar_diagnostic_header,
             self._phase_sine_diagnostic_header,
         ):
             self._controller_diagnostic_schema = normalized_header
@@ -130,16 +135,18 @@ class TelemetryParser:
                 message=f"Invalid controller diagnostic field count ({len(fields)}): {text}",
             )
         values = dict(zip(schema, (field.strip() for field in fields)))
-        numeric_fields = (
-            self._phase_sine_diagnostic_header
-            if schema == self._phase_sine_diagnostic_header
-            else self._autores_diagnostic_header
-        )
-        for name in numeric_fields:
-            if name == "angle_source":
-                continue
+        numeric_fields = {
+            self._phase_sine_diagnostic_header,
+            self._autores_diagnostic_header,
+            self._ar_diagnostic_header,
+        }
+        numeric_names = (
+            set(schema)
+            - {"angle_source", "waveform"}
+        ) if schema in numeric_fields else set()
+        for name in numeric_names:
             value = values[name]
-            if name in ("angle_measured_deg", "phase2_raw_rad") and value.lower() in (
+            if name in ("angle_measured_deg", "phase2_raw_rad", "angle_deg") and value.lower() in (
                 "nan", "na", "unavailable"
             ):
                 continue
@@ -151,7 +158,7 @@ class TelemetryParser:
                     message=f"Invalid controller diagnostic value for {name}: {text}",
                 )
             if not math.isfinite(number):
-                if name in ("angle_measured_deg", "phase2_raw_rad") and math.isnan(number):
+                if name in ("angle_measured_deg", "phase2_raw_rad", "angle_deg") and math.isnan(number):
                     continue
                 return ParsedLine(
                     ParsedLineKind.MALFORMED,
