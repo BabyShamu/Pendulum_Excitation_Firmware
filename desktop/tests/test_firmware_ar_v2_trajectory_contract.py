@@ -151,7 +151,7 @@ class FirmwareAutoResonanceV2TrajectoryTests(unittest.TestCase):
     def test_ar_diagnostic_rate_is_configurable_without_changing_control_period(self) -> None:
         process_line = function_body("ProcessLine")
         update = function_body("UpdateAutoResonanceV2")
-        self.assertRegex(FIRMWARE_SOURCE, r"#define AR_DIAGNOSTIC_DEFAULT_RATE_HZ\s+50U")
+        self.assertRegex(FIRMWARE_SOURCE, r"#define AR_DIAGNOSTIC_DEFAULT_RATE_HZ\s+0U")
         self.assertRegex(FIRMWARE_SOURCE, r"#define AR_DIAGNOSTIC_MAX_RATE_HZ\s+50U")
         self.assertIn('strncmp(line, "ar_trace ", 9) == 0', process_line)
         self.assertIn("g_arv2TraceRateHz = (uint32_t)rate", process_line)
@@ -248,13 +248,13 @@ class FirmwareAutoResonanceV2TrajectoryTests(unittest.TestCase):
         self.assertNotIn("PARAMETRIC_V2_ACCEL_MAX_HZ_S", trajectory)
         self.assertRegex(
             FIRMWARE_SOURCE,
-            r"#define PARAMETRIC_V2_ACCEL_DEFAULT_HZ_S\s+100000\.0f",
+            r"#define PARAMETRIC_V2_ACCEL_DEFAULT_HZ_S\s+600000\.0f",
         )
         self.assertRegex(FIRMWARE_SOURCE, r"CLOSED_LOOP_MAX_MM\s+7\.5f")
 
     def test_v2_acceleration_command_documents_unchanged_runtime_bounds(self) -> None:
         self.assertIn(
-            "PARAMETRIC_V2_ACCEL_DEFAULT_HZ_S 100000.0f",
+            "PARAMETRIC_V2_ACCEL_DEFAULT_HZ_S 600000.0f",
             FIRMWARE_SOURCE,
         )
         self.assertIn("6000..1000000", FIRMWARE_SOURCE)
@@ -264,7 +264,7 @@ class FirmwareAutoResonanceV2TrajectoryTests(unittest.TestCase):
     def test_trajectory_speed_keeps_baseline_default_and_bounded_experimental_limit(self) -> None:
         process_line = function_body("ProcessLine")
         trajectory = function_body("ParametricV2OnTimer")
-        self.assertRegex(FIRMWARE_SOURCE, r"#define PARAMETRIC_V2_MAX_HZ\s+4000\.0f")
+        self.assertRegex(FIRMWARE_SOURCE, r"#define PARAMETRIC_V2_MAX_HZ\s+5000\.0f")
         self.assertRegex(FIRMWARE_SOURCE, r"#define PARAMETRIC_V2_MAX_HZ_LIMIT\s+5000\.0f")
         self.assertIn('strcmp(line, "trajectory_speed") == 0', process_line)
         self.assertIn('strncmp(line, "trajectory_speed ", 17) == 0', process_line)
@@ -292,9 +292,36 @@ class FirmwareAutoResonanceV2TrajectoryTests(unittest.TestCase):
             "trajectory_acceleration_mm_s2",
             "trajectory_start_speed_steps_s",
             "trajectory_start_speed_mm_s",
+            "ar_trace_rate_hz",
+            "steps_per_mm",
         ):
             self.assertIn(field, diagnostics)
         self.assertIn("g_parametricV2MaxHz / g_stepsPerMm", diagnostics)
+
+    def test_maintenance_config_response_is_correlated_and_reports_runtime_values(self) -> None:
+        maintenance = function_body("ProcessMaintenanceCommand")
+        config = maintenance.split('strcmp(end, "config") == 0', 1)[1]
+        config = config.split("return 1U;", 1)[0]
+        self.assertIn("maintenance: id=%lu type=config ok=1", config)
+        for field in (
+            "trajectory_max_speed_steps_s",
+            "trajectory_max_speed_mm_s",
+            "trajectory_acceleration_steps_s2",
+            "trajectory_acceleration_mm_s2",
+            "trajectory_start_speed_steps_s",
+            "trajectory_start_speed_mm_s",
+            "steps_per_mm",
+            "ar_trace_rate_hz",
+        ):
+            self.assertIn(field, config)
+        for runtime_value in (
+            "g_parametricV2MaxHz",
+            "g_parametricV2AccelHzS",
+            "g_stepsPerMm",
+            "g_arv2TraceRateHz",
+        ):
+            self.assertIn(runtime_value, config)
+        self.assertIn('strcmp(end, "config") != 0', maintenance)
 
     def test_status_and_diagnostics_report_tim6_ownership(self) -> None:
         self.assertIn("trajectory_owner=%s", function_body("PrintStatus"))

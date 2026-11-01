@@ -28,7 +28,7 @@ class ParsedLine:
 
 
 class TelemetryParser:
-    _field_pattern = re.compile(r"([A-Za-z_]+)=([^\s]+)")
+    _field_pattern = re.compile(r"([A-Za-z_][A-Za-z0-9_]*)=([^\s]+)")
     _recording_header = "time_sec,position_mm,angle_deg"
     _device_recording_header = "sample_index,time_s,angle_deg,position_mm"
     _autores_diagnostic_header = (

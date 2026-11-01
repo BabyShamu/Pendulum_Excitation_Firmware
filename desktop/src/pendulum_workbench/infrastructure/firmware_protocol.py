@@ -27,7 +27,7 @@ class DeviceDiagnostic:
 
 
 class FirmwareProtocolParser:
-    _field_pattern = re.compile(r"([A-Za-z_]+)=([^\s]+)")
+    _field_pattern = re.compile(r"([A-Za-z_][A-Za-z0-9_]*)=([^\s]+)")
 
     @classmethod
     def parse_maintenance_response(cls, line: str) -> MaintenanceResponse | None:

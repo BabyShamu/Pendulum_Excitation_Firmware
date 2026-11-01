@@ -16,6 +16,7 @@ FIRMWARE_CLOSED_LOOP_TRAVEL_MARGIN_MM = 2.0
 
 class FirmwareCommand(str, Enum):
     STATUS = "status"
+    CONFIG = "config"
     SWITCHES = "switches"
     ANGLE = "angle"
     HOME = "home"
@@ -82,6 +83,9 @@ class FirmwareCommandService(QObject):
     def request_status(self) -> int:
         return self._request(FirmwareCommand.STATUS)
 
+    def request_config(self) -> int:
+        return self._request(FirmwareCommand.CONFIG)
+
     def request_switches(self) -> int:
         return self._request(FirmwareCommand.SWITCHES)
 
@@ -101,6 +105,7 @@ class FirmwareCommandService(QObject):
     def _is_routine_success(command: FirmwareCommand) -> bool:
         return command in (
             FirmwareCommand.STATUS,
+            FirmwareCommand.CONFIG,
             FirmwareCommand.SWITCHES,
             FirmwareCommand.ANGLE,
         )

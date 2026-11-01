@@ -51,6 +51,8 @@ class SineExperimentSerial:
         defer_latch_open: bool = False,
         suppress_parametric_stop_response: bool = False,
         unified_parametric_stop_response: bool = False,
+        config_fields: dict[str, str] | None = None,
+        reject_config: bool = False,
         **kwargs: object,
     ) -> None:
         del port, baud_rate, kwargs
@@ -61,6 +63,8 @@ class SineExperimentSerial:
         self.defer_latch_open = defer_latch_open
         self.suppress_parametric_stop_response = suppress_parametric_stop_response
         self.unified_parametric_stop_response = unified_parametric_stop_response
+        self.config_fields = config_fields
+        self.reject_config = reject_config
         self._chunks: list[bytes] = []
         self._live_enabled = False
         self._next_sample_index = 1
@@ -127,6 +131,27 @@ class SineExperimentSerial:
                     f"upper_limit=0 lower_limit=0 fault=0 active_mode={mode} "
                     "travel_span_steps=1200 position_steps=0 steps_per_mm=40.000\r\n"
                 )
+            elif command == "config":
+                if self.reject_config:
+                    self._enqueue(
+                        f"maintenance: id={request_id} type=config ok=0 error=unsupported\r\n"
+                    )
+                elif self.config_fields is None:
+                    self._enqueue(
+                        f"maintenance: id={request_id} type=config ok=1 "
+                        "trajectory_max_speed_steps_s=5000 trajectory_max_speed_mm_s=125.0 "
+                        "trajectory_acceleration_steps_s2=600000 "
+                        "trajectory_acceleration_mm_s2=15000.0 "
+                        "trajectory_start_speed_steps_s=150 trajectory_start_speed_mm_s=3.75 "
+                        "steps_per_mm=40.000 ar_trace_rate_hz=0\r\n"
+                    )
+                else:
+                    rendered = " ".join(
+                        f"{key}={value}" for key, value in self.config_fields.items()
+                    )
+                    self._enqueue(
+                        f"maintenance: id={request_id} type=config ok=1 {rendered}\r\n"
+                    )
             elif command == "switches":
                 self._enqueue(f"maintenance: id={request_id} type=switches ok=1 upper=0 lower=0\r\n")
             elif command == "angle":
@@ -777,6 +802,218 @@ class ExperimentRunTests(unittest.TestCase):
             "controller_stop_unconfirmed",
         )
 
+
+    def test_motor_configuration_is_captured_before_controller_start_and_saved(self) -> None:
+        directory = self.temporary_directory()
+        controller, device, repository = self.create_connected_controller(directory)
+        self.addCleanup(controller.shutdown)
+        self.prepare_ready_held_system(controller, device)
+        device.protocol_actions.clear()
+
+        controller.experiment_run.start(
+            UnifiedParametricDefinition(7.5, 22.5, 20.0, "ar2")
+        )
+        self.assertTrue(
+            self.wait_for(
+                lambda: controller.experiment_run.snapshot.state == ExperimentRunState.RUNNING
+            )
+        )
+        ordered = [
+            action
+            for action in device.protocol_actions
+            if action in ("latch_open", "config", "parametric_start")
+        ]
+        self.assertEqual(ordered, ["latch_open", "config", "parametric_start"])
+
+        controller.experiment_run.stop()
+        self.assertTrue(
+            self.wait_for(
+                lambda: not controller.experiment_run.is_active
+                and controller.state.snapshot.recording == RecordingState.INTERRUPTED
+            )
+        )
+        completed_session = controller.experiment_recorder.last_completed_session
+        self.assertIsNotNone(completed_session)
+        manifest = repository.load(completed_session.directory).manifest
+        motor_config = manifest["motor_configuration"]
+        self.assertEqual(motor_config["max_speed_steps_s"], 5000.0)
+        self.assertEqual(motor_config["max_speed_mm_s"], 125.0)
+        self.assertEqual(motor_config["acceleration_steps_s2"], 600000.0)
+        self.assertEqual(motor_config["acceleration_mm_s2"], 15000.0)
+        self.assertEqual(motor_config["start_speed_steps_s"], 150.0)
+        self.assertEqual(motor_config["start_speed_mm_s"], 3.75)
+        self.assertEqual(motor_config["steps_per_mm"], 40.0)
+        self.assertEqual(motor_config["ar_trace_rate_hz"], 0)
+        self.assertEqual(motor_config["source"], "stm32_firmware")
+        self.assertEqual(motor_config["status"], "verified")
+        self.assertIsNotNone(motor_config["captured_at_utc"])
+        self.assertIsNone(motor_config["error"])
+        self.assertNotIn("motor_configuration", manifest["experiment"])
+
+    def test_motor_configuration_records_runtime_overrides(self) -> None:
+        directory = self.temporary_directory()
+        override_fields = {
+            "trajectory_max_speed_steps_s": "4000",
+            "trajectory_max_speed_mm_s": "100.0",
+            "trajectory_acceleration_steps_s2": "250000",
+            "trajectory_acceleration_mm_s2": "6250.0",
+            "trajectory_start_speed_steps_s": "150",
+            "trajectory_start_speed_mm_s": "3.75",
+            "steps_per_mm": "40.000",
+            "ar_trace_rate_hz": "10",
+        }
+        controller, device, repository = self.create_connected_controller(
+            directory,
+            config_fields=override_fields,
+        )
+        self.addCleanup(controller.shutdown)
+        self.prepare_ready_held_system(controller, device)
+
+        controller.experiment_run.start(
+            VerticalSineDefinition(5.0, 1.8, 20.0)
+        )
+        self.assertTrue(
+            self.wait_for(
+                lambda: controller.experiment_run.snapshot.state == ExperimentRunState.RUNNING
+            )
+        )
+        controller.experiment_run.stop()
+        self.assertTrue(
+            self.wait_for(
+                lambda: not controller.experiment_run.is_active
+                and controller.state.snapshot.recording == RecordingState.INTERRUPTED
+            )
+        )
+        completed_session = controller.experiment_recorder.last_completed_session
+        self.assertIsNotNone(completed_session)
+        manifest = repository.load(completed_session.directory).manifest
+        motor_config = manifest["motor_configuration"]
+        self.assertEqual(motor_config["status"], "verified")
+        self.assertEqual(motor_config["max_speed_steps_s"], 4000.0)
+        self.assertEqual(motor_config["acceleration_steps_s2"], 250000.0)
+        self.assertEqual(motor_config["ar_trace_rate_hz"], 10)
+
+    def test_motor_configuration_retrieval_failure_is_recorded_honestly(self) -> None:
+        directory = self.temporary_directory()
+        controller, device, repository = self.create_connected_controller(
+            directory,
+            reject_config=True,
+        )
+        self.addCleanup(controller.shutdown)
+        self.prepare_ready_held_system(controller, device)
+
+        controller.experiment_run.start(
+            UnifiedParametricDefinition(7.5, 22.5, 20.0, "ar1")
+        )
+        self.assertTrue(
+            self.wait_for(
+                lambda: controller.experiment_run.snapshot.state == ExperimentRunState.RUNNING
+            )
+        )
+        self.assertTrue(device.autores_active)
+        controller.experiment_run.stop()
+        self.assertTrue(
+            self.wait_for(
+                lambda: not controller.experiment_run.is_active
+                and controller.state.snapshot.recording == RecordingState.INTERRUPTED
+            )
+        )
+        completed_session = controller.experiment_recorder.last_completed_session
+        self.assertIsNotNone(completed_session)
+        manifest = repository.load(completed_session.directory).manifest
+        motor_config = manifest["motor_configuration"]
+        self.assertEqual(motor_config["status"], "unavailable")
+        self.assertEqual(motor_config["error"], "unsupported")
+        self.assertIsNone(motor_config["max_speed_steps_s"])
+        self.assertIsNone(motor_config["acceleration_steps_s2"])
+        self.assertIsNone(motor_config["steps_per_mm"])
+        self.assertIsNone(motor_config["ar_trace_rate_hz"])
+
+    def test_motor_configuration_does_not_leak_between_experiments(self) -> None:
+        directory = self.temporary_directory()
+        controller, device, repository = self.create_connected_controller(directory)
+        self.addCleanup(controller.shutdown)
+        self.prepare_ready_held_system(controller, device)
+
+        controller.experiment_run.start(
+            UnifiedParametricDefinition(7.5, 22.5, 20.0, "ar1")
+        )
+        self.assertTrue(
+            self.wait_for(
+                lambda: controller.experiment_run.snapshot.state == ExperimentRunState.RUNNING
+            )
+        )
+        controller.experiment_run.stop()
+        self.assertTrue(
+            self.wait_for(
+                lambda: not controller.experiment_run.is_active
+                and controller.state.snapshot.recording == RecordingState.INTERRUPTED
+            )
+        )
+        first_session = controller.experiment_recorder.last_completed_session
+        self.assertIsNotNone(first_session)
+        first_manifest = repository.load(first_session.directory).manifest
+        self.assertEqual(first_manifest["motor_configuration"]["status"], "verified")
+
+        controller.maintenance.command_latch(PendulumLatchState.HOLD)
+        self.assertTrue(
+            self.wait_for(
+                lambda: controller.maintenance.snapshot.latch_state == PendulumLatchState.HOLD
+                and not controller.firmware_commands.is_busy
+            )
+        )
+        device.reject_config = True
+        controller.experiment_run.start(
+            UnifiedParametricDefinition(7.5, 22.5, 20.0, "ar3")
+        )
+        self.assertTrue(
+            self.wait_for(
+                lambda: controller.experiment_run.snapshot.state == ExperimentRunState.RUNNING
+            )
+        )
+        controller.experiment_run.stop()
+        self.assertTrue(
+            self.wait_for(
+                lambda: not controller.experiment_run.is_active
+                and controller.state.snapshot.recording == RecordingState.INTERRUPTED
+            )
+        )
+        second_session = controller.experiment_recorder.last_completed_session
+        self.assertIsNotNone(second_session)
+        second_manifest = repository.load(second_session.directory).manifest
+        second_config = second_manifest["motor_configuration"]
+        self.assertEqual(second_config["status"], "unavailable")
+        self.assertIsNone(second_config["max_speed_steps_s"])
+
+    def test_motor_configuration_persists_through_protective_fault(self) -> None:
+        directory = self.temporary_directory()
+        controller, device, repository = self.create_connected_controller(directory)
+        self.addCleanup(controller.shutdown)
+        self.prepare_ready_held_system(controller, device)
+        controller.experiment_run.start(
+            AutoResonanceDefinition(7.5, 22.5, 30.0)
+        )
+        self.assertTrue(
+            self.wait_for(
+                lambda: controller.experiment_run.snapshot.state == ExperimentRunState.RUNNING
+            )
+        )
+
+        device.report_closed_loop_fault()
+
+        self.assertTrue(
+            self.wait_for(
+                lambda: controller.experiment_run.snapshot.state == ExperimentRunState.FAULT
+                and controller.state.snapshot.recording == RecordingState.INTERRUPTED
+            )
+        )
+        completed_session = controller.experiment_recorder.last_completed_session
+        self.assertIsNotNone(completed_session)
+        manifest = repository.load(completed_session.directory).manifest
+        motor_config = manifest["motor_configuration"]
+        self.assertEqual(motor_config["status"], "verified")
+        self.assertEqual(motor_config["max_speed_steps_s"], 5000.0)
+        self.assertEqual(manifest["completion_status"], "INTERRUPTED")
 
     def test_phase_tracked_sine_uses_its_own_correlated_lifecycle_and_metadata(self) -> None:
         directory = self.temporary_directory()

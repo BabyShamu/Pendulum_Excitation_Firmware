@@ -65,10 +65,10 @@
 #endif
 #define PARAMETRIC_SPEED_HZ 4000U
 /* Experimental timer-driven stepper: validate on bench before physical use. */
-#define PARAMETRIC_V2_MAX_HZ 4000.0f
+#define PARAMETRIC_V2_MAX_HZ 5000.0f
 #define PARAMETRIC_V2_MAX_HZ_LIMIT 5000.0f
 #define PARAMETRIC_V2_START_HZ 150.0f
-#define PARAMETRIC_V2_ACCEL_DEFAULT_HZ_S 100000.0f
+#define PARAMETRIC_V2_ACCEL_DEFAULT_HZ_S 600000.0f
 #define PARAMETRIC_V2_ACCEL_MIN_HZ_S 6000.0f
 #define PARAMETRIC_V2_ACCEL_MAX_HZ_S 1000000.0f
 #define ARV2_MAX_AMPLITUDE_MM         20.0f
@@ -76,7 +76,7 @@
 #define PARAMETRIC_UPDATE_PERIOD_MS   10U
 #define PARAMETRIC_TEST_PERIOD_MS      5U
 #define PARAMETRIC_TEST_TELEMETRY_DECIMATION 4U
-#define AR_DIAGNOSTIC_DEFAULT_RATE_HZ  50U
+#define AR_DIAGNOSTIC_DEFAULT_RATE_HZ  0U
 #define AR_DIAGNOSTIC_MAX_RATE_HZ      50U
 #define PARAMETRIC_TEST_AGC_STEP       0.0005f
 #define PARAMETRIC_TEST_AGC_Z_EPSILON  1e-20f
@@ -3986,7 +3986,7 @@ static void PrintHelp(void)
     UartPrint("SENSORS AND SAFETY:\r\n");
     UartPrint("  angle | zero | switches | stop\r\n");
     UartPrint("  help <controllers|diagnostics|motion|configuration|sensors|latch|telemetry|maintenance|safety>\r\n");
-    UartPrint("  maint <id> <status|switches|angle|home|zero|manual_up|manual_down|manual_keepalive_up|manual_keepalive_down|manual_stop|latch_hold|latch_open|latch_status>\r\n");
+    UartPrint("  maint <id> <status|config|switches|angle|home|zero|manual_up|manual_down|manual_keepalive_up|manual_keepalive_down|manual_stop|latch_hold|latch_open|latch_status>\r\n");
     UartPrint("  maint <id> fault_clear - validate and clear a latched closed-loop fault\r\n");
     UartPrint("  live 0|1        - stop/start angle and position stream\r\n");
     UartPrint("  record 0|1      - stop/start CSV recording\r\n");
@@ -4046,7 +4046,8 @@ static void PrintHelpCategory(const char *category)
     {
         UartPrint("SAFETY AND MAINTENANCE\r\n");
         UartPrint("stop - stop active motion and telemetry; faults remain latched\r\n");
-        UartPrint("maint <id> fault_clear|status|home|switches|angle\r\n");
+        UartPrint("maint <id> fault_clear|status|config|home|switches|angle\r\n");
+        UartPrint("maint <id> config - correlated motor trajectory configuration report\r\n");
         return;
     }
     UartPrint("unknown help category; use controllers, diagnostics, motion, configuration, sensors, latch, telemetry, maintenance, or safety\r\n");
@@ -4151,14 +4152,15 @@ static void PrintDiagnostics(void)
         sizeof(telemetryMsg),
         "diag: standard_telemetry=%lu ar_diagnostic=%lu ar_diagnostic_dropped=%lu "
         "uart_rx_overflow=%lu uart_tx_dropped=%lu uart_tx_dropped_bytes=%lu "
-        "ar_trace_rate_hz=%lu\r\n",
+        "ar_trace_rate_hz=%lu steps_per_mm=%.3f\r\n",
         (unsigned long)g_standardTelemetryMessages,
         (unsigned long)g_arDiagnosticMessages,
         (unsigned long)g_arDiagnosticDroppedMessages,
         (unsigned long)g_uartRxOverflowCount,
         (unsigned long)g_uartTxDroppedMessages,
         (unsigned long)g_uartTxDroppedBytes,
-        (unsigned long)g_arv2TraceRateHz);
+        (unsigned long)g_arv2TraceRateHz,
+        (double)g_stepsPerMm);
     UartPrint(telemetryMsg);
 }
 
@@ -4287,7 +4289,7 @@ static uint8_t ProcessMaintenanceCommand(char *arguments)
 
     if (ReturnToZeroIsActive() != 0U &&
         strcmp(end, "status") != 0 && strcmp(end, "switches") != 0 &&
-        strcmp(end, "angle") != 0)
+        strcmp(end, "angle") != 0 && strcmp(end, "config") != 0)
     {
         snprintf(msg, sizeof(msg),
                  "maintenance: id=%lu type=error ok=0 error=return_to_zero_active\r\n",
@@ -4331,6 +4333,27 @@ static uint8_t ProcessMaintenanceCommand(char *arguments)
                  (unsigned long)g_travelSteps,
                  (long)g_positionSteps,
                  (double)g_stepsPerMm);
+        UartPrint(msg);
+        return 1U;
+    }
+
+    if (strcmp(end, "config") == 0)
+    {
+        snprintf(msg, sizeof(msg),
+                 "maintenance: id=%lu type=config ok=1 "
+                 "trajectory_max_speed_steps_s=%.0f trajectory_max_speed_mm_s=%.1f "
+                 "trajectory_acceleration_steps_s2=%.0f trajectory_acceleration_mm_s2=%.1f "
+                 "trajectory_start_speed_steps_s=%.0f trajectory_start_speed_mm_s=%.1f "
+                 "steps_per_mm=%.3f ar_trace_rate_hz=%lu\r\n",
+                 requestId,
+                 (double)g_parametricV2MaxHz,
+                 (double)(g_parametricV2MaxHz / g_stepsPerMm),
+                 (double)g_parametricV2AccelHzS,
+                 (double)(g_parametricV2AccelHzS / g_stepsPerMm),
+                 (double)PARAMETRIC_V2_START_HZ,
+                 (double)(PARAMETRIC_V2_START_HZ / g_stepsPerMm),
+                 (double)g_stepsPerMm,
+                 (unsigned long)g_arv2TraceRateHz);
         UartPrint(msg);
         return 1U;
     }

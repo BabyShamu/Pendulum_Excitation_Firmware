@@ -468,6 +468,10 @@ class ExperimentRecordingService(QObject):
                         continue
                     manifest = dict(session.manifest)
                     manifest["name"] = name.strip() or experiment_id
+                    metadata = dict(metadata)
+                    motor_configuration = metadata.pop("motor_configuration", None)
+                    if motor_configuration is not None:
+                        manifest["motor_configuration"] = motor_configuration
                     experiment_metadata = dict(manifest.get("experiment", {}))
                     experiment_metadata.update(metadata)
                     manifest["experiment"] = experiment_metadata

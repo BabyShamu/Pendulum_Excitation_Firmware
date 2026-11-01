@@ -42,6 +42,7 @@ from pendulum_workbench.domain.maintenance import (
     PendulumLatchState,
     ReadinessState,
 )
+from pendulum_workbench.domain.motor_configuration import MotorConfiguration
 from pendulum_workbench.domain.models import (
     ConnectionState,
     DataSourceMode,
@@ -87,6 +88,7 @@ class ExperimentRunService(QObject):
         self._sine_started_monotonic: float | None = None
         self._stop_requested_monotonic: float | None = None
         self._max_angle_deg: float | None = None
+        self._motor_configuration: MotorConfiguration | None = None
         self._samples_at_start = 0
         self._angle_predictor: AngleDropoutPredictor | None = None
         self._angle_prediction_rows: list[dict[str, object]] = []
@@ -177,6 +179,7 @@ class ExperimentRunService(QObject):
         self._sine_started_monotonic = None
         self._stop_requested_monotonic = None
         self._max_angle_deg = None
+        self._motor_configuration = None
         self._angle_predictor = AngleDropoutPredictor(
             max_prediction_age_s=definition.duration_s
         )
@@ -413,6 +416,46 @@ class ExperimentRunService(QObject):
                 f"latch_open_failed: {error}",
             )
 
+    def _issue_config_query(self) -> None:
+        self._phase = "config_query"
+        try:
+            self.commands.request_config()
+        except (RuntimeError, ValueError, OSError) as error:
+            self._motor_configuration = MotorConfiguration.unavailable(
+                f"configuration_request_failed: {error}"
+            )
+            self._proceed_after_config_capture()
+
+    def _proceed_after_config_capture(self) -> None:
+        if self._stop_requested:
+            self._begin_recording_finalization(
+                self._pending_final_state,
+                self._pending_completion_reason,
+            )
+            return
+        definition = self._definition
+        if isinstance(definition, FreeSwingDefinition):
+            self._sine_started_monotonic = time.monotonic()
+            self._phase = "running"
+            self._timer.start()
+            if self._diagnostics is not None:
+                self._diagnostics.record(
+                    "experiment_started",
+                    experiment_id=self._experiment_id,
+                    experiment_start_time_monotonic=self._sine_started_monotonic,
+                    requested_excitation_duration_s=definition.duration_s,
+                    expected_stop_time_monotonic=(
+                        self._sine_started_monotonic + definition.duration_s
+                    ),
+                )
+            self._set_snapshot(
+                state=ExperimentRunState.RUNNING,
+                started_at=datetime.now().astimezone().isoformat(),
+                completion_reason="Free swing recording; motor remains idle.",
+            )
+            return
+        self._issue_sine_start()
+
     def _issue_sine_start(self) -> None:
         definition = self._require_definition()
         try:
@@ -455,27 +498,14 @@ class ExperimentRunService(QObject):
                     self._pending_completion_reason,
                 )
             else:
-                if isinstance(self._definition, FreeSwingDefinition):
-                    self._sine_started_monotonic = time.monotonic()
-                    self._phase = "running"
-                    self._timer.start()
-                    if self._diagnostics is not None:
-                        self._diagnostics.record(
-                            "experiment_started",
-                            experiment_id=self._experiment_id,
-                            experiment_start_time_monotonic=self._sine_started_monotonic,
-                            requested_excitation_duration_s=self._definition.duration_s,
-                            expected_stop_time_monotonic=(
-                                self._sine_started_monotonic + self._definition.duration_s
-                            ),
-                        )
-                    self._set_snapshot(
-                        state=ExperimentRunState.RUNNING,
-                        started_at=datetime.now().astimezone().isoformat(),
-                        completion_reason="Free swing recording; motor remains idle.",
-                    )
-                else:
-                    self._issue_sine_start()
+                self._issue_config_query()
+            return
+
+        if self._phase == "config_query" and command == FirmwareCommand.CONFIG:
+            self._motor_configuration = MotorConfiguration.from_response_fields(
+                response.fields
+            )
+            self._proceed_after_config_capture()
             return
 
         start_command = (
@@ -592,6 +622,13 @@ class ExperimentRunService(QObject):
                 ExperimentRunState.FAULT,
                 f"latch_open_failed: {failure.message}",
             )
+        elif self._phase == "config_query" and failure.command == FirmwareCommand.CONFIG:
+            self._motor_configuration = MotorConfiguration.unavailable(failure.message)
+            self.state.report_event(
+                EventSeverity.WARNING,
+                f"Motor configuration unavailable for this experiment: {failure.message}.",
+            )
+            self._proceed_after_config_capture()
         elif self._phase in ("sine_start", "parametric_start", "phase_sine_start") and failure.command in (
             FirmwareCommand.SINE_START,
             FirmwareCommand.PARAMETRIC_START,
@@ -716,6 +753,8 @@ class ExperimentRunService(QObject):
             metadata["maximum_angle_deg"] = self._max_angle_deg
             metadata["max_angle_valid"] = self._max_angle_deg is not None
             metadata["outcome"] = outcome.value
+            if self._motor_configuration is not None:
+                metadata["motor_configuration"] = self._motor_configuration.to_manifest()
             self.recorder.update_run_metadata(
                 self._experiment_id,
                 name=final_name,

@@ -114,6 +114,7 @@ class ExperimentManagerPage(QWidget):
             ("Overview", (("Name", "Experiment ID", "Created"), ("Mode", "Completion", "Archived"))),
             ("Excitation settings", (("Amplitude", "Frequency", "Phase"), ("Commanded duration", "Duration"))),
             ("Recorded results", (("Initial angle", "Peak angle", "Maximum angle"), ("Result", "Samples", "Raw lines"), ("Peak time", "Outcome", "Completion"))),
+            ("Motor Configuration", (("Max motor speed", "Carriage velocity", "Acceleration"), ("Carriage acceleration", "Starting speed", "Motor calibration"), ("AR diagnostic rate", "Config status"))),
             ("Simulation", (("Simulation status", "Comparison status", "Simulation files"),)),
             ("Storage & notes", (("Notes", "Folder"),)),
         )
@@ -320,6 +321,20 @@ class ExperimentManagerPage(QWidget):
             except (OSError, ValueError, TypeError):
                 comparison_status = "Incomplete"
         targets = target_metrics(directory, manifest)
+        motor_config = manifest.get("motor_configuration")
+        if not isinstance(motor_config, dict):
+            motor_config = None
+
+        def motor_value(key, unit="", precision=2, integer=False):
+            if motor_config is None:
+                return "Not recorded"
+            value = motor_config.get(key)
+            if not isinstance(value, (int, float)) or isinstance(value, bool):
+                return "Unavailable"
+            if integer:
+                return f"{int(round(value)):,d}{unit}"
+            return f"{value:,.{precision}f}{unit}"
+
         values = {
             "Name": manifest.get("name"),
             "Experiment ID": manifest.get("experiment_id"),
@@ -342,6 +357,18 @@ class ExperimentManagerPage(QWidget):
             "Peak time": self._display_number(peak_elapsed, " s"),
             "Samples": manifest.get("sample_count"),
             "Raw lines": manifest.get("raw_line_count"),
+            "Max motor speed": motor_value("max_speed_steps_s", " steps/s", 0),
+            "Carriage velocity": motor_value("max_speed_mm_s", " mm/s", 1),
+            "Acceleration": motor_value("acceleration_steps_s2", " steps/s²", 0),
+            "Carriage acceleration": motor_value("acceleration_mm_s2", " mm/s²", 0),
+            "Starting speed": motor_value("start_speed_steps_s", " steps/s", 0),
+            "Motor calibration": motor_value("steps_per_mm", " steps/mm", 3),
+            "AR diagnostic rate": motor_value("ar_trace_rate_hz", " Hz", 0),
+            "Config status": (
+                "Not recorded"
+                if motor_config is None
+                else str(motor_config.get("status") or "Unavailable")
+            ),
             "Notes": manifest.get("notes"),
             "Folder": str(directory),
             "Simulation status": simulation_status.message,
