@@ -71,7 +71,7 @@ class ExperimentManagerPage(QWidget):
         toolbar.addWidget(export)
         layout.addLayout(toolbar)
         self.table = QTableWidget(0, 10)
-        self.table.setHorizontalHeaderLabels(["Date", "Experiment", "Mode", "Duration", "Initial angle", "Peak angle", "Maximum angle", "Result", "Status", "Simulation"])
+        self.table.setHorizontalHeaderLabels(["Date", "Experiment", "Mode", "Duration", "Initial angle", "Measured Max (°)", "Simscape Max (°)", "Result", "Status", "Simulation"])
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
@@ -80,7 +80,7 @@ class ExperimentManagerPage(QWidget):
         header = self.table.horizontalHeader()
         header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
         header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
-        for index, width in enumerate((145, 290, 132, 91, 106, 98, 120, 115, 109, 130)):
+        for index, width in enumerate((145, 290, 132, 91, 106, 124, 124, 115, 109, 130)):
             self.table.setColumnWidth(index, width)
         self.table.verticalHeader().setVisible(False)
         self.table.verticalHeader().setDefaultSectionSize(37)
@@ -221,6 +221,8 @@ class ExperimentManagerPage(QWidget):
             peak = manifest.get("peak_absolute_angle_deg")
             initial = details.get("measured_initial_angle_deg")
             targets = target_metrics(directory, manifest)
+            simulation_status = inspect_simulation(directory)
+            simulated_max = self._simulation_max_angle(simulation_status)
             _LOGGER.info(
                 "Experiment Library record: experiment_id=%s maximum_angle=%s "
                 "outcome=%s completion_reason=%s "
@@ -238,11 +240,11 @@ class ExperimentManagerPage(QWidget):
                 f"{duration:.1f} s" if isinstance(duration, (int, float)) else "—",
                 self._display_number(initial, "°"),
                 self._display_number(peak, "°"),
-                self._display_number(targets["maximum_angle_deg"], "°"),
+                self._display_number(simulated_max, "°"),
                 targets["outcome"],
                 "Archived" if archived else str(manifest.get("completion_status") or ""),
                 {"ready": "Saved", "stale": "Stale", "incomplete": "Incomplete",
-                 "missing": "Not simulated"}[inspect_simulation(directory).state],
+                 "missing": "Not simulated"}[simulation_status.state],
             ]
             searchable = " ".join(fields + [params, str(manifest.get("experiment_id") or "")])
             if query and query not in searchable.casefold():
@@ -258,13 +260,38 @@ class ExperimentManagerPage(QWidget):
                     item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
                 if col in (3, 4, 5, 6):
                     numeric = {3: duration, 4: initial, 5: peak,
-                               6: targets["maximum_angle_deg"]}[col]
+                               6: simulated_max}[col]
                     if isinstance(numeric, (int, float)) and math.isfinite(numeric):
                         item.setData(Qt.ItemDataRole.UserRole + 1, float(numeric))
                 self.table.setItem(row, col, item)
         self.table.setSortingEnabled(True)
         self.summary.setText(f"{self.table.rowCount()} experiments shown")
         self._show_details()
+
+    @staticmethod
+    def _simulation_max_angle(simulation_status):
+        """Read the absolute maximum simulated angle from a valid saved CSV."""
+        if simulation_status.state != "ready":
+            return None
+        csv_path = simulation_status.folder / "simulation.csv"
+        maximum = None
+        try:
+            with csv_path.open("r", encoding="utf-8-sig", newline="") as source:
+                reader = csv.DictReader(source)
+                if "pendulum_angle_deg" not in (reader.fieldnames or []):
+                    return None
+                for row in reader:
+                    try:
+                        angle = float(row["pendulum_angle_deg"])
+                    except (ValueError, TypeError, KeyError):
+                        continue
+                    if math.isfinite(angle):
+                        magnitude = abs(angle)
+                        if maximum is None or magnitude > maximum:
+                            maximum = magnitude
+        except (OSError, UnicodeError, csv.Error):
+            return None
+        return maximum
 
     def _selected(self):
         row = self.table.currentRow()
