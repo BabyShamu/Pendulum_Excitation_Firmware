@@ -114,7 +114,7 @@ class ExperimentManagerPage(QWidget):
         sections = (
             ("Overview", (("Name", "Experiment ID", "Created"), ("Mode", "Completion", "Archived"))),
             ("Excitation settings", (("Amplitude", "Frequency", "Phase"), ("Commanded duration", "Duration"))),
-            ("Recorded results", (("Initial angle", "Peak angle", "Maximum angle"), ("Result", "Samples", "Raw lines"), ("Peak time", "Outcome", "Completion"))),
+            ("Recorded results", (("Initial angle", "Peak angle", "Maximum angle"), ("Result", "Samples", "Raw lines"), ("Peak time", "Outcome", "Completion reason"))),
             ("Motor Configuration", (("Max motor speed", "Carriage velocity", "Acceleration"), ("Carriage acceleration", "Starting speed", "Motor calibration"), ("AR diagnostic rate", "Config status"))),
             ("Simulation", (("Simulation status", "Comparison status", "Simulation files"),)),
             ("Storage & notes", (("Notes", "Folder"),)),
@@ -216,7 +216,7 @@ class ExperimentManagerPage(QWidget):
                                if k != "experiment_mode" and isinstance(v, (str, int, float, bool)))
             summary = experiment_summary(directory, manifest)
             duration = summary["duration_s"]
-            peak = summary["measured_peak_angle_deg"]
+            peak = summary["maximum_angle_deg"]
             initial = summary["initial_angle_deg"]
             targets = {
                 "maximum_angle_deg": summary["maximum_angle_deg"],
@@ -375,7 +375,7 @@ class ExperimentManagerPage(QWidget):
             "Maximum angle": self._display_number(targets["maximum_angle_deg"], "°"),
             "Result": targets["outcome"],
             "Outcome": targets["outcome"],
-            "Completion": details.get("completion_reason"),
+            "Completion reason": details.get("completion_reason"),
             "Commanded duration": self._display_number(details.get("commanded_duration_s"), " s"),
             "Duration": self._display_number(duration, " s"),
             "Initial angle": self._display_number(details.get("measured_initial_angle_deg"), "°"),
