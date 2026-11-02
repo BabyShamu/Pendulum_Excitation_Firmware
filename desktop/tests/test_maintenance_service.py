@@ -1289,7 +1289,11 @@ class MaintenanceServiceTests(unittest.TestCase):
         self.assertFalse(any("manual_keepalive" in event.message for event in events))
 
         controller.state.publish_sample(TelemetrySample(201, 4.02, 1.0, 6.25, source="real"))
-        self.assertIn("6.25 mm", page.manual_position_value.text())
+        # The Maintenance page batches position-label updates on a UI timer.
+        self.assertTrue(
+            self.wait_for(lambda: "6.25 mm" in page.manual_position_value.text()),
+            page.manual_position_value.text(),
+        )
         up_heartbeat_count = len(device.manual_keepalive_received)
         QTest.mouseRelease(page.manual_up_button, Qt.MouseButton.LeftButton)
         self.assertTrue(
