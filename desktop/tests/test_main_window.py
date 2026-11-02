@@ -91,7 +91,7 @@ class MainWindowTests(unittest.TestCase):
         controller.state.set_connection(ConnectionState.CONNECTED, "COM6")
         window = MainWindow(controller)
 
-        self.assertEqual(window.page_stack.count(), 3)
+        self.assertEqual(window.page_stack.count(), 4)
         self.assertIs(window.page_stack.currentWidget(), window.live_page)
         self.assertTrue(window.live_navigation_button.isChecked())
         self.assertEqual(window.monitor_navigation_button.text(), "Monitor")
