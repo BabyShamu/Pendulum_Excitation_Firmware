@@ -17,6 +17,10 @@ def write_simscape_input(directory: Path, manifest: dict[str, Any]) -> Path:
         "VERTICAL_SINUSOIDAL_EXCITATION": "sinusoidal",
         "AUTO_RESONANCE_PARAMETRIC": "auto_resonance",
         "PHASE_TRACKED_SINE_AUTO_RESONANCE": "phase_tracked_sine",
+        "AUTO_RESONANCE_PARAMETRIC_CLOSED_LOOP": "auto_resonance",
+        "AUTO_RESONANCE_AR1": "ar1",
+        "AUTO_RESONANCE_AR2": "ar2",
+        "AUTO_RESONANCE_AR3": "ar3",
     }
     # Do not invent an initial angular velocity or excitation phase.
     payload = {
