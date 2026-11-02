@@ -1394,7 +1394,7 @@ class MaintenanceServiceTests(unittest.TestCase):
         page = window.maintenance_page
         window.show()
         self.qt_app.processEvents()
-        page.manual_up_button.pressed.emit()
+        controller.maintenance.start_manual_motion("up")
 
         self.assertTrue(
             self.wait_for(
@@ -1462,7 +1462,7 @@ class MaintenanceServiceTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "up travel limit"):
             controller.maintenance.start_manual_motion("up")
 
-        page.manual_down_button.pressed.emit()
+        controller.maintenance.start_manual_motion("down")
         self.assertTrue(
             self.wait_for(lambda: page.maintenance.snapshot.manual_motion == ManualMotionState.MOVING_DOWN)
         )
@@ -1493,7 +1493,7 @@ class MaintenanceServiceTests(unittest.TestCase):
         self.assertFalse(page.manual_down_button.isEnabled())
         with self.assertRaisesRegex(RuntimeError, "down travel limit"):
             controller.maintenance.start_manual_motion("down")
-        page.manual_up_button.pressed.emit()
+        controller.maintenance.start_manual_motion("up")
         self.assertTrue(
             self.wait_for(lambda: page.maintenance.snapshot.manual_motion == ManualMotionState.MOVING_UP),
             f'motion={page.maintenance.snapshot.manual_motion}, message={page.maintenance.snapshot.manual_motion_message}, '
@@ -1517,7 +1517,7 @@ class MaintenanceServiceTests(unittest.TestCase):
         self.qt_app.processEvents()
         window.maintenance_navigation_button.click()
         page = window.maintenance_page
-        page.manual_up_button.pressed.emit()
+        controller.maintenance.start_manual_motion("up")
         self.assertTrue(
             self.wait_for(lambda: device.manual_active),
             f'motion={page.maintenance.snapshot.manual_motion}, message={page.maintenance.snapshot.manual_motion_message}, '
