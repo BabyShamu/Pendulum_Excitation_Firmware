@@ -145,7 +145,7 @@ class ExperimentRecordingTests(unittest.TestCase):
             page = ExperimentManagerPage(controller)
             self.addCleanup(controller.shutdown)
             self.addCleanup(page.close)
-            self.assertEqual(page.table.item(0, 6).text(), "82.62°")
+            self.assertEqual(page.table.item(0, 5).text(), "82.62°")
             self.assertEqual(page.table.item(0, 7).text(), "COMPLETED")
             page.table.selectRow(0)
             self.assertEqual(page.detail_labels["Maximum angle"].text(), "82.62°")
