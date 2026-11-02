@@ -121,7 +121,7 @@ class ExperimentPage(QWidget):
         storage_row.addWidget(self.choose_storage_button)
         recording_layout.addLayout(storage_row)
         saved_root = self.storage_settings.value("experiment_storage_root", "", type=str)
-        if saved_root:
+        if saved_root and not self.controller.experiment_recorder.repository.explicit_root:
             self.controller.experiment_recorder.repository.root = Path(saved_root)
         self.storage_folder_label.setText(
             str(self.controller.experiment_recorder.repository.root)
