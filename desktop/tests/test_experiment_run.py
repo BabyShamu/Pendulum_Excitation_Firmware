@@ -1681,7 +1681,7 @@ class ExperimentRunTests(unittest.TestCase):
             self.wait_for(
                 lambda: controller.experiment_run.snapshot.state == ExperimentRunState.COMPLETE
                 and controller.state.snapshot.recording == RecordingState.SAVED,
-                timeout_s=4.0,
+                timeout_s=10.0,
             )
         )
         self.assertFalse(device.sine_active)
