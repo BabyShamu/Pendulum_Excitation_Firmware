@@ -1,0 +1,20 @@
+  backup/experiment-manager-before-sync[m
+  backup/master-before-experiment-merge[m
+  diagnostics/parametric-motion-trace-20261029[m
+  experiment/parametric-v2-timer-trajectory[m
+  feature/experiment-app-improvements[m
+  feature/experiment-manager[m
+  feature/workbench-controller-mapping-20261102[m
+* [32mmaster[m
+  refactor/controller-cli-cleanup[m
+  [31mremotes/origin/HEAD[m -> origin/master
+  [31mremotes/origin/diagnostics/parametric-motion-trace-20261029[m
+  [31mremotes/origin/experiment/parametric-v2-timer-trajectory[m
+  [31mremotes/origin/feature/experiment-app-improvements[m
+  [31mremotes/origin/feature/experiment-manager[m
+  [31mremotes/origin/feature/workbench-controller-mapping-20261102[m
+  [31mremotes/origin/fix/explain-ar-v2-simulation-unavailable[m
+  [31mremotes/origin/fix/telemetry-default-off[m
+  [31mremotes/origin/fix/workbench-simscape-mode-compatibility-20261102[m
+  [31mremotes/origin/master[m
+  [31mremotes/origin/refactor/controller-cli-cleanup[m
