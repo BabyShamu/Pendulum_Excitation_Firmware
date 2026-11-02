@@ -1438,6 +1438,16 @@ class ExperimentRunTests(unittest.TestCase):
         window = MainWindow(controller)
         self.addCleanup(window.close)
         page = window.experiment_page
+        # The preflight check requires a recently received AS5600 angle.
+        # Wait for a new telemetry packet after UI setup rather than reusing a stale sample.
+        samples_before_start = controller.state.snapshot.samples_received
+        self.assertTrue(
+            self.wait_for(
+                lambda: controller.state.snapshot.samples_received > samples_before_start
+                and controller.state.snapshot.latest_sample is not None
+                and controller.state.snapshot.latest_sample.angle_deg is not None
+            )
+        )
         experiment_id = controller.experiment_run.start(VerticalSineDefinition(5.0, 1.8, 0.9))
         self.assertTrue(
             self.wait_for(lambda: controller.experiment_run.snapshot.state == ExperimentRunState.RUNNING)
