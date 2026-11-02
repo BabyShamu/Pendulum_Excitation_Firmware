@@ -1247,6 +1247,15 @@ class MaintenanceServiceTests(unittest.TestCase):
         page = window.maintenance_page
         self.assertFalse(page.manual_up_button.isEnabled())
         self.assertFalse(page.manual_down_button.isEnabled())
+        # Opening the UI can overlap the automatic post-connect check/latch sync.
+        # Wait for startup maintenance to become idle before requesting another BIT.
+        self.assertTrue(
+            self.wait_for(
+                lambda: not controller.maintenance.is_busy
+                and not controller.firmware_commands.is_busy,
+                timeout_s=6.0,
+            )
+        )
         self.run_system_check(controller)
         self.qt_app.processEvents()
         self.assertTrue(page.manual_up_button.isEnabled())
