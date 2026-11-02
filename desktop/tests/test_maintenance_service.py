@@ -613,12 +613,28 @@ class MaintenanceServiceTests(unittest.TestCase):
         self.assertEqual(device.latch_commands, [])
 
     def run_system_check(self, controller: WorkbenchController) -> None:
+        # A previous BIT result can remain PASSED while a new BIT is in progress.
+        # Require the entire correlated command sequence to finish before returning.
+        self.assertTrue(
+            self.wait_for(
+                lambda: not controller.maintenance.is_busy
+                and not controller.firmware_commands.is_busy,
+                timeout_s=6.0,
+            ),
+            f"Pre-BIT operation={controller.maintenance.snapshot.operation}",
+        )
         controller.maintenance.run_system_check()
         self.assertTrue(
             self.wait_for(
                 lambda: controller.maintenance.snapshot.bit_state
                 in (BitResultState.PASSED, BitResultState.FAILED)
-            )
+                and controller.maintenance.snapshot.operation is None
+                and not controller.maintenance.is_busy
+                and not controller.firmware_commands.is_busy,
+                timeout_s=6.0,
+            ),
+            f"BIT operation={controller.maintenance.snapshot.operation}, "
+            f"result={controller.maintenance.snapshot.bit_state}",
         )
 
     def command_latch_open(self, controller: WorkbenchController) -> None:
