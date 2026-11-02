@@ -455,8 +455,21 @@ class ExperimentManagerPage(QWidget):
             if clicked is not revalidate_button:
                 return
         mode = (manifest.get("experiment") or {}).get("experiment_mode")
-        if mode not in ("FREE_SWING", "VERTICAL_SINUSOIDAL_EXCITATION", "AUTO_RESONANCE_PARAMETRIC"):
-            QMessageBox.information(self, "Simscape", "This experiment mode has no MATLAB simulation wrapper yet.")
+        # The closed-loop name is an alias of the original auto-resonance
+        # mode in firmware, but older recordings may persist either spelling.
+        supported_modes = (
+            "FREE_SWING", "VERTICAL_SINUSOIDAL_EXCITATION",
+            "AUTO_RESONANCE_PARAMETRIC", "AUTO_RESONANCE_PARAMETRIC_CLOSED_LOOP",
+        )
+        if mode not in supported_modes:
+            explanation = (
+                "The current Pendulum_Simscape_Model does not implement the "
+                "phase-tracked sine controller. Its dynamics cannot be represented "
+                "faithfully by the legacy auto-resonance feedback path."
+                if mode == "PHASE_TRACKED_SINE_AUTO_RESONANCE" else
+                f"No MATLAB simulation wrapper exists for experiment mode: {mode!r}."
+            )
+            QMessageBox.information(self, "Simscape controller unavailable", explanation)
             return
         choice = self._simscape_dialog(
             "MATLAB connection",
