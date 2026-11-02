@@ -53,7 +53,9 @@ class LoadedExperiment:
 
 class ExperimentRepository:
     def __init__(self, root: Path | None = None) -> None:
-        self.root = root or self.default_root()
+        # Explicitly supplied roots take priority over saved UI settings.
+        self.explicit_root = root is not None
+        self.root = Path(root) if root is not None else self.default_root()
 
     @staticmethod
     def default_root() -> Path:
