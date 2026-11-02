@@ -7,7 +7,7 @@ import os
 from pathlib import Path
 
 from pendulum_workbench.experiments.simulation_cache import inspect_simulation
-from pendulum_workbench.experiments.target_metrics import target_metrics
+from pendulum_workbench.experiments.experiment_summary import experiment_summary
 
 EXPERIMENT_COLUMNS = [
     "Experiment ID", "Date", "Name", "Type", "Completion", "Archived",
@@ -80,14 +80,8 @@ def export_experiment_workbook(records, root: Path) -> Path:
             details = {}
         experiment_id = str(manifest.get("experiment_id") or "")
         name = str(manifest.get("name") or "")
-        mode = {
-            "FREE_SWING": "Free Swing",
-            "VERTICAL_SINUSOIDAL_EXCITATION": "Sinusoidal",
-            "AUTO_RESONANCE_PARAMETRIC": "Auto Resonance",
-            "PHASE_TRACKED_SINE_AUTO_RESONANCE": "Phase Tracked",
-        }.get(details.get("experiment_mode"), str(details.get("experiment_mode") or "Recording"))
-        target = target_metrics(directory, manifest)
-        status = inspect_simulation(directory)
+        summary = experiment_summary(directory, manifest)
+        status = summary["simulation"]
         metadata = status.metadata
         simulation = directory / "simulation"
         comparison = _comparison(directory)
@@ -98,24 +92,24 @@ def export_experiment_workbook(records, root: Path) -> Path:
         experiments.append([
             experiment_id,
             str(manifest.get("created_at") or ""),
-            name, mode, str(manifest.get("completion_status") or ""),
+            name, summary["mode"], summary["completion"],
             "Yes" if manifest.get("archived") else "No",
-            _number(details.get("measured_initial_angle_deg")),
+            summary["initial_angle_deg"],
             _number(details.get("initial_angular_velocity_rad_s")),
             _number(details.get("commanded_amplitude_mm")),
             _number(details.get("commanded_frequency_hz")),
             _number(details.get("commanded_phase_deg")),
-            _number(target["target_angle_deg"]),
-            ("Yes" if target["target_achieved"] else "No") if target["target_achieved"] is not None else None,
-            _number(target["target_time_s"]),
+            None,
+            ("Yes" if summary["target_achieved"] else "No") if summary["target_achieved"] is not None else None,
+            None,
             _number(details.get("requested_duration_s") or details.get("commanded_duration_s")),
             _number(details.get("actual_elapsed_duration_s")),
-            _number(manifest.get("peak_absolute_angle_deg")),
+            summary["measured_peak_angle_deg"],
             _number(manifest.get("peak_angle_elapsed_s")),
             _number(details.get("time_to_target_s")),
             _number(manifest.get("sample_count")),
             _number(manifest.get("raw_line_count")),
-            {"ready": "Saved", "missing": "Not simulated", "stale": "Stale", "incomplete": "Incomplete"}[status.state],
+            summary["simulation_status"],
             comparison_status,
             _number(comparison.get("angle_rmse_deg")),
             _number(comparison.get("pivot_rmse_mm")),
