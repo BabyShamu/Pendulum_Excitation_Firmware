@@ -52,7 +52,8 @@ def main(argv: list[str] | None = None) -> int:
             f"runExperimentSimulation({_quote(folder)});"
             f"if exist(fullfile({_quote(folder)},'simulation_input.json'),'file');"
             f"manifest=jsondecode(fileread(fullfile({_quote(folder)},'manifest.json')));"
-            "if strcmp(string(manifest.experiment.experiment_mode),'AUTO_RESONANCE_PARAMETRIC');"
+            "if contains(string(manifest.experiment.experiment_mode),'AUTO_RESONANCE') || "
+            "strcmp(string(manifest.experiment.experiment_mode),'PHASE_TRACKED_SINE_AUTO_RESONANCE');"
             f"compareExperiment({_quote(folder)},Plot=false,SaveResults=true);"
             "end;end;"
         )

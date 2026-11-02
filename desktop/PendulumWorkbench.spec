@@ -20,21 +20,14 @@ archive = PYZ(analysis.pure)
 executable = EXE(
     archive,
     analysis.scripts,
+    analysis.binaries,
+    analysis.datas,
     [],
-    exclude_binaries=True,
-    name="Pendulum Workbench",
+    name="PendulumWorkbench",
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
     upx=False,
     console=False,
     icon=str(assets_dir / "pendulum_icon.ico"),
-)
-collection = COLLECT(
-    executable,
-    analysis.binaries,
-    analysis.datas,
-    strip=False,
-    upx=False,
-    name="Pendulum Workbench",
 )

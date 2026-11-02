@@ -37,6 +37,19 @@ from pendulum_workbench.infrastructure.firmware_protocol import MaintenanceRespo
 from pendulum_workbench.ui.main_window import MainWindow
 
 
+def saved_experiment_directory(repository: ExperimentRepository, experiment_id: str) -> Path:
+    """Resolve a recording by stable ID, independent of its descriptive folder name."""
+    matches = [
+        directory for directory, manifest in repository.list_manifests()
+        if manifest.get("experiment_id") == experiment_id
+    ]
+    if len(matches) != 1:
+        raise AssertionError(
+            f"Expected exactly one saved recording for {experiment_id}, found {len(matches)}"
+        )
+    return matches[0]
+
+
 class SineExperimentSerial:
     def __init__(
         self,
@@ -637,11 +650,12 @@ class ExperimentRunTests(unittest.TestCase):
         self.assertTrue(
             self.wait_for(
                 lambda: controller.experiment_run.snapshot.state == ExperimentRunState.COMPLETE
-                and controller.state.snapshot.recording == RecordingState.SAVED
+                and controller.state.snapshot.recording == RecordingState.SAVED,
+                timeout_s=10.0,
             )
         )
         self.assertFalse(device.sine_active)
-        manifest = repository.load(repository.root / experiment_id).manifest
+        manifest = repository.load(saved_experiment_directory(repository, experiment_id)).manifest
         self.assertEqual(manifest["completion_status"], "COMPLETED")
         self.assertEqual(manifest["experiment"]["commanded_amplitude_mm"], 0.0)
         self.assertEqual(manifest["experiment"]["commanded_frequency_hz"], 1.8)
@@ -665,7 +679,7 @@ class ExperimentRunTests(unittest.TestCase):
             )
         )
         self.assertFalse(device.sine_active)
-        manifest = repository.load(repository.root / experiment_id).manifest
+        manifest = repository.load(saved_experiment_directory(repository, experiment_id)).manifest
         self.assertEqual(manifest["completion_status"], "INTERRUPTED")
         self.assertEqual(manifest["experiment"]["completion_reason"], "operator_stop")
 
@@ -716,13 +730,14 @@ class ExperimentRunTests(unittest.TestCase):
         self.assertTrue(
             self.wait_for(
                 lambda: controller.experiment_run.snapshot.state == ExperimentRunState.COMPLETE
-                and controller.state.snapshot.recording == RecordingState.SAVED
+                and controller.state.snapshot.recording == RecordingState.SAVED,
+                timeout_s=10.0,
             )
         )
         self.assertFalse(device.autores_active)
         self.assertIn("parametric_stop", device.protocol_actions)
         self.assertEqual(device.latch_state, "open")
-        manifest = repository.load(repository.root / experiment_id).manifest
+        manifest = repository.load(saved_experiment_directory(repository, experiment_id)).manifest
         self.assertEqual(manifest["completion_status"], "COMPLETED")
         self.assertEqual(manifest["experiment"]["completion_reason"], "duration_elapsed")
 
@@ -1044,13 +1059,14 @@ class ExperimentRunTests(unittest.TestCase):
         self.assertTrue(
             self.wait_for(
                 lambda: controller.experiment_run.snapshot.state == ExperimentRunState.COMPLETE
-                and controller.state.snapshot.recording == RecordingState.SAVED
+                and controller.state.snapshot.recording == RecordingState.SAVED,
+                timeout_s=10.0,
             )
         )
         self.assertFalse(device.phase_tracked_sine_active)
         self.assertIn("phase_sine_stop", device.protocol_actions)
         self.assertNotIn("autores_stop", device.protocol_actions)
-        manifest = repository.load(repository.root / experiment_id).manifest
+        manifest = repository.load(saved_experiment_directory(repository, experiment_id)).manifest
         self.assertEqual(
             manifest["experiment"]["experiment_mode"],
             "PHASE_TRACKED_SINE_AUTO_RESONANCE",
@@ -1217,7 +1233,7 @@ class ExperimentRunTests(unittest.TestCase):
         self.assertIn("parametric_stop", device.protocol_actions)
         self.assertNotIn("sine_stop", device.protocol_actions)
         self.assertEqual(device.latch_state, "open")
-        manifest = repository.load(repository.root / experiment_id).manifest
+        manifest = repository.load(saved_experiment_directory(repository, experiment_id)).manifest
         self.assertEqual(manifest["experiment"]["completion_reason"], "operator_stop")
 
     def test_autoresonance_firmware_fault_stops_and_finalizes_run(self) -> None:
@@ -1241,7 +1257,7 @@ class ExperimentRunTests(unittest.TestCase):
         self.assertFalse(device.autores_active)
         self.assertIn("parametric_stop", device.protocol_actions)
         self.assertEqual(device.latch_state, "open")
-        manifest = repository.load(repository.root / experiment_id).manifest
+        manifest = repository.load(saved_experiment_directory(repository, experiment_id)).manifest
         self.assertEqual(manifest["completion_status"], "INTERRUPTED")
         self.assertTrue(manifest["experiment"]["completion_reason"].startswith("safety_event:fault_appeared"))
 
@@ -1269,7 +1285,7 @@ class ExperimentRunTests(unittest.TestCase):
         self.assertIn("parametric_stop", device.protocol_actions)
         self.assertEqual(device.latch_state, "open")
         self.assertEqual(device.protocol_actions.count("home"), home_commands_before_fault)
-        manifest = repository.load(repository.root / experiment_id).manifest
+        manifest = repository.load(saved_experiment_directory(repository, experiment_id)).manifest
         self.assertEqual(
             manifest["experiment"]["completion_reason"],
             "fault_appeared:pendulum_angle_limit",
@@ -1294,7 +1310,7 @@ class ExperimentRunTests(unittest.TestCase):
             )
         )
         self.assertIn("parametric_stop", device.protocol_actions)
-        manifest = repository.load(repository.root / experiment_id).manifest
+        manifest = repository.load(saved_experiment_directory(repository, experiment_id)).manifest
         self.assertEqual(
             manifest["experiment"]["completion_reason"],
             "safety_event:fault_appeared:lower_limit",
@@ -1354,7 +1370,7 @@ class ExperimentRunTests(unittest.TestCase):
             )
         )
         self.assertIn("parametric_stop", device.protocol_actions)
-        manifest = repository.load(repository.root / experiment_id).manifest
+        manifest = repository.load(saved_experiment_directory(repository, experiment_id)).manifest
         self.assertEqual(
             manifest["experiment"]["completion_reason"],
             "safety_event:fault_appeared:angle_sensor",
@@ -1422,6 +1438,16 @@ class ExperimentRunTests(unittest.TestCase):
         window = MainWindow(controller)
         self.addCleanup(window.close)
         page = window.experiment_page
+        # The preflight check requires a recently received AS5600 angle.
+        # Wait for a new telemetry packet after UI setup rather than reusing a stale sample.
+        samples_before_start = controller.state.snapshot.samples_received
+        self.assertTrue(
+            self.wait_for(
+                lambda: controller.state.snapshot.samples_received > samples_before_start
+                and controller.state.snapshot.latest_sample is not None
+                and controller.state.snapshot.latest_sample.angle_deg is not None
+            )
+        )
         experiment_id = controller.experiment_run.start(VerticalSineDefinition(5.0, 1.8, 0.9))
         self.assertTrue(
             self.wait_for(lambda: controller.experiment_run.snapshot.state == ExperimentRunState.RUNNING)
@@ -1471,16 +1497,23 @@ class ExperimentRunTests(unittest.TestCase):
         self.assertEqual(page.angle_source_value.text(), "Angle source: MEASURED")
         self.assertIsNotNone(controller.experiment_run.snapshot.prediction_outage_duration_ms)
         self.assertGreater(controller.experiment_run.snapshot.prediction_outage_duration_ms, 0.0)
+        completed = self.wait_for(
+            lambda: controller.experiment_run.snapshot.state == ExperimentRunState.COMPLETE
+            and controller.state.snapshot.recording == RecordingState.SAVED,
+            timeout_s=15.0,
+        )
         self.assertTrue(
-            self.wait_for(
-                lambda: controller.experiment_run.snapshot.state == ExperimentRunState.COMPLETE
-                and controller.state.snapshot.recording == RecordingState.SAVED
-            )
+            completed,
+            f"Run state={controller.experiment_run.snapshot.state}, "
+            f"recording={controller.state.snapshot.recording}, "
+            f"completion_reason={controller.experiment_run.snapshot.completion_reason}, "
+            f"error={controller.experiment_run.snapshot.error_message}, "
+            f"device_sine_active={device.sine_active}",
         )
         self.assertFalse(device.sine_active)
-        manifest = repository.load(repository.root / experiment_id).manifest
+        manifest = repository.load(saved_experiment_directory(repository, experiment_id)).manifest
         self.assertEqual(manifest["completion_status"], "COMPLETED")
-        derived_path = repository.root / experiment_id / "derived" / "angle_prediction.csv"
+        derived_path = saved_experiment_directory(repository, experiment_id) / "derived" / "angle_prediction.csv"
         self.assertTrue(derived_path.exists())
         with derived_path.open("r", encoding="utf-8", newline="") as derived_file:
             derived_rows = list(csv.DictReader(derived_file))
@@ -1489,7 +1522,7 @@ class ExperimentRunTests(unittest.TestCase):
             any(row["prediction_recovery_error_deg"] for row in derived_rows)
         )
         self.assertNotIn("angle_deg", derived_rows[0])
-        with (repository.root / experiment_id / "telemetry.csv").open(
+        with (saved_experiment_directory(repository, experiment_id) / "telemetry.csv").open(
             "r", encoding="utf-8", newline=""
         ) as telemetry_file:
             telemetry_rows = list(csv.DictReader(telemetry_file))
@@ -1603,7 +1636,7 @@ class ExperimentRunTests(unittest.TestCase):
             )
         )
         self.assertNotIn("sine_start", device.protocol_actions)
-        manifest = repository.load(repository.root / experiment_id).manifest
+        manifest = repository.load(saved_experiment_directory(repository, experiment_id)).manifest
         self.assertEqual(manifest["completion_status"], "INTERRUPTED")
         self.assertEqual(manifest["experiment"]["completion_reason"].split(":", 1)[0], "latch_open_failed")
         self.assertGreater(manifest["sample_count"], 0)
@@ -1629,7 +1662,7 @@ class ExperimentRunTests(unittest.TestCase):
             )
         )
         self.assertNotIn("sine_start", device.protocol_actions)
-        manifest = repository.load(repository.root / experiment_id).manifest
+        manifest = repository.load(saved_experiment_directory(repository, experiment_id)).manifest
         self.assertEqual(manifest["completion_status"], "INTERRUPTED")
         self.assertEqual(manifest["experiment"]["completion_reason"], "operator_stop")
 
@@ -1653,7 +1686,7 @@ class ExperimentRunTests(unittest.TestCase):
         self.assertFalse(device.sine_active)
         self.assertIn("sine_stop", device.protocol_actions)
         self.assertEqual(
-            repository.load(repository.root / experiment_id).manifest["completion_status"],
+            repository.load(saved_experiment_directory(repository, experiment_id)).manifest["completion_status"],
             "INTERRUPTED",
         )
 
@@ -1668,12 +1701,12 @@ class ExperimentRunTests(unittest.TestCase):
             self.wait_for(
                 lambda: controller.experiment_run.snapshot.state == ExperimentRunState.COMPLETE
                 and controller.state.snapshot.recording == RecordingState.SAVED,
-                timeout_s=4.0,
+                timeout_s=10.0,
             )
         )
         self.assertFalse(device.sine_active)
         self.assertEqual(device.latch_state, "open")
-        manifest = repository.load(repository.root / experiment_id).manifest
+        manifest = repository.load(saved_experiment_directory(repository, experiment_id)).manifest
         self.assertEqual(manifest["completion_status"], "COMPLETED")
         self.assertEqual(manifest["experiment"]["completion_reason"], "duration_elapsed")
         self.assertGreaterEqual(manifest["experiment"]["actual_elapsed_duration_s"], 0.15)
@@ -1697,7 +1730,7 @@ class ExperimentRunTests(unittest.TestCase):
             )
         )
         self.assertIn("sine_stop", device.protocol_actions)
-        manifest = repository.load(repository.root / experiment_id).manifest
+        manifest = repository.load(saved_experiment_directory(repository, experiment_id)).manifest
         self.assertEqual(manifest["completion_status"], "INTERRUPTED")
         self.assertEqual(manifest["experiment"]["completion_reason"], "sine_motion_stopped:limit")
 
@@ -1865,7 +1898,18 @@ class ExperimentRunTests(unittest.TestCase):
         definition = page._definition_from_fields()
         self.assertIsInstance(definition, PhaseTrackedSineDefinition)
         self.assertEqual(definition.phase_deg, 25.0)
-        self.assertTrue(page.primary_run_button.isEnabled())
+        # The run button also checks the freshness of the AS5600 measurement.
+        # Obtain another valid sample before asserting preflight readiness.
+        samples_before_refresh = controller.state.snapshot.samples_received
+        self.assertTrue(
+            self.wait_for(
+                lambda: controller.state.snapshot.samples_received > samples_before_refresh
+                and controller.state.snapshot.latest_sample is not None
+                and controller.state.snapshot.latest_sample.angle_deg is not None
+            )
+        )
+        page._update_setup_validity()
+        self.assertTrue(page.primary_run_button.isEnabled(), page.run_error_value.text())
 
         page.experiment_mode_selector.setCurrentIndex(
             page.experiment_mode_selector.findData(

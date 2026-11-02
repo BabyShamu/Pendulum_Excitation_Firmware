@@ -19,11 +19,12 @@ if exist "dist" goto failed
 
 "%BUILD_PYTHON%" -m PyInstaller --clean --noconfirm --workpath build --distpath dist PendulumWorkbench.spec
 if errorlevel 1 goto failed
-if not exist "dist\Pendulum Workbench\Pendulum Workbench.exe" goto failed
+if not exist "dist\PendulumWorkbench.exe" goto failed
 
 echo.
-echo Built: "%CD%\dist\Pendulum Workbench\Pendulum Workbench.exe"
-echo Distribute the entire "dist\Pendulum Workbench" folder, not just the EXE.
+echo Built standalone EXE: "%CD%\dist\PendulumWorkbench.exe"
+echo Distribute that single EXE (no _internal folder needed).
+echo MATLAB/Simscape are still required only to run simulations.
 popd
 pause
 exit /b 0

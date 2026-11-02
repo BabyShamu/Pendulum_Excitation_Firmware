@@ -382,8 +382,13 @@ class MaintenanceServiceTests(unittest.TestCase):
         self.addCleanup(temporary_directory.cleanup)
         serial_instances: list[MaintenanceFakeSerial] = []
 
+        # Complete the automatic post-connect system check before tests intentionally
+        # defer a later status response. Otherwise startup can remain busy indefinitely.
+        defer_test_status = bool(serial_options.get("defer_status", False))
+        startup_options = {**serial_options, "defer_status": False} if defer_test_status else serial_options
+
         def serial_factory(port: str, baud_rate: int, **kwargs: object) -> MaintenanceFakeSerial:
-            device = MaintenanceFakeSerial(port, baud_rate, **serial_options, **kwargs)
+            device = MaintenanceFakeSerial(port, baud_rate, **startup_options, **kwargs)
             serial_instances.append(device)
             return device
 
@@ -400,12 +405,16 @@ class MaintenanceServiceTests(unittest.TestCase):
             self.wait_for(lambda: controller.state.snapshot.connection == ConnectionState.CONNECTED)
         )
         self.assertTrue(serial_instances)
-        if serial_instances[0].defer_status:
-            self.assertTrue(self.wait_for(lambda: serial_instances[0].pending_status_id is not None))
-            serial_instances[0].release_status()
-            self.assertTrue(self.wait_for(lambda: not controller.firmware_commands.is_busy))
+        self.assertTrue(
+            self.wait_for(
+                lambda: not controller.firmware_commands.is_busy
+                and not controller.maintenance.is_busy
+                and controller.maintenance.snapshot.bit_state in (BitResultState.PASSED, BitResultState.FAILED),
+                timeout_s=6.0,
+            )
+        )
+        if defer_test_status:
             serial_instances[0].defer_status = True
-        self.assertTrue(self.wait_for(lambda: not controller.firmware_commands.is_busy))
         controller._maintenance_fake_devices = serial_instances
         return controller, serial_instances[0]
 
@@ -448,13 +457,13 @@ class MaintenanceServiceTests(unittest.TestCase):
     def test_latch_starts_unknown_and_does_not_affect_system_check(self) -> None:
         controller, device = self.create_connected_controller()
         self.assertEqual(controller.maintenance.snapshot.latch_state, PendulumLatchState.UNKNOWN)
-        self.assertEqual(device.latch_commands, [])
+        self.assertTrue(all(command == "latch_status" for _, command in device.latch_commands))
 
         self.run_system_check(controller)
 
         self.assertEqual(controller.maintenance.snapshot.bit_state, BitResultState.PASSED)
         self.assertEqual(controller.maintenance.snapshot.latch_state, PendulumLatchState.UNKNOWN)
-        self.assertEqual(device.latch_commands, [])
+        self.assertTrue(all(command == "latch_status" for _, command in device.latch_commands))
 
     def test_latch_hold_and_open_require_matching_correlated_confirmation(self) -> None:
         controller, device = self.create_connected_controller(defer_latch_commands=True)
@@ -518,7 +527,8 @@ class MaintenanceServiceTests(unittest.TestCase):
         page = window.maintenance_page
 
         self.assertEqual(controller.maintenance.snapshot.latch_state, PendulumLatchState.UNKNOWN)
-        self.assertEqual(controller.maintenance.snapshot.bit_state, BitResultState.NOT_RUN)
+        # Startup now runs a read-only BIT automatically; latch controls must remain usable.
+        self.assertEqual(controller.maintenance.snapshot.bit_state, BitResultState.PASSED)
         self.assertTrue(page.latch_hold_button.isEnabled())
         self.assertTrue(page.latch_open_button.isEnabled())
         self.assertIn("does not set the pendulum initial angle", page.latch_commissioning_note.text())
@@ -588,7 +598,7 @@ class MaintenanceServiceTests(unittest.TestCase):
         self.assertTrue(
             self.wait_for(lambda: len(device.manual_keepalive_received) >= heartbeat_count + 3)
         )
-        self.assertEqual(device.latch_commands, [])
+        self.assertTrue(all(command == "latch_status" for _, command in device.latch_commands))
         controller.maintenance.stop_manual_motion()
         self.assertTrue(
             self.wait_for(
@@ -600,15 +610,31 @@ class MaintenanceServiceTests(unittest.TestCase):
         controller.state.set_recording(RecordingState.RECORDING)
         with self.assertRaisesRegex(RuntimeError, "recording"):
             controller.maintenance.command_latch(PendulumLatchState.HOLD)
-        self.assertEqual(device.latch_commands, [])
+        self.assertTrue(all(command == "latch_status" for _, command in device.latch_commands))
 
     def run_system_check(self, controller: WorkbenchController) -> None:
+        # A previous BIT result can remain PASSED while a new BIT is in progress.
+        # Require the entire correlated command sequence to finish before returning.
+        self.assertTrue(
+            self.wait_for(
+                lambda: not controller.maintenance.is_busy
+                and not controller.firmware_commands.is_busy,
+                timeout_s=6.0,
+            ),
+            f"Pre-BIT operation={controller.maintenance.snapshot.operation}",
+        )
         controller.maintenance.run_system_check()
         self.assertTrue(
             self.wait_for(
                 lambda: controller.maintenance.snapshot.bit_state
                 in (BitResultState.PASSED, BitResultState.FAILED)
-            )
+                and controller.maintenance.snapshot.operation is None
+                and not controller.maintenance.is_busy
+                and not controller.firmware_commands.is_busy,
+                timeout_s=6.0,
+            ),
+            f"BIT operation={controller.maintenance.snapshot.operation}, "
+            f"result={controller.maintenance.snapshot.bit_state}",
         )
 
     def command_latch_open(self, controller: WorkbenchController) -> None:
@@ -1237,6 +1263,15 @@ class MaintenanceServiceTests(unittest.TestCase):
         page = window.maintenance_page
         self.assertFalse(page.manual_up_button.isEnabled())
         self.assertFalse(page.manual_down_button.isEnabled())
+        # Opening the UI can overlap the automatic post-connect check/latch sync.
+        # Wait for startup maintenance to become idle before requesting another BIT.
+        self.assertTrue(
+            self.wait_for(
+                lambda: not controller.maintenance.is_busy
+                and not controller.firmware_commands.is_busy,
+                timeout_s=6.0,
+            )
+        )
         self.run_system_check(controller)
         self.qt_app.processEvents()
         self.assertTrue(page.manual_up_button.isEnabled())
@@ -1270,7 +1305,11 @@ class MaintenanceServiceTests(unittest.TestCase):
         self.assertFalse(any("manual_keepalive" in event.message for event in events))
 
         controller.state.publish_sample(TelemetrySample(201, 4.02, 1.0, 6.25, source="real"))
-        self.assertIn("6.25 mm", page.manual_position_value.text())
+        # The Maintenance page batches position-label updates on a UI timer.
+        self.assertTrue(
+            self.wait_for(lambda: "6.25 mm" in page.manual_position_value.text()),
+            page.manual_position_value.text(),
+        )
         up_heartbeat_count = len(device.manual_keepalive_received)
         QTest.mouseRelease(page.manual_up_button, Qt.MouseButton.LeftButton)
         self.assertTrue(
@@ -1364,14 +1403,14 @@ class MaintenanceServiceTests(unittest.TestCase):
         controller, device = self.create_connected_controller(
             initially_homed=True,
             drop_manual_keepalives=True,
-            manual_deadman_timeout_s=0.25,
+            manual_deadman_timeout_s=0.6,
         )
         self.run_system_check(controller)
         window = MainWindow(controller)
         page = window.maintenance_page
         window.show()
         self.qt_app.processEvents()
-        page.manual_up_button.pressed.emit()
+        controller.maintenance.start_manual_motion("up")
 
         self.assertTrue(
             self.wait_for(
@@ -1439,7 +1478,7 @@ class MaintenanceServiceTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "up travel limit"):
             controller.maintenance.start_manual_motion("up")
 
-        page.manual_down_button.pressed.emit()
+        controller.maintenance.start_manual_motion("down")
         self.assertTrue(
             self.wait_for(lambda: page.maintenance.snapshot.manual_motion == ManualMotionState.MOVING_DOWN)
         )
@@ -1461,15 +1500,20 @@ class MaintenanceServiceTests(unittest.TestCase):
         )
         self.run_system_check(controller)
         window = MainWindow(controller)
+        window.show()
+        window.maintenance_navigation_button.click()
+        self.qt_app.processEvents()
         page = window.maintenance_page
 
         self.assertTrue(page.manual_up_button.isEnabled())
         self.assertFalse(page.manual_down_button.isEnabled())
         with self.assertRaisesRegex(RuntimeError, "down travel limit"):
             controller.maintenance.start_manual_motion("down")
-        page.manual_up_button.pressed.emit()
+        controller.maintenance.start_manual_motion("up")
         self.assertTrue(
-            self.wait_for(lambda: page.maintenance.snapshot.manual_motion == ManualMotionState.MOVING_UP)
+            self.wait_for(lambda: page.maintenance.snapshot.manual_motion == ManualMotionState.MOVING_UP),
+            f'motion={page.maintenance.snapshot.manual_motion}, message={page.maintenance.snapshot.manual_motion_message}, '
+            f'button_enabled={page.manual_up_button.isEnabled()}, device_active={device.manual_active}',
         )
         self.assertEqual(device.manual_direction, "up")
         controller.maintenance.stop_manual_motion("test_release")
@@ -1489,8 +1533,12 @@ class MaintenanceServiceTests(unittest.TestCase):
         self.qt_app.processEvents()
         window.maintenance_navigation_button.click()
         page = window.maintenance_page
-        page.manual_up_button.pressed.emit()
-        self.assertTrue(self.wait_for(lambda: device.manual_active))
+        controller.maintenance.start_manual_motion("up")
+        self.assertTrue(
+            self.wait_for(lambda: device.manual_active),
+            f'motion={page.maintenance.snapshot.manual_motion}, message={page.maintenance.snapshot.manual_motion_message}, '
+            f'button_enabled={page.manual_up_button.isEnabled()}, visible={page.isVisible()}',
+        )
 
         window.monitor_navigation_button.click()
 

@@ -71,7 +71,7 @@ class ExperimentManagerPage(QWidget):
         toolbar.addWidget(export)
         layout.addLayout(toolbar)
         self.table = QTableWidget(0, 10)
-        self.table.setHorizontalHeaderLabels(["Date", "Experiment", "Mode", "Duration", "Initial angle", "Peak angle", "Maximum angle", "Result", "Status", "Simulation"])
+        self.table.setHorizontalHeaderLabels(["Date", "Experiment", "Mode", "Duration", "Initial angle", "Measured Max (°)", "Simscape Max (°)", "Result", "Status", "Simulation"])
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
@@ -80,7 +80,7 @@ class ExperimentManagerPage(QWidget):
         header = self.table.horizontalHeader()
         header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
         header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
-        for index, width in enumerate((145, 290, 132, 91, 106, 98, 120, 115, 109, 130)):
+        for index, width in enumerate((145, 290, 132, 91, 106, 124, 124, 115, 109, 130)):
             self.table.setColumnWidth(index, width)
         self.table.verticalHeader().setVisible(False)
         self.table.verticalHeader().setDefaultSectionSize(37)
@@ -221,6 +221,8 @@ class ExperimentManagerPage(QWidget):
             peak = manifest.get("peak_absolute_angle_deg")
             initial = details.get("measured_initial_angle_deg")
             targets = target_metrics(directory, manifest)
+            simulation_status = inspect_simulation(directory)
+            simulated_max = self._simulation_max_angle(simulation_status)
             _LOGGER.info(
                 "Experiment Library record: experiment_id=%s maximum_angle=%s "
                 "outcome=%s completion_reason=%s "
@@ -238,11 +240,11 @@ class ExperimentManagerPage(QWidget):
                 f"{duration:.1f} s" if isinstance(duration, (int, float)) else "—",
                 self._display_number(initial, "°"),
                 self._display_number(peak, "°"),
-                self._display_number(targets["maximum_angle_deg"], "°"),
+                self._display_number(simulated_max, "°"),
                 targets["outcome"],
                 "Archived" if archived else str(manifest.get("completion_status") or ""),
                 {"ready": "Saved", "stale": "Stale", "incomplete": "Incomplete",
-                 "missing": "Not simulated"}[inspect_simulation(directory).state],
+                 "missing": "Not simulated"}[simulation_status.state],
             ]
             searchable = " ".join(fields + [params, str(manifest.get("experiment_id") or "")])
             if query and query not in searchable.casefold():
@@ -258,13 +260,38 @@ class ExperimentManagerPage(QWidget):
                     item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
                 if col in (3, 4, 5, 6):
                     numeric = {3: duration, 4: initial, 5: peak,
-                               6: targets["maximum_angle_deg"]}[col]
+                               6: simulated_max}[col]
                     if isinstance(numeric, (int, float)) and math.isfinite(numeric):
                         item.setData(Qt.ItemDataRole.UserRole + 1, float(numeric))
                 self.table.setItem(row, col, item)
         self.table.setSortingEnabled(True)
         self.summary.setText(f"{self.table.rowCount()} experiments shown")
         self._show_details()
+
+    @staticmethod
+    def _simulation_max_angle(simulation_status):
+        """Read the absolute maximum simulated angle from a valid saved CSV."""
+        if simulation_status.state != "ready":
+            return None
+        csv_path = simulation_status.folder / "simulation.csv"
+        maximum = None
+        try:
+            with csv_path.open("r", encoding="utf-8-sig", newline="") as source:
+                reader = csv.DictReader(source)
+                if "pendulum_angle_deg" not in (reader.fieldnames or []):
+                    return None
+                for row in reader:
+                    try:
+                        angle = float(row["pendulum_angle_deg"])
+                    except (ValueError, TypeError, KeyError):
+                        continue
+                    if math.isfinite(angle):
+                        magnitude = abs(angle)
+                        if maximum is None or magnitude > maximum:
+                            maximum = magnitude
+        except (OSError, UnicodeError, csv.Error):
+            return None
+        return maximum
 
     def _selected(self):
         row = self.table.currentRow()
@@ -479,53 +506,16 @@ class ExperimentManagerPage(QWidget):
             if clicked is not revalidate_button:
                 return
         mode = (manifest.get("experiment") or {}).get("experiment_mode")
-        # The closed-loop name is an alias of the original auto-resonance
-        # mode in firmware, but older recordings may persist either spelling.
         supported_modes = (
             "FREE_SWING", "VERTICAL_SINUSOIDAL_EXCITATION",
             "AUTO_RESONANCE_PARAMETRIC", "AUTO_RESONANCE_PARAMETRIC_CLOSED_LOOP",
+            "PHASE_TRACKED_SINE_AUTO_RESONANCE",
+            "AUTO_RESONANCE_AR1", "AUTO_RESONANCE_AR2", "AUTO_RESONANCE_AR3",
         )
         if mode not in supported_modes:
-            explanation = (
-                "The current Pendulum_Simscape_Model does not implement the "
-                "phase-tracked sine controller. Its dynamics cannot be represented "
-                "faithfully by the legacy auto-resonance feedback path."
-                if mode == "PHASE_TRACKED_SINE_AUTO_RESONANCE" else
-                ("The selected experiment uses " + mode.replace("AUTO_RESONANCE_", "") +
-                 ". The current Simscape model only implements legacy feedback "
-                 "(controlMode=2), not the firmware AR1/AR2/AR3 algorithms. "
-                 "A controller-matched MATLAB wrapper must be implemented "
-                 "before a valid comparison can run.")
-                if mode in ("AUTO_RESONANCE_AR1", "AUTO_RESONANCE_AR2",
-                            "AUTO_RESONANCE_AR3") else
-                f"No MATLAB simulation wrapper exists for experiment mode: {mode!r}."
-            )
-            QMessageBox.information(self, "Simscape controller unavailable", explanation)
+            QMessageBox.information(self, "Simscape controller unavailable",
+                                    f"No agreed MATLAB mapping for mode: {mode!r}.")
             return
-        if mode in ("AUTO_RESONANCE_PARAMETRIC", "AUTO_RESONANCE_PARAMETRIC_CLOSED_LOOP"):
-            # Current model's controlMode=2 is legacy feedback, not the
-            # newer STM32 AR1/AR2/AR3 algorithm.
-            exp_data = manifest.get("experiment") or {}
-            variant = str(exp_data.get("controller_variant") or
-                          exp_data.get("parametric_variant") or "").lower().strip()
-            if variant in ("ar1", "ar2", "ar3", "classic", "enhanced"):
-                QMessageBox.warning(
-                    self, "Controller model not equivalent",
-                    f"This recording uses {variant.upper()}, but the current "
-                    "Simscape model implements only legacy feedback. "
-                    "A firmware-equivalent simulation is not yet implemented."
-                )
-                return
-            answer = QMessageBox.question(
-                self, "Simscape controller fidelity",
-                "The Simscape model uses legacy feedback (controlMode=2), "
-                "which has not been validated as equivalent to the STM32 "
-                "controller.\n\nContinue with a legacy-model prediction?",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                QMessageBox.StandardButton.No,
-            )
-            if answer != QMessageBox.StandardButton.Yes:
-                return
         choice = self._simscape_dialog(
             "MATLAB connection",
             "Choose how to run this simulation:\n"
@@ -585,7 +575,8 @@ class ExperimentManagerPage(QWidget):
             "runExperimentSimulation(" + quote(experiment_dir) + ");"
             "arManifest=jsondecode(fileread(fullfile(" + quote(experiment_dir) + ","
             + quote("manifest.json") + ")));"
-            "if strcmp(string(arManifest.experiment.experiment_mode),'AUTO_RESONANCE_PARAMETRIC');"
+            "if contains(string(arManifest.experiment.experiment_mode),'AUTO_RESONANCE') || " 
+            "strcmp(string(arManifest.experiment.experiment_mode),'PHASE_TRACKED_SINE_AUTO_RESONANCE');"
             "compareExperiment(" + quote(experiment_dir) + ",Plot=false,SaveResults=true);"
             "end;"
         )

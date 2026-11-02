@@ -563,7 +563,7 @@ class ExperimentPage(QWidget):
             ExperimentMode.AUTO_RESONANCE_AR2: "ar2",
             ExperimentMode.AUTO_RESONANCE_AR3: "ar3",
         }
-        if mode in unified_variants:
+        if mode == ExperimentMode.AUTO_RESONANCE_PARAMETRIC or mode in unified_variants:
             try:
                 amplitude = float(self.amplitude_input.text().strip())
                 phase = float(self.phase_input.text().strip())

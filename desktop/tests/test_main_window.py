@@ -91,13 +91,13 @@ class MainWindowTests(unittest.TestCase):
         controller.state.set_connection(ConnectionState.CONNECTED, "COM6")
         window = MainWindow(controller)
 
-        self.assertEqual(window.page_stack.count(), 3)
+        self.assertEqual(window.page_stack.count(), 4)
         self.assertIs(window.page_stack.currentWidget(), window.live_page)
         self.assertTrue(window.live_navigation_button.isChecked())
         self.assertEqual(window.monitor_navigation_button.text(), "Monitor")
         self.assertEqual(window.monitor_navigation_button.objectName(), "workspaceNavigationButton")
         self.assertTrue(window.monitor_navigation_button.property("selected"))
-        self.assertEqual(window.experiment_navigation_button.text(), "Experiment")
+        self.assertEqual(window.experiment_navigation_button.text(), "Run Experiment")
         self.assertEqual(window.maintenance_navigation_button.text(), "Maintenance")
         self.assertEqual(window.navigation_group.id(window.maintenance_navigation_button), 2)
         self.assertIs(window.page_stack.widget(2), window.maintenance_page)
@@ -105,7 +105,17 @@ class MainWindowTests(unittest.TestCase):
             window.navigation_layout.indexOf(window.maintenance_navigation_button),
             window.navigation_layout.indexOf(window.experiment_navigation_button) + 1,
         )
-        self.assertIsNotNone(window.navigation_layout.itemAt(3).spacerItem())
+        # The Experiment Library adds a navigation entry before the spacer.
+        spacer_items = [
+            window.navigation_layout.itemAt(i)
+            for i in range(window.navigation_layout.count())
+            if window.navigation_layout.itemAt(i).spacerItem() is not None
+        ]
+        self.assertEqual(len(spacer_items), 1)
+        self.assertGreater(
+            window.navigation_layout.indexOf(window.maintenance_navigation_button),
+            window.navigation_layout.indexOf(window.manager_navigation_button),
+        )
         self.assertIs(window.live_page.controller, controller)
         self.assertIs(window.experiment_page.controller, controller)
         self.assertIs(window.live_page.controller.state, controller.state)
@@ -178,12 +188,11 @@ class MainWindowTests(unittest.TestCase):
         self.assertIsInstance(page.scroll_area, QScrollArea)
         self.assertTrue(page.scroll_area.widgetResizable())
         self.assertGreater(page.scroll_area.verticalScrollBar().maximum(), 0)
-        self.assertGreaterEqual(page.angle_plot.minimumHeight(), 200)
-        self.assertGreaterEqual(page.position_plot.minimumHeight(), 200)
-        charts_layout = page.charts_panel.layout()
-        self.assertGreaterEqual(charts_layout.indexOf(page.angle_plot), 0)
-        self.assertGreaterEqual(charts_layout.indexOf(page.position_plot), 0)
-        self.assertLess(page.angle_plot.geometry().bottom(), page.position_plot.geometry().top())
+        # Monitor now displays live numerical metrics and event history instead of plots.
+        self.assertGreaterEqual(page.hardware_panel.minimumHeight(), 200)
+        self.assertIsNotNone(page.angle_value[1])
+        self.assertIsNotNone(page.position_value[1])
+        self.assertIsNotNone(page.samples_value[1])
 
     def test_navigation_during_active_recording_does_not_stop_writer(self) -> None:
         temporary_directory = tempfile.TemporaryDirectory()
@@ -246,7 +255,7 @@ class MainWindowTests(unittest.TestCase):
         self.assertEqual(controller.state.snapshot.samples_received, 0)
         self.assertEqual(controller.state.snapshot.connection, ConnectionState.DISCONNECTED)
         self.assertFalse(controller.mock_source.is_active)
-        self.assertEqual(len(window.live_page._samples), 0)
+        self.assertEqual(window.live_page.samples_value[1].text(), "0")
         self.assertEqual(
             window.live_page.connect_button.isEnabled(),
             window.live_page.port_combo.currentData() is not None,
@@ -488,7 +497,7 @@ class MainWindowTests(unittest.TestCase):
         self.assertEqual(reopened_experiment_page.saved_sample_count_value.text(), "1")
         self.assertEqual(reopened_experiment_page.saved_data_source_value.text(), "Mock")
         self.assertTrue(reopened_experiment_page.open_recording_folder_button.isEnabled())
-        self.assertEqual(reopened_window.live_page._samples[-1].angle_deg, 4.5)
+        self.assertEqual(reopened_controller.state.snapshot.latest_sample.angle_deg, 4.5)
         reopened_window.close()
 
     def test_start_click_is_responsive_during_folder_creation(self) -> None:
