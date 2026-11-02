@@ -1387,7 +1387,7 @@ class MaintenanceServiceTests(unittest.TestCase):
         controller, device = self.create_connected_controller(
             initially_homed=True,
             drop_manual_keepalives=True,
-            manual_deadman_timeout_s=0.25,
+            manual_deadman_timeout_s=0.6,
         )
         self.run_system_check(controller)
         window = MainWindow(controller)
@@ -1484,6 +1484,9 @@ class MaintenanceServiceTests(unittest.TestCase):
         )
         self.run_system_check(controller)
         window = MainWindow(controller)
+        window.show()
+        window.maintenance_navigation_button.click()
+        self.qt_app.processEvents()
         page = window.maintenance_page
 
         self.assertTrue(page.manual_up_button.isEnabled())
@@ -1492,7 +1495,9 @@ class MaintenanceServiceTests(unittest.TestCase):
             controller.maintenance.start_manual_motion("down")
         page.manual_up_button.pressed.emit()
         self.assertTrue(
-            self.wait_for(lambda: page.maintenance.snapshot.manual_motion == ManualMotionState.MOVING_UP)
+            self.wait_for(lambda: page.maintenance.snapshot.manual_motion == ManualMotionState.MOVING_UP),
+            f'motion={page.maintenance.snapshot.manual_motion}, message={page.maintenance.snapshot.manual_motion_message}, '
+            f'button_enabled={page.manual_up_button.isEnabled()}, device_active={device.manual_active}',
         )
         self.assertEqual(device.manual_direction, "up")
         controller.maintenance.stop_manual_motion("test_release")
@@ -1513,7 +1518,11 @@ class MaintenanceServiceTests(unittest.TestCase):
         window.maintenance_navigation_button.click()
         page = window.maintenance_page
         page.manual_up_button.pressed.emit()
-        self.assertTrue(self.wait_for(lambda: device.manual_active))
+        self.assertTrue(
+            self.wait_for(lambda: device.manual_active),
+            f'motion={page.maintenance.snapshot.manual_motion}, message={page.maintenance.snapshot.manual_motion_message}, '
+            f'button_enabled={page.manual_up_button.isEnabled()}, visible={page.isVisible()}',
+        )
 
         window.monitor_navigation_button.click()
 
