@@ -527,7 +527,8 @@ class MaintenanceServiceTests(unittest.TestCase):
         page = window.maintenance_page
 
         self.assertEqual(controller.maintenance.snapshot.latch_state, PendulumLatchState.UNKNOWN)
-        self.assertEqual(controller.maintenance.snapshot.bit_state, BitResultState.NOT_RUN)
+        # Startup now runs a read-only BIT automatically; latch controls must remain usable.
+        self.assertEqual(controller.maintenance.snapshot.bit_state, BitResultState.PASSED)
         self.assertTrue(page.latch_hold_button.isEnabled())
         self.assertTrue(page.latch_open_button.isEnabled())
         self.assertIn("does not set the pendulum initial angle", page.latch_commissioning_note.text())
