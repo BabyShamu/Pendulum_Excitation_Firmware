@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (
 from pendulum_workbench.experiments.repository import ExperimentRepository
 from pendulum_workbench.experiments.simulation_cache import inspect_simulation
 from pendulum_workbench.experiments.target_metrics import target_metrics
+from pendulum_workbench.experiments.experiment_summary import experiment_summary
 
 
 _LOGGER = logging.getLogger(__name__)
@@ -213,15 +214,15 @@ class ExperimentManagerPage(QWidget):
             kind = str(details.get("experiment_mode") or "Recording")
             params = ", ".join(f"{k}={v}" for k, v in details.items()
                                if k != "experiment_mode" and isinstance(v, (str, int, float, bool)))
-            duration = details.get("actual_elapsed_duration_s")
-            if duration is None:
-                duration = details.get("commanded_duration_s")
-            if duration is None:
-                duration = details.get("duration_s")
-            peak = manifest.get("peak_absolute_angle_deg")
-            initial = details.get("measured_initial_angle_deg")
-            targets = target_metrics(directory, manifest)
-            simulation_status = inspect_simulation(directory)
+            summary = experiment_summary(directory, manifest)
+            duration = summary["duration_s"]
+            peak = summary["measured_peak_angle_deg"]
+            initial = summary["initial_angle_deg"]
+            targets = {
+                "maximum_angle_deg": summary["maximum_angle_deg"],
+                "outcome": summary["outcome"],
+            }
+            simulation_status = summary["simulation"]
             simulated_max = self._simulation_max_angle(simulation_status)
             _LOGGER.info(
                 "Experiment Library record: experiment_id=%s maximum_angle=%s "
@@ -236,15 +237,14 @@ class ExperimentManagerPage(QWidget):
             fields = [
                 str(manifest.get("created_at") or "")[:16].replace("T", " "),
                 str(manifest.get("name") or ""),
-                self._friendly_mode(kind),
+                summary["mode"],
                 f"{duration:.1f} s" if isinstance(duration, (int, float)) else "—",
                 self._display_number(initial, "°"),
                 self._display_number(peak, "°"),
                 self._display_number(simulated_max, "°"),
-                targets["outcome"],
-                "Archived" if archived else str(manifest.get("completion_status") or ""),
-                {"ready": "Saved", "stale": "Stale", "incomplete": "Incomplete",
-                 "missing": "Not simulated"}[simulation_status.state],
+                summary["outcome"],
+                "Archived" if archived else summary["completion"],
+                summary["simulation_status"],
             ]
             searchable = " ".join(fields + [params, str(manifest.get("experiment_id") or "")])
             if query and query not in searchable.casefold():
