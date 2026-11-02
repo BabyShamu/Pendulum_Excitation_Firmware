@@ -471,6 +471,30 @@ class ExperimentManagerPage(QWidget):
             )
             QMessageBox.information(self, "Simscape controller unavailable", explanation)
             return
+        if mode in ("AUTO_RESONANCE_PARAMETRIC", "AUTO_RESONANCE_PARAMETRIC_CLOSED_LOOP"):
+            # Current model's controlMode=2 is legacy feedback, not the
+            # newer STM32 AR1/AR2/AR3 algorithm.
+            exp_data = manifest.get("experiment") or {}
+            variant = str(exp_data.get("controller_variant") or
+                          exp_data.get("parametric_variant") or "").lower().strip()
+            if variant in ("ar1", "ar2", "ar3", "classic", "enhanced"):
+                QMessageBox.warning(
+                    self, "Controller model not equivalent",
+                    f"This recording uses {variant.upper()}, but the current "
+                    "Simscape model implements only legacy feedback. "
+                    "A firmware-equivalent simulation is not yet implemented."
+                )
+                return
+            answer = QMessageBox.question(
+                self, "Simscape controller fidelity",
+                "The Simscape model uses legacy feedback (controlMode=2), "
+                "which has not been validated as equivalent to the STM32 "
+                "controller.\n\nContinue with a legacy-model prediction?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                return
         choice = self._simscape_dialog(
             "MATLAB connection",
             "Choose how to run this simulation:\n"
