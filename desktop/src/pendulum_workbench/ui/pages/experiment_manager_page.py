@@ -491,6 +491,13 @@ class ExperimentManagerPage(QWidget):
                 "phase-tracked sine controller. Its dynamics cannot be represented "
                 "faithfully by the legacy auto-resonance feedback path."
                 if mode == "PHASE_TRACKED_SINE_AUTO_RESONANCE" else
+                ("The selected experiment uses " + mode.replace("AUTO_RESONANCE_", "") +
+                 ". The current Simscape model only implements legacy feedback "
+                 "(controlMode=2), not the firmware AR1/AR2/AR3 algorithms. "
+                 "A controller-matched MATLAB wrapper must be implemented "
+                 "before a valid comparison can run.")
+                if mode in ("AUTO_RESONANCE_AR1", "AUTO_RESONANCE_AR2",
+                            "AUTO_RESONANCE_AR3") else
                 f"No MATLAB simulation wrapper exists for experiment mode: {mode!r}."
             )
             QMessageBox.information(self, "Simscape controller unavailable", explanation)
