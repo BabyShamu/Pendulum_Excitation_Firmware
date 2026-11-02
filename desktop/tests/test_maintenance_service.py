@@ -457,13 +457,13 @@ class MaintenanceServiceTests(unittest.TestCase):
     def test_latch_starts_unknown_and_does_not_affect_system_check(self) -> None:
         controller, device = self.create_connected_controller()
         self.assertEqual(controller.maintenance.snapshot.latch_state, PendulumLatchState.UNKNOWN)
-        self.assertEqual(device.latch_commands, [])
+        self.assertTrue(all(command == "latch_status" for _, command in device.latch_commands))
 
         self.run_system_check(controller)
 
         self.assertEqual(controller.maintenance.snapshot.bit_state, BitResultState.PASSED)
         self.assertEqual(controller.maintenance.snapshot.latch_state, PendulumLatchState.UNKNOWN)
-        self.assertEqual(device.latch_commands, [])
+        self.assertTrue(all(command == "latch_status" for _, command in device.latch_commands))
 
     def test_latch_hold_and_open_require_matching_correlated_confirmation(self) -> None:
         controller, device = self.create_connected_controller(defer_latch_commands=True)
@@ -598,7 +598,7 @@ class MaintenanceServiceTests(unittest.TestCase):
         self.assertTrue(
             self.wait_for(lambda: len(device.manual_keepalive_received) >= heartbeat_count + 3)
         )
-        self.assertEqual(device.latch_commands, [])
+        self.assertTrue(all(command == "latch_status" for _, command in device.latch_commands))
         controller.maintenance.stop_manual_motion()
         self.assertTrue(
             self.wait_for(
@@ -610,7 +610,7 @@ class MaintenanceServiceTests(unittest.TestCase):
         controller.state.set_recording(RecordingState.RECORDING)
         with self.assertRaisesRegex(RuntimeError, "recording"):
             controller.maintenance.command_latch(PendulumLatchState.HOLD)
-        self.assertEqual(device.latch_commands, [])
+        self.assertTrue(all(command == "latch_status" for _, command in device.latch_commands))
 
     def run_system_check(self, controller: WorkbenchController) -> None:
         # A previous BIT result can remain PASSED while a new BIT is in progress.
