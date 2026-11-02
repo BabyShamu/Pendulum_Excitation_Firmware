@@ -59,6 +59,51 @@ class ExperimentSummaryTests(unittest.TestCase):
             finally:
                 controller.shutdown()
 
+    def test_library_table_and_details_share_maximum_and_completion(self):
+        from PySide6.QtWidgets import QApplication
+        from pendulum_workbench.application.controller import WorkbenchController
+        from pendulum_workbench.experiments.repository import ExperimentRepository
+        from pendulum_workbench.ui.main_window import MainWindow
+
+        app = QApplication.instance() or QApplication([])
+        with tempfile.TemporaryDirectory() as temp:
+            directory = Path(temp) / "recording"
+            directory.mkdir()
+            manifest = {
+                "experiment_id": "library-check",
+                "name": "Maximum check",
+                "created_at": "2026-11-02T12:00:00",
+                "completion_status": "COMPLETED",
+                "peak_absolute_angle_deg": 60.0,
+                "experiment": {
+                    "maximum_angle_deg": 95.0,
+                    "completion_reason": "duration_elapsed",
+                },
+            }
+            repository = ExperimentRepository(Path(temp))
+            controller = WorkbenchController(experiment_repository=repository)
+            try:
+                window = MainWindow(controller)
+                try:
+                    page = window.manager_page
+                    page._records = [(directory, manifest)]
+                    page._filter()
+                    self.assertEqual(page.table.rowCount(), 1)
+                    self.assertEqual(page.table.item(0, 5).text(), "95.00°")
+                    self.assertEqual(page.table.item(0, 7).text(), "SUCCESS")
+                    self.assertEqual(page.table.item(0, 8).text(), "COMPLETED")
+                    page.table.selectRow(0)
+                    app.processEvents()
+                    self.assertEqual(page.detail_labels["Maximum angle"].text(), "95.00°")
+                    self.assertEqual(page.detail_labels["Completion"].text(), "COMPLETED")
+                    self.assertEqual(
+                        page.detail_labels["Completion reason"].text(), "duration_elapsed"
+                    )
+                finally:
+                    window.close()
+            finally:
+                controller.shutdown()
+
     def test_invalid_values_do_not_become_metrics(self):
         with tempfile.TemporaryDirectory() as temp:
             manifest = {
