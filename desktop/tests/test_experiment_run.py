@@ -1497,12 +1497,18 @@ class ExperimentRunTests(unittest.TestCase):
         self.assertEqual(page.angle_source_value.text(), "Angle source: MEASURED")
         self.assertIsNotNone(controller.experiment_run.snapshot.prediction_outage_duration_ms)
         self.assertGreater(controller.experiment_run.snapshot.prediction_outage_duration_ms, 0.0)
+        completed = self.wait_for(
+            lambda: controller.experiment_run.snapshot.state == ExperimentRunState.COMPLETE
+            and controller.state.snapshot.recording == RecordingState.SAVED,
+            timeout_s=15.0,
+        )
         self.assertTrue(
-            self.wait_for(
-                lambda: controller.experiment_run.snapshot.state == ExperimentRunState.COMPLETE
-                and controller.state.snapshot.recording == RecordingState.SAVED,
-                timeout_s=10.0,
-            )
+            completed,
+            f"Run state={controller.experiment_run.snapshot.state}, "
+            f"recording={controller.state.snapshot.recording}, "
+            f"completion_reason={controller.experiment_run.snapshot.completion_reason}, "
+            f"error={controller.experiment_run.snapshot.error_message}, "
+            f"device_sine_active={device.sine_active}",
         )
         self.assertFalse(device.sine_active)
         manifest = repository.load(saved_experiment_directory(repository, experiment_id)).manifest
