@@ -1892,7 +1892,18 @@ class ExperimentRunTests(unittest.TestCase):
         definition = page._definition_from_fields()
         self.assertIsInstance(definition, PhaseTrackedSineDefinition)
         self.assertEqual(definition.phase_deg, 25.0)
-        self.assertTrue(page.primary_run_button.isEnabled())
+        # The run button also checks the freshness of the AS5600 measurement.
+        # Obtain another valid sample before asserting preflight readiness.
+        samples_before_refresh = controller.state.snapshot.samples_received
+        self.assertTrue(
+            self.wait_for(
+                lambda: controller.state.snapshot.samples_received > samples_before_refresh
+                and controller.state.snapshot.latest_sample is not None
+                and controller.state.snapshot.latest_sample.angle_deg is not None
+            )
+        )
+        page._update_setup_validity()
+        self.assertTrue(page.primary_run_button.isEnabled(), page.run_error_value.text())
 
         page.experiment_mode_selector.setCurrentIndex(
             page.experiment_mode_selector.findData(
