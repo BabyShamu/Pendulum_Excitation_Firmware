@@ -38,6 +38,27 @@ class ExperimentSummaryTests(unittest.TestCase):
             self.assertEqual(repr(manifest), before)
             self.assertFalse((directory / "manifest.json").exists())
 
+    def test_explicit_repository_root_is_preserved_by_workbench_ui(self):
+        from pendulum_workbench.application.controller import WorkbenchController
+        from pendulum_workbench.experiments.repository import ExperimentRepository
+        from pendulum_workbench.ui.main_window import MainWindow
+        from PySide6.QtWidgets import QApplication
+
+        app = QApplication.instance() or QApplication([])
+        with tempfile.TemporaryDirectory() as temp:
+            repository = ExperimentRepository(Path(temp))
+            self.assertTrue(repository.explicit_root)
+            controller = WorkbenchController(experiment_repository=repository)
+            try:
+                window = MainWindow(controller)
+                try:
+                    self.assertEqual(repository.root, Path(temp))
+                    self.assertEqual(controller.experiment_recorder.repository.root, Path(temp))
+                finally:
+                    window.close()
+            finally:
+                controller.shutdown()
+
     def test_invalid_values_do_not_become_metrics(self):
         with tempfile.TemporaryDirectory() as temp:
             manifest = {
