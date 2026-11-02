@@ -105,7 +105,17 @@ class MainWindowTests(unittest.TestCase):
             window.navigation_layout.indexOf(window.maintenance_navigation_button),
             window.navigation_layout.indexOf(window.experiment_navigation_button) + 1,
         )
-        self.assertIsNotNone(window.navigation_layout.itemAt(3).spacerItem())
+        # The Experiment Library adds a navigation entry before the spacer.
+        spacer_items = [
+            window.navigation_layout.itemAt(i)
+            for i in range(window.navigation_layout.count())
+            if window.navigation_layout.itemAt(i).spacerItem() is not None
+        ]
+        self.assertEqual(len(spacer_items), 1)
+        self.assertGreater(
+            window.navigation_layout.indexOf(window.maintenance_navigation_button),
+            window.navigation_layout.indexOf(window.manager_navigation_button),
+        )
         self.assertIs(window.live_page.controller, controller)
         self.assertIs(window.experiment_page.controller, controller)
         self.assertIs(window.live_page.controller.state, controller.state)
