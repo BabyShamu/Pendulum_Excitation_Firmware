@@ -81,30 +81,19 @@ python -m venv .venv-build
 .venv-build\Scripts\python.exe -m PyInstaller --clean --noconfirm --workpath build --distpath dist PendulumWorkbench.spec
 ```
 
-The primary supported build is **ONEDIR**:
-`desktop/dist/Pendulum Workbench/Pendulum Workbench.exe`.
-Distribute the entire `Pendulum Workbench` folder, including `_internal`.
-Target PCs do not need Python installed. PyInstaller's PySide6 hooks bundle the
-Qt libraries/plugins required by the imported Qt modules, including the Windows
-platform plugin. The spec includes the application assets and Windows pyserial
-port-enumeration backend. Resource lookup is relative to the bundled module,
-not the current working directory.
+The default build is now **ONEFILE**:
+`desktop/dist/PendulumWorkbench.exe`. Distribute this one file; target PCs
+do not need a separate Python installation or an `_internal` folder.
+PyInstaller embeds the app, Qt libraries/plugins, pyserial, and icon assets.
+The executable extracts bundled runtime components into a temporary directory
+at startup, so its first launch can be slower than a folder-based distribution.
 
 COM access still requires Windows to recognize the NUCLEO/ST-Link serial device
-and its driver. Packaging does not install that driver. Windows SmartScreen may
-warn about the unsigned EXE; unsigned local builds are expected until code
-signing is added. Build on a trusted machine and distribute trusted artifacts.
-
-**Optional ONEFILE** is secondary and not the canonical spec. It extracts Qt at
-startup and can launch more slowly. Build it with this CMD command from this directory:
-
-```bat
-.venv-build\Scripts\python.exe -m PyInstaller --clean --noconfirm --onefile --windowed --noupx --name "Pendulum Workbench Onefile" --specpath build --paths src --icon "src\pendulum_workbench\assets\pendulum_icon.ico" --add-data "src\pendulum_workbench\assets;pendulum_workbench/assets" --hidden-import serial.tools.list_ports_windows "src\pendulum_workbench\__main__.py"
-```
-
-Its EXE appears at `desktop/dist/Pendulum Workbench Onefile.exe`; the generated
-secondary spec stays under ignored `desktop/build`. Do not replace the committed
-ONEDIR spec with it.
+and its driver; packaging does not install device drivers. Simscape simulation
+commands still require a compatible, licensed MATLAB/Simulink/Simscape installation
+and the thesis models on the target PC. Experiment recordings and settings remain
+in the normal Windows user-data locations; they are not stored inside the EXE.
+Windows SmartScreen may warn about an unsigned EXE.
 
 ### Manual Smoke Test
 
