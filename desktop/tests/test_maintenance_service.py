@@ -382,8 +382,13 @@ class MaintenanceServiceTests(unittest.TestCase):
         self.addCleanup(temporary_directory.cleanup)
         serial_instances: list[MaintenanceFakeSerial] = []
 
+        # Complete the automatic post-connect system check before tests intentionally
+        # defer a later status response. Otherwise startup can remain busy indefinitely.
+        defer_test_status = bool(serial_options.get("defer_status", False))
+        startup_options = {**serial_options, "defer_status": False} if defer_test_status else serial_options
+
         def serial_factory(port: str, baud_rate: int, **kwargs: object) -> MaintenanceFakeSerial:
-            device = MaintenanceFakeSerial(port, baud_rate, **serial_options, **kwargs)
+            device = MaintenanceFakeSerial(port, baud_rate, **startup_options, **kwargs)
             serial_instances.append(device)
             return device
 
@@ -400,12 +405,16 @@ class MaintenanceServiceTests(unittest.TestCase):
             self.wait_for(lambda: controller.state.snapshot.connection == ConnectionState.CONNECTED)
         )
         self.assertTrue(serial_instances)
-        if serial_instances[0].defer_status:
-            self.assertTrue(self.wait_for(lambda: serial_instances[0].pending_status_id is not None))
-            serial_instances[0].release_status()
-            self.assertTrue(self.wait_for(lambda: not controller.firmware_commands.is_busy))
+        self.assertTrue(
+            self.wait_for(
+                lambda: not controller.firmware_commands.is_busy
+                and not controller.maintenance.is_busy
+                and controller.maintenance.snapshot.bit_state in (BitResultState.PASSED, BitResultState.FAILED),
+                timeout_s=6.0,
+            )
+        )
+        if defer_test_status:
             serial_instances[0].defer_status = True
-        self.assertTrue(self.wait_for(lambda: not controller.firmware_commands.is_busy))
         controller._maintenance_fake_devices = serial_instances
         return controller, serial_instances[0]
 
