@@ -651,6 +651,8 @@ class ExperimentRunTests(unittest.TestCase):
             self.wait_for(
                 lambda: controller.experiment_run.snapshot.state == ExperimentRunState.COMPLETE
                 and controller.state.snapshot.recording == RecordingState.SAVED
+            ,
+            timeout_s=10.0,
             )
         )
         self.assertFalse(device.sine_active)
@@ -730,6 +732,8 @@ class ExperimentRunTests(unittest.TestCase):
             self.wait_for(
                 lambda: controller.experiment_run.snapshot.state == ExperimentRunState.COMPLETE
                 and controller.state.snapshot.recording == RecordingState.SAVED
+            ,
+            timeout_s=10.0,
             )
         )
         self.assertFalse(device.autores_active)
@@ -1058,6 +1062,8 @@ class ExperimentRunTests(unittest.TestCase):
             self.wait_for(
                 lambda: controller.experiment_run.snapshot.state == ExperimentRunState.COMPLETE
                 and controller.state.snapshot.recording == RecordingState.SAVED
+            ,
+            timeout_s=10.0,
             )
         )
         self.assertFalse(device.phase_tracked_sine_active)
@@ -1488,6 +1494,8 @@ class ExperimentRunTests(unittest.TestCase):
             self.wait_for(
                 lambda: controller.experiment_run.snapshot.state == ExperimentRunState.COMPLETE
                 and controller.state.snapshot.recording == RecordingState.SAVED
+            ,
+            timeout_s=10.0,
             )
         )
         self.assertFalse(device.sine_active)
