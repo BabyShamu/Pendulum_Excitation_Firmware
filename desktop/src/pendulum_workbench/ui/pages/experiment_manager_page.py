@@ -729,4 +729,9 @@ class ExperimentManagerPage(QWidget):
         QMessageBox.information(self, "Excel sync", f"Updated:\n{target}")
 
     def _write_excel(self):
-        from pendulum_workbench.experiments.excel_export import ex
+        from pendulum_workbench.experiments.excel_export import export_experiment_workbook
+
+        return export_experiment_workbook(
+            self.repository.list_manifests(),
+            self.repository.root,
+        )
