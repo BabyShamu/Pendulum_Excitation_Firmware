@@ -65,6 +65,7 @@ def experiment_summary(directory: Path, manifest: dict) -> dict:
         "maximum_angle_deg": finite_number(metrics["maximum_angle_deg"]),
         "outcome": metrics["outcome"],
         "target_achieved": metrics["target_achieved"],
+        "time_to_success_s": finite_number(metrics["time_to_success_s"]),
         "simulation_status": SIMULATION_LABELS[simulation.state],
         "simulation": simulation,
     }

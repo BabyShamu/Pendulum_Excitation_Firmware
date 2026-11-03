@@ -15,6 +15,7 @@ from pendulum_workbench.domain.angle_prediction import AngleSource
 from pendulum_workbench.domain.experiment_run import (
     AutoResonanceDefinition,
     ExperimentMode,
+    ExperimentOutcome,
     ExperimentRunState,
     PhaseTrackedSineDefinition,
     UnifiedParametricDefinition,
@@ -66,6 +67,7 @@ class SineExperimentSerial:
         unified_parametric_stop_response: bool = False,
         config_fields: dict[str, str] | None = None,
         reject_config: bool = False,
+        angle_script: list[float] | None = None,
         **kwargs: object,
     ) -> None:
         del port, baud_rate, kwargs
@@ -78,6 +80,9 @@ class SineExperimentSerial:
         self.unified_parametric_stop_response = unified_parametric_stop_response
         self.config_fields = config_fields
         self.reject_config = reject_config
+        self.angle_script = angle_script
+        self._script_index = 0
+        self._target_reached_reported = False
         self._chunks: list[bytes] = []
         self._live_enabled = False
         self._next_sample_index = 1
@@ -351,6 +356,14 @@ class SineExperimentSerial:
         self.autores_active = False
         self._enqueue(f"event: type=fault_appeared code={code}\r\n")
 
+    def report_target_reached(self, angle_deg: float = 90.25) -> None:
+        # Mirror the firmware: the actuator stops autonomously at the crossing
+        # and the event carries the actual validated measured angle.
+        self.sine_active = False
+        self.autores_active = False
+        self.phase_tracked_sine_active = False
+        self._enqueue(f"event: type=target_reached angle_deg={angle_deg:.2f}\r\n")
+
     def _enqueue(self, text: str) -> None:
         if "type=latch_open" in text:
             self.recording_state_when_open_commanded = self._controller.state.snapshot.recording
@@ -366,7 +379,34 @@ class SineExperimentSerial:
             sample_index = self._next_sample_index
             self._next_sample_index += 1
             elapsed_s = now - self._start_monotonic
-            angle = "14.80" if self.angle_available else "NaN"
+            if self.angle_script is not None and self.angle_available:
+                angle_value = self.angle_script[
+                    min(self._script_index, len(self.angle_script) - 1)
+                ]
+                self._script_index += 1
+                angle = f"{angle_value:.2f}"
+                if (
+                    abs(angle_value) >= 90.0
+                    and not self._target_reached_reported
+                    and (
+                        self.sine_active
+                        or self.autores_active
+                        or self.phase_tracked_sine_active
+                    )
+                ):
+                    # Firmware behavior: stop the actuator at the first
+                    # validated crossing and emit the event once.
+                    self._target_reached_reported = True
+                    self.sine_active = False
+                    self.autores_active = False
+                    self.phase_tracked_sine_active = False
+                    self._chunks.append(
+                        f"event: type=target_reached angle_deg={angle_value:.2f}\r\n".encode(
+                            "ascii"
+                        )
+                    )
+            else:
+                angle = "14.80" if self.angle_available else "NaN"
             return (
                 f"telemetry sample_index={sample_index} time_s={elapsed_s:.3f} "
                 f"angle_deg={angle} position_mm=0.000\r\n"
@@ -1261,9 +1301,12 @@ class ExperimentRunTests(unittest.TestCase):
         self.assertEqual(manifest["completion_status"], "INTERRUPTED")
         self.assertTrue(manifest["experiment"]["completion_reason"].startswith("safety_event:fault_appeared"))
 
-    def test_pendulum_angle_fault_reason_survives_stop_finalization_without_repositioning(self) -> None:
+    def test_target_reached_completes_successfully_without_fault_clear(self) -> None:
         directory = self.temporary_directory()
-        controller, device, repository = self.create_connected_controller(directory)
+        controller, device, repository = self.create_connected_controller(
+            directory,
+            angle_script=[14.8, 30.0, 45.0, 60.0, 75.0, 85.0, 88.5, 90.4, 89.0, 70.0, 50.0, 30.0],
+        )
         self.addCleanup(controller.shutdown)
         self.prepare_ready_held_system(controller, device)
         experiment_id = controller.experiment_run.start(
@@ -1272,9 +1315,193 @@ class ExperimentRunTests(unittest.TestCase):
         self.assertTrue(
             self.wait_for(lambda: controller.experiment_run.snapshot.state == ExperimentRunState.RUNNING)
         )
-        home_commands_before_fault = device.protocol_actions.count("home")
+        home_commands_before = device.protocol_actions.count("home")
 
-        device.report_closed_loop_fault("pendulum_angle_limit")
+        self.assertTrue(
+            self.wait_for(
+                lambda: controller.experiment_run.snapshot.state == ExperimentRunState.COMPLETE
+                and controller.state.snapshot.recording == RecordingState.SAVED,
+                timeout_s=15.0,
+            )
+        )
+        snapshot = controller.experiment_run.snapshot
+        self.assertEqual(snapshot.completion_reason, "target_reached")
+        self.assertEqual(snapshot.outcome, ExperimentOutcome.SUCCESS)
+        self.assertIsNotNone(snapshot.time_to_success_s)
+        self.assertGreater(snapshot.time_to_success_s, 0.0)
+        self.assertGreaterEqual(snapshot.max_angle_deg, 90.0)
+        self.assertFalse(device.autores_active)
+        self.assertIn("parametric_stop", device.protocol_actions)
+        self.assertEqual(device.latch_state, "open")
+        self.assertEqual(device.protocol_actions.count("home"), home_commands_before)
+        self.assertNotIn("fault_clear", device.protocol_actions)
+        self.assertFalse(controller.state.snapshot.hardware_status.fault)
+        manifest = repository.load(saved_experiment_directory(repository, experiment_id)).manifest
+        self.assertEqual(manifest["completion_status"], "COMPLETED")
+        self.assertEqual(manifest["experiment"]["completion_reason"], "target_reached")
+        self.assertEqual(manifest["experiment"]["outcome"], "SUCCESS")
+        self.assertEqual(manifest["outcome"], "SUCCESS")
+        self.assertEqual(
+            manifest["experiment"]["time_to_success_s"], snapshot.time_to_success_s
+        )
+        self.assertEqual(manifest["time_to_success_s"], snapshot.time_to_success_s)
+        self.assertGreaterEqual(manifest["experiment"]["maximum_angle_deg"], 90.0)
+
+        # A second experiment starts without clearing any fault once the
+        # existing readiness conditions are satisfied again.
+        controller.maintenance.command_latch(PendulumLatchState.HOLD)
+        self.assertTrue(
+            self.wait_for(
+                lambda: controller.maintenance.snapshot.latch_state == PendulumLatchState.HOLD
+                and not controller.firmware_commands.is_busy
+            )
+        )
+        device.angle_script = None
+        controller.experiment_run.start(AutoResonanceDefinition(5.0, 0.0, 30.0))
+        self.assertTrue(
+            self.wait_for(lambda: controller.experiment_run.snapshot.state == ExperimentRunState.RUNNING)
+        )
+        self.assertNotIn("fault_clear", device.protocol_actions)
+        controller.experiment_run.stop()
+        self.assertTrue(
+            self.wait_for(
+                lambda: controller.experiment_run.snapshot.state == ExperimentRunState.OPERATOR_STOPPED
+            )
+        )
+
+    def test_target_reached_at_negative_angle_completes_successfully(self) -> None:
+        directory = self.temporary_directory()
+        controller, device, repository = self.create_connected_controller(
+            directory,
+            angle_script=[-14.8, -30.0, -45.0, -60.0, -75.0, -85.0, -88.5, -90.4, -89.0, -70.0],
+        )
+        self.addCleanup(controller.shutdown)
+        self.prepare_ready_held_system(controller, device)
+        experiment_id = controller.experiment_run.start(
+            AutoResonanceDefinition(7.5, 22.5, 30.0)
+        )
+        self.assertTrue(
+            self.wait_for(lambda: controller.experiment_run.snapshot.state == ExperimentRunState.RUNNING)
+        )
+
+        self.assertTrue(
+            self.wait_for(
+                lambda: controller.experiment_run.snapshot.state == ExperimentRunState.COMPLETE
+                and controller.state.snapshot.recording == RecordingState.SAVED,
+                timeout_s=15.0,
+            )
+        )
+        snapshot = controller.experiment_run.snapshot
+        self.assertEqual(snapshot.outcome, ExperimentOutcome.SUCCESS)
+        self.assertEqual(snapshot.completion_reason, "target_reached")
+        self.assertIsNotNone(snapshot.time_to_success_s)
+        manifest = repository.load(saved_experiment_directory(repository, experiment_id)).manifest
+        self.assertEqual(manifest["experiment"]["outcome"], "SUCCESS")
+        self.assertGreaterEqual(manifest["experiment"]["maximum_angle_deg"], 90.0)
+
+    def test_target_reached_vertical_sine_uses_sine_stop_and_saves_success(self) -> None:
+        directory = self.temporary_directory()
+        controller, device, repository = self.create_connected_controller(
+            directory,
+            angle_script=[14.8, 40.0, 65.0, 80.0, 88.2, 90.3, 88.6, 60.0, 30.0],
+        )
+        self.addCleanup(controller.shutdown)
+        self.prepare_ready_held_system(controller, device)
+        experiment_id = controller.experiment_run.start(VerticalSineDefinition(5.0, 1.8, 30.0))
+        self.assertTrue(
+            self.wait_for(lambda: controller.experiment_run.snapshot.state == ExperimentRunState.RUNNING)
+        )
+
+        self.assertTrue(
+            self.wait_for(
+                lambda: controller.experiment_run.snapshot.state == ExperimentRunState.COMPLETE
+                and controller.state.snapshot.recording == RecordingState.SAVED,
+                timeout_s=15.0,
+            )
+        )
+        self.assertIn("sine_stop", device.protocol_actions)
+        self.assertFalse(device.sine_active)
+        snapshot = controller.experiment_run.snapshot
+        self.assertEqual(snapshot.outcome, ExperimentOutcome.SUCCESS)
+        self.assertIsNotNone(snapshot.time_to_success_s)
+        manifest = repository.load(saved_experiment_directory(repository, experiment_id)).manifest
+        self.assertEqual(manifest["experiment"]["completion_reason"], "target_reached")
+        self.assertEqual(manifest["experiment"]["outcome"], "SUCCESS")
+
+    def test_repeated_target_reached_events_finalize_once(self) -> None:
+        directory = self.temporary_directory()
+        controller, device, repository = self.create_connected_controller(
+            directory,
+            angle_script=[14.8, 40.0, 65.0, 80.0, 88.2, 90.3, 88.6, 91.2, 92.5, 60.0],
+        )
+        self.addCleanup(controller.shutdown)
+        self.prepare_ready_held_system(controller, device)
+        controller.experiment_run.start(AutoResonanceDefinition(5.0, 0.0, 30.0))
+        self.assertTrue(
+            self.wait_for(lambda: controller.experiment_run.snapshot.state == ExperimentRunState.RUNNING)
+        )
+
+        self.assertTrue(
+            self.wait_for(
+                lambda: controller.experiment_run.snapshot.state == ExperimentRunState.COMPLETE
+                and controller.state.snapshot.recording == RecordingState.SAVED,
+                timeout_s=15.0,
+            )
+        )
+        # The firmware emits the event once; a duplicated delivery must not
+        # re-run termination or change the recorded result.
+        device.report_target_reached(91.2)
+        device.report_target_reached(92.5)
+        self.qt_app.processEvents()
+        time.sleep(0.1)
+        self.qt_app.processEvents()
+        snapshot = controller.experiment_run.snapshot
+        self.assertEqual(snapshot.state, ExperimentRunState.COMPLETE)
+        self.assertEqual(snapshot.outcome, ExperimentOutcome.SUCCESS)
+        self.assertEqual(snapshot.completion_reason, "target_reached")
+        self.assertEqual(device.protocol_actions.count("parametric_stop"), 1)
+
+    def test_implausible_target_reached_event_is_ignored(self) -> None:
+        directory = self.temporary_directory()
+        controller, device, _repository = self.create_connected_controller(directory)
+        self.addCleanup(controller.shutdown)
+        self.prepare_ready_held_system(controller, device)
+        controller.experiment_run.start(AutoResonanceDefinition(5.0, 0.0, 30.0))
+        self.assertTrue(
+            self.wait_for(lambda: controller.experiment_run.snapshot.state == ExperimentRunState.RUNNING)
+        )
+
+        device._enqueue("event: type=target_reached angle_deg=12.50\r\n")
+        device._enqueue("event: type=target_reached angle_deg=NaN\r\n")
+        self.qt_app.processEvents()
+        time.sleep(0.2)
+        self.qt_app.processEvents()
+
+        self.assertEqual(
+            controller.experiment_run.snapshot.state, ExperimentRunState.RUNNING
+        )
+        self.assertTrue(device.autores_active)
+        self.assertNotIn("parametric_stop", device.protocol_actions)
+
+        controller.experiment_run.stop()
+        self.assertTrue(
+            self.wait_for(
+                lambda: controller.experiment_run.snapshot.state == ExperimentRunState.OPERATOR_STOPPED
+            )
+        )
+
+    def test_hardware_fault_keeps_priority_over_target_reached(self) -> None:
+        directory = self.temporary_directory()
+        controller, device, repository = self.create_connected_controller(directory)
+        self.addCleanup(controller.shutdown)
+        self.prepare_ready_held_system(controller, device)
+        experiment_id = controller.experiment_run.start(AutoResonanceDefinition(5.0, 0.0, 30.0))
+        self.assertTrue(
+            self.wait_for(lambda: controller.experiment_run.snapshot.state == ExperimentRunState.RUNNING)
+        )
+
+        device.report_closed_loop_fault("lower_limit")
+        device.report_target_reached(90.30)
 
         self.assertTrue(
             self.wait_for(
@@ -1282,14 +1509,45 @@ class ExperimentRunTests(unittest.TestCase):
                 and controller.state.snapshot.recording == RecordingState.INTERRUPTED
             )
         )
-        self.assertIn("parametric_stop", device.protocol_actions)
-        self.assertEqual(device.latch_state, "open")
-        self.assertEqual(device.protocol_actions.count("home"), home_commands_before_fault)
         manifest = repository.load(saved_experiment_directory(repository, experiment_id)).manifest
         self.assertEqual(
             manifest["experiment"]["completion_reason"],
-            "fault_appeared:pendulum_angle_limit",
+            "safety_event:fault_appeared:lower_limit",
         )
+        self.assertEqual(manifest["experiment"]["outcome"], "FAILED")
+        self.assertIsNone(manifest["experiment"]["time_to_success_s"])
+
+    def test_hardware_fault_during_target_finalization_is_not_success(self) -> None:
+        directory = self.temporary_directory()
+        controller, device, repository = self.create_connected_controller(
+            directory,
+            angle_script=[14.8, 40.0, 65.0, 80.0, 88.2, 90.3, 88.6, 60.0, 30.0],
+        )
+        self.addCleanup(controller.shutdown)
+        self.prepare_ready_held_system(controller, device)
+        experiment_id = controller.experiment_run.start(AutoResonanceDefinition(5.0, 0.0, 30.0))
+        self.assertTrue(
+            self.wait_for(lambda: controller.experiment_run.snapshot.state == ExperimentRunState.RUNNING)
+        )
+        self.assertTrue(
+            self.wait_for(
+                lambda: controller.experiment_run.snapshot.state == ExperimentRunState.STOPPING
+            )
+        )
+        device.report_closed_loop_fault("lower_limit")
+
+        self.assertTrue(
+            self.wait_for(
+                lambda: controller.experiment_run.snapshot.state == ExperimentRunState.FAULT
+                and controller.state.snapshot.recording == RecordingState.INTERRUPTED
+            )
+        )
+        manifest = repository.load(saved_experiment_directory(repository, experiment_id)).manifest
+        self.assertEqual(
+            manifest["experiment"]["completion_reason"],
+            "safety_event:fault_appeared:lower_limit",
+        )
+        self.assertEqual(manifest["experiment"]["outcome"], "FAILED")
 
     def test_autoresonance_lower_limit_fault_code_is_preserved(self) -> None:
         directory = self.temporary_directory()
@@ -1710,6 +1968,10 @@ class ExperimentRunTests(unittest.TestCase):
         self.assertEqual(manifest["completion_status"], "COMPLETED")
         self.assertEqual(manifest["experiment"]["completion_reason"], "duration_elapsed")
         self.assertGreaterEqual(manifest["experiment"]["actual_elapsed_duration_s"], 0.15)
+        # Reaching the duration limit below the target is not a success.
+        self.assertEqual(manifest["experiment"]["outcome"], "COMPLETED")
+        self.assertIsNone(manifest["experiment"]["time_to_success_s"])
+        self.assertIsNone(manifest["time_to_success_s"])
 
     def test_firmware_limit_stop_interrupts_run_instead_of_marking_complete(self) -> None:
         directory = self.temporary_directory()

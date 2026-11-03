@@ -46,12 +46,27 @@ def target_metrics(directory: Path, manifest: dict) -> dict:
             outcome = "SUCCESS"
         else:
             outcome = "COMPLETED"
+
+    time_to_success = details.get(
+        "time_to_success_s", manifest.get("time_to_success_s")
+    )
+    try:
+        time_to_success = float(time_to_success)
+        if not math.isfinite(time_to_success) or time_to_success < 0.0:
+            raise ValueError
+    except (TypeError, ValueError):
+        time_to_success = None
+    if outcome != "SUCCESS":
+        # The metric is defined only for successful target crossings.
+        time_to_success = None
+
     return {
         "maximum_angle_deg": maximum,
         "max_angle_valid": maximum is not None,
         "outcome": outcome,
+        "time_to_success_s": time_to_success,
         # Compatibility keys for callers not yet migrated.
-        "target_angle_deg": None,
+        "target_angle_deg": SUCCESS_ANGLE_DEG,
         "target_achieved": maximum >= SUCCESS_ANGLE_DEG if maximum is not None else None,
-        "target_time_s": None,
+        "target_time_s": time_to_success,
     }

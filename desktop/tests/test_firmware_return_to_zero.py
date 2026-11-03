@@ -62,7 +62,7 @@ class FirmwareReturnToZeroTests(unittest.TestCase):
         for check in ("g_closedLoopFault", "g_homed", "g_pendulumAngleSafetyAvailable"):
             self.assertIn(check, update)
         self.assertIn("AbortReturnToZero", function_body("ClosedLoopActuatorFault"))
-        self.assertIn("AbortReturnToZero", function_body("PendulumAngleLimitTrip"))
+        self.assertIn("AbortReturnToZero", function_body("PendulumAngleTargetReached"))
 
     def test_go_zero_is_distinct_from_angle_zero(self) -> None:
         process_line = function_body("ProcessLine")

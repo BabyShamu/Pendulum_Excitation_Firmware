@@ -39,3 +39,35 @@ class MaximumAngleMetricsTests(unittest.TestCase):
             target_metrics(Path(tempfile.mkdtemp()), {"experiment": {}})["outcome"],
             "INVALID",
         )
+
+    def test_time_to_success_is_projected_only_for_successful_runs(self):
+        result = target_metrics(Path(tempfile.mkdtemp()), {
+            "experiment": {
+                "outcome": "SUCCESS",
+                "maximum_angle_deg": 90.4,
+                "time_to_success_s": 8.42,
+            }
+        })
+        self.assertEqual(result["time_to_success_s"], 8.42)
+        self.assertEqual(result["target_time_s"], 8.42)
+        self.assertEqual(result["target_angle_deg"], 90.0)
+
+        completed = target_metrics(Path(tempfile.mkdtemp()), {
+            "experiment": {
+                "outcome": "COMPLETED",
+                "maximum_angle_deg": 74.2,
+                "time_to_success_s": 8.42,
+            }
+        })
+        self.assertIsNone(completed["time_to_success_s"])
+        self.assertIsNone(completed["target_time_s"])
+
+        missing = target_metrics(Path(tempfile.mkdtemp()), {
+            "experiment": {"outcome": "SUCCESS", "maximum_angle_deg": 91.0}
+        })
+        self.assertIsNone(missing["time_to_success_s"])
+
+        invalid = target_metrics(Path(tempfile.mkdtemp()), {
+            "experiment": {"outcome": "SUCCESS", "time_to_success_s": "not-a-number"}
+        })
+        self.assertIsNone(invalid["time_to_success_s"])

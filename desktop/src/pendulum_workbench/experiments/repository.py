@@ -285,7 +285,17 @@ class ExperimentRepository:
             if isinstance(target_details, dict)
             else None
         )
-        if peak_angle is None:
+        # The run service records the authoritative outcome (SUCCESS only via
+        # a firmware-validated target_reached). Keep it when present; the
+        # peak/interruption derivation below covers legacy recordings.
+        service_outcome = (
+            experiment_details.get("outcome")
+            if isinstance(experiment_details, dict)
+            else None
+        )
+        if service_outcome in ("SUCCESS", "COMPLETED", "STOPPED", "FAILED", "INVALID"):
+            manifest["outcome"] = service_outcome
+        elif peak_angle is None:
             manifest["outcome"] = "INVALID"
         elif abs(peak_angle) >= 90.0:
             manifest["outcome"] = "SUCCESS"
@@ -297,6 +307,8 @@ class ExperimentRepository:
             manifest["outcome"] = "COMPLETED"
         if isinstance(experiment_details, dict):
             experiment_details["outcome"] = manifest["outcome"]
+            if "time_to_success_s" in experiment_details:
+                manifest["time_to_success_s"] = experiment_details["time_to_success_s"]
         # This is a whole-recording peak, not yet a post-stop-only peak.
 
         _LOGGER.info(

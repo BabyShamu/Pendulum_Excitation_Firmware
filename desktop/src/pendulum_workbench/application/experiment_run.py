@@ -50,12 +50,13 @@ from pendulum_workbench.domain.models import (
     MotionState,
     RecordingState,
 )
+from pendulum_workbench.experiments.target_crossing import TargetCrossingDetector
 from pendulum_workbench.infrastructure.serial_client import TELEMETRY_STALE_AFTER_S
 from pendulum_workbench.infrastructure.runtime_diagnostics import RuntimeDiagnostics
 
 
 FIRMWARE_MAX_SINE_FREQUENCY_HZ = 10.0
-PENDULUM_ANGLE_LIMIT_COMPLETION_REASON = "fault_appeared:pendulum_angle_limit"
+TARGET_REACHED_COMPLETION_REASON = "target_reached"
 _LOGGER = logging.getLogger(__name__)
 
 
@@ -88,6 +89,10 @@ class ExperimentRunService(QObject):
         self._sine_started_monotonic: float | None = None
         self._stop_requested_monotonic: float | None = None
         self._max_angle_deg: float | None = None
+        self._target_crossing_detector: TargetCrossingDetector | None = None
+        self._first_over_target_elapsed_s: float | None = None
+        self._time_to_success_s: float | None = None
+        self._target_reached_event_seen = False
         self._motor_configuration: MotorConfiguration | None = None
         self._samples_at_start = 0
         self._angle_predictor: AngleDropoutPredictor | None = None
@@ -179,6 +184,10 @@ class ExperimentRunService(QObject):
         self._sine_started_monotonic = None
         self._stop_requested_monotonic = None
         self._max_angle_deg = None
+        self._target_crossing_detector = TargetCrossingDetector(SUCCESS_ANGLE_DEG)
+        self._first_over_target_elapsed_s = None
+        self._time_to_success_s = None
+        self._target_reached_event_seen = False
         self._motor_configuration = None
         self._angle_predictor = AngleDropoutPredictor(
             max_prediction_age_s=definition.duration_s
@@ -192,6 +201,7 @@ class ExperimentRunService(QObject):
             generated_name=definition.partial_name(),
             max_angle_deg=None,
             outcome=None,
+            time_to_success_s=None,
             directory=None,
             measured_initial_angle_deg=None,
             elapsed_s=0.0,
@@ -597,7 +607,10 @@ class ExperimentRunService(QObject):
             if response.fields.get("active") != "0" or (
                 expects_inactive_mode and reported_mode not in accepted_inactive_modes
             ):
-                if self._pending_completion_reason != PENDULUM_ANGLE_LIMIT_COMPLETION_REASON:
+                # After target_reached the firmware has already stopped the
+                # actuator autonomously; a stale stop acknowledgment must not
+                # reclassify the successful termination as a stop failure.
+                if self._pending_completion_reason != TARGET_REACHED_COMPLETION_REASON:
                     self._pending_final_state = ExperimentRunState.FAULT
                     self._pending_completion_reason = "controller_stop_unconfirmed"
             self._set_motion_after_sine_stop()
@@ -607,10 +620,10 @@ class ExperimentRunService(QObject):
         if self._experiment_id is None:
             return
         if self.state.snapshot.connection != ConnectionState.CONNECTED:
-            if self._pending_completion_reason == PENDULUM_ANGLE_LIMIT_COMPLETION_REASON:
+            if self._pending_completion_reason == TARGET_REACHED_COMPLETION_REASON:
                 self._begin_recording_finalization(
                     ExperimentRunState.FAULT,
-                    PENDULUM_ANGLE_LIMIT_COMPLETION_REASON,
+                    TARGET_REACHED_COMPLETION_REASON,
                 )
                 return
             self._begin_recording_finalization(
@@ -643,7 +656,7 @@ class ExperimentRunService(QObject):
             FirmwareCommand.PHASE_TRACKED_SINE_STOP,
         ):
             self._pending_final_state = ExperimentRunState.FAULT
-            if self._pending_completion_reason != PENDULUM_ANGLE_LIMIT_COMPLETION_REASON:
+            if self._pending_completion_reason != TARGET_REACHED_COMPLETION_REASON:
                 self._pending_completion_reason = f"sine_stop_failed: {failure.message}"
             self._begin_recording_finalization(
                 ExperimentRunState.FAULT,
@@ -662,10 +675,10 @@ class ExperimentRunService(QObject):
 
     def _issue_sine_stop(self) -> None:
         if self.state.snapshot.connection != ConnectionState.CONNECTED:
-            if self._pending_completion_reason == PENDULUM_ANGLE_LIMIT_COMPLETION_REASON:
+            if self._pending_completion_reason == TARGET_REACHED_COMPLETION_REASON:
                 self._begin_recording_finalization(
                     ExperimentRunState.FAULT,
-                    PENDULUM_ANGLE_LIMIT_COMPLETION_REASON,
+                    TARGET_REACHED_COMPLETION_REASON,
                 )
                 return
             self._begin_recording_finalization(
@@ -690,7 +703,7 @@ class ExperimentRunService(QObject):
                 self.commands.stop_vertical_sine()
         except (RuntimeError, ValueError, OSError) as error:
             self._pending_final_state = ExperimentRunState.FAULT
-            if self._pending_completion_reason != PENDULUM_ANGLE_LIMIT_COMPLETION_REASON:
+            if self._pending_completion_reason != TARGET_REACHED_COMPLETION_REASON:
                 self._pending_completion_reason = f"sine_stop_failed: {error}"
             self._begin_recording_finalization(
                 ExperimentRunState.FAULT,
@@ -753,6 +766,9 @@ class ExperimentRunService(QObject):
             metadata["maximum_angle_deg"] = self._max_angle_deg
             metadata["max_angle_valid"] = self._max_angle_deg is not None
             metadata["outcome"] = outcome.value
+            metadata["time_to_success_s"] = self._resolve_time_to_success_s(
+                final_state, reason
+            )
             if self._motor_configuration is not None:
                 metadata["motor_configuration"] = self._motor_configuration.to_manifest()
             self.recorder.update_run_metadata(
@@ -872,6 +888,26 @@ class ExperimentRunService(QObject):
             if self._max_angle_deg is None or maximum > self._max_angle_deg:
                 self._max_angle_deg = maximum
                 self._set_snapshot(max_angle_deg=maximum)
+        if (
+            valid_angle
+            and self._sine_started_monotonic is not None
+            and self._target_crossing_detector is not None
+            and self._phase in ("running", "sine_stop", "post_stop_observation")
+        ):
+            # Experiment-elapsed Workbench monotonic time: the same clock as
+            # the experiment duration, stamped per measurement sample rather
+            # than at firmware-event arrival.
+            sample_elapsed_s = max(0.0, time.monotonic() - self._sine_started_monotonic)
+            if (
+                self._first_over_target_elapsed_s is None
+                and abs(float(sample.angle_deg)) >= SUCCESS_ANGLE_DEG
+            ):
+                self._first_over_target_elapsed_s = sample_elapsed_s
+            crossing_elapsed_s = self._target_crossing_detector.observe(
+                sample_elapsed_s, float(sample.angle_deg)
+            )
+            if crossing_elapsed_s is not None and self._time_to_success_s is None:
+                self._time_to_success_s = crossing_elapsed_s
         if (
             self._phase not in ("metadata_before_open", "latch_open", "sine_start", "running")
             or self._angle_predictor is None
@@ -995,15 +1031,15 @@ class ExperimentRunService(QObject):
         )
         if snapshot.connection != ConnectionState.CONNECTED and self._phase != "recording_finalization":
             self._stop_requested = True
-            angle_limit_fault = (
-                self._pending_completion_reason == PENDULUM_ANGLE_LIMIT_COMPLETION_REASON
+            target_reached = (
+                self._pending_completion_reason == TARGET_REACHED_COMPLETION_REASON
             )
             self._pending_final_state = (
                 ExperimentRunState.FAULT
-                if angle_limit_fault
+                if target_reached
                 else ExperimentRunState.INTERRUPTED
             )
-            if not angle_limit_fault:
+            if not target_reached:
                 self._pending_completion_reason = "connection_lost"
             self._begin_recording_finalization(
                 self._pending_final_state,
@@ -1021,12 +1057,12 @@ class ExperimentRunService(QObject):
         elif event.name == "angle_sensor_unavailable":
             if not self.tolerates_transient_angle_dropout:
                 self._handle_safety_interruption(f"safety_event:{event.name}")
+        elif event.name == "target_reached":
+            self._handle_target_reached(event)
         elif event.name == "fault_appeared":
             fault_code = event.fields.get("code")
             reason = (
-                PENDULUM_ANGLE_LIMIT_COMPLETION_REASON
-                if fault_code == "pendulum_angle_limit"
-                else f"safety_event:fault_appeared:{fault_code}"
+                f"safety_event:fault_appeared:{fault_code}"
                 if fault_code
                 else "safety_event:fault_appeared"
             )
@@ -1069,6 +1105,82 @@ class ExperimentRunService(QObject):
             self._stop_pending_recording()
         elif self._phase not in ("sine_stop", "recording_finalization", "terminal"):
             self._begin_recording_finalization(final_state, reason)
+
+    def _handle_target_reached(self, event) -> None:
+        """Finalize the run as SUCCESS after the firmware target_reached event.
+
+        The firmware has already stopped the actuator autonomously; this
+        transitions through the normal stopping/finalization workflow without
+        requiring any fault clearance. Repeated events are ignored.
+        """
+        if self._target_reached_event_seen:
+            return
+        try:
+            angle_deg = float(event.fields.get("angle_deg", ""))
+        except (TypeError, ValueError):
+            angle_deg = None
+        if (
+            angle_deg is None
+            or not math.isfinite(angle_deg)
+            or abs(angle_deg) < SUCCESS_ANGLE_DEG - 0.05
+        ):
+            self.state.report_event(
+                EventSeverity.WARNING,
+                "Ignoring implausible target_reached event from firmware: "
+                f"{event.raw_line}",
+            )
+            return
+        self._target_reached_event_seen = True
+        self._stop_requested = True
+        if self._stop_requested_monotonic is None:
+            self._stop_requested_monotonic = time.monotonic()
+        if self._phase == "sine_stop":
+            # A stop is already in flight (operator stop or duration limit
+            # raced the crossing). The validated crossing wins unless a
+            # genuine hardware fault is already pending.
+            if self._pending_final_state != ExperimentRunState.FAULT:
+                self._pending_final_state = ExperimentRunState.COMPLETE
+                self._pending_completion_reason = TARGET_REACHED_COMPLETION_REASON
+                self._set_snapshot(
+                    state=ExperimentRunState.STOPPING,
+                    completion_reason=TARGET_REACHED_COMPLETION_REASON,
+                )
+            return
+        self._pending_final_state = ExperimentRunState.COMPLETE
+        self._pending_completion_reason = TARGET_REACHED_COMPLETION_REASON
+        if self._phase == "running":
+            self._set_snapshot(
+                state=ExperimentRunState.STOPPING,
+                completion_reason=TARGET_REACHED_COMPLETION_REASON,
+            )
+            if isinstance(self._definition, FreeSwingDefinition):
+                self._begin_recording_finalization(
+                    ExperimentRunState.COMPLETE, TARGET_REACHED_COMPLETION_REASON
+                )
+            else:
+                self._issue_sine_stop()
+        elif self._phase in (
+            "metadata_before_open",
+            "latch_open",
+            "config_query",
+            "sine_start",
+            "parametric_start",
+            "phase_sine_start",
+        ):
+            # The controller start may still be acknowledging; the start
+            # completion path issues the stop and finalizes as SUCCESS.
+            self._set_snapshot(
+                state=ExperimentRunState.STOPPING,
+                completion_reason=TARGET_REACHED_COMPLETION_REASON,
+            )
+        elif self._phase == "recording_start":
+            self._set_snapshot(
+                state=ExperimentRunState.STOPPING,
+                completion_reason=TARGET_REACHED_COMPLETION_REASON,
+            )
+            self._stop_pending_recording()
+        # post_stop_observation/metadata_final/recording_finalization/terminal:
+        # the run is already finalizing; a late event changes nothing.
 
     def _on_timer(self) -> None:
         timer_started = time.monotonic()
@@ -1114,22 +1226,39 @@ class ExperimentRunService(QObject):
             recording_state=recording_state or self.state.snapshot.recording.value,
             max_angle_deg=self._max_angle_deg,
             outcome=outcome,
+            time_to_success_s=self._resolve_time_to_success_s(state, reason),
         )
 
     def _classify_outcome(
         self, state: ExperimentRunState, reason: str
     ) -> ExperimentOutcome:
+        # SUCCESS requires the firmware-validated target crossing; completing
+        # the requested duration below the target is COMPLETED, never SUCCESS,
+        # and a genuine hardware fault is never reclassified as success.
+        if (
+            state == ExperimentRunState.COMPLETE
+            and reason == TARGET_REACHED_COMPLETION_REASON
+        ):
+            return ExperimentOutcome.SUCCESS
         if self._max_angle_deg is None:
             return ExperimentOutcome.INVALID
-        if self._max_angle_deg >= SUCCESS_ANGLE_DEG:
-            return ExperimentOutcome.SUCCESS
         if state == ExperimentRunState.OPERATOR_STOPPED:
             return ExperimentOutcome.STOPPED
         if state in (ExperimentRunState.FAULT, ExperimentRunState.INTERRUPTED):
             return ExperimentOutcome.FAILED
-        if reason == "duration_elapsed":
-            return ExperimentOutcome.COMPLETED
         return ExperimentOutcome.COMPLETED
+
+    def _resolve_time_to_success_s(
+        self, state: ExperimentRunState, reason: str
+    ) -> float | None:
+        if self._classify_outcome(state, reason) != ExperimentOutcome.SUCCESS:
+            return None
+        # Primary: three-sample validated crossing from the telemetry stream.
+        # Fallback: the first validated over-target sample, corroborated by
+        # the firmware target_reached event. Never fabricate a timestamp.
+        if self._time_to_success_s is not None:
+            return self._time_to_success_s
+        return self._first_over_target_elapsed_s
 
     def _require_definition(self) -> ExperimentDefinition:
         if self._definition is None:

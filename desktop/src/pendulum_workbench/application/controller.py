@@ -336,7 +336,10 @@ class WorkbenchController(QObject):
         elif event.name == "manual_motion_stopped":
             direction = fields.get("direction", "unknown")
             reason = fields.get("reason", "unknown")
-            if reason in ("upper_limit", "lower_limit", "deadman_timeout", "interlock"):
+            if reason in (
+                "upper_limit", "lower_limit", "deadman_timeout", "interlock",
+                "pendulum_angle_target",
+            ):
                 severity = EventSeverity.WARNING
             else:
                 severity = EventSeverity.INFO
@@ -377,6 +380,18 @@ class WorkbenchController(QObject):
                     self.state.set_hardware_status(
                         HardwareStatus(upper_limit=upper == "1", lower_limit=lower == "1")
                     )
+        elif event.name == "target_reached":
+            severity = EventSeverity.INFO
+            angle = fields.get("angle_deg", "unknown")
+            message = (
+                f"Pendulum reached the ±90° target (angle_deg={angle}); "
+                "firmware stopped the actuator without latching a fault."
+            )
+            self.state.set_motion(
+                MotionState.READY
+                if self.state.snapshot.hardware_status.homed
+                else MotionState.IDLE
+            )
         elif event.name == "fault_appeared":
             severity = EventSeverity.ERROR
             fault_code = fields.get("code", "unknown")

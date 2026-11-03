@@ -29,7 +29,7 @@ open-loop stepping) may continue through a transient sensor outage while the
 existing safety gate remains within its 250 ms bounded grace period. Recovery
 continues automatically. A longer outage trips the existing sensor fault so pendulum-angle protection
 is not silently removed. Without an AS5600 sample, the firmware cannot enforce
-the 90-degree pendulum-angle limit; indefinite sensor-independent operation is
+the 90-degree pendulum-angle target stop; indefinite sensor-independent operation is
 therefore not enabled for unconstrained open-loop motion. Upper/lower limits,
 emergency stop, homing, travel, speed, and acceleration protections remain
 authoritative during feedback-controller waiting.
@@ -37,8 +37,8 @@ authoritative during feedback-controller waiting.
 The session summary is based on firmware commanded state and sensor
 communication events. It does not measure physical carriage displacement and
 cannot establish missed-step or pendulum dynamics behavior. Bench validation
-must verify the outage grace period, recovery timing, angle-limit response,
-emergency stop, and physical clearances.
+must verify the outage grace period, recovery timing, target-angle stop
+response, emergency stop, and physical clearances.
 
 AS5600 samples are also checked for plausibility before they are committed to
 the validated angle state. A sample with an implausible circular step change is
@@ -49,5 +49,5 @@ or experiment statistics; the normal telemetry stream emits `NaN` for that
 sample. The session summary includes `angle_samples_rejected`,
 `max_validated_angle_deg`, and `max_rejected_angle_deg`. The plausibility rule
 is based on measurement continuity, not on the absolute angle threshold, so a
-credible gradual angle-limit violation still triggers the existing immediate
-protective trip.
+credible gradual crossing of the 90-degree target still triggers the existing
+immediate a

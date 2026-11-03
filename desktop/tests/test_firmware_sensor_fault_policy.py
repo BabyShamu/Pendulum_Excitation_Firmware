@@ -114,14 +114,14 @@ class FirmwareSensorFaultPolicyTests(unittest.TestCase):
         self.assertIn("if (angleValid == 0U)", body)
         self.assertIn("Hold the last validated target", body)
 
-    def test_existing_angle_limit_trip_remains_protective(self) -> None:
-        trip = function_body("PendulumAngleLimitTrip")
+    def test_existing_angle_target_stop_remains_protective(self) -> None:
+        trip = function_body("PendulumAngleTargetReached")
         for required in (
-            "g_closedLoopFault = 4U",
             "ManualStepTimerStop()",
             "ClosedLoopActuatorStop()",
         ):
             self.assertIn(required, trip)
+        self.assertNotIn("g_closedLoopFault = 4U", trip)
 
     def test_plausibility_rejects_spike_before_validation_and_statistics(self) -> None:
         read_once = function_body("AS5600_ReadAngleOnce")
@@ -155,7 +155,7 @@ class FirmwareSensorFaultPolicyTests(unittest.TestCase):
     def test_high_angle_safety_remains_after_plausibility_validation(self) -> None:
         valid = function_body("AS5600_RecordValidAngleSample")
         self.assertIn("PENDULUM_ANGLE_LIMIT_DEG", valid)
-        self.assertIn("PendulumAngleLimitTrip", valid)
+        self.assertIn("PendulumAngleTargetReached", valid)
 
     def test_timer_still_requires_safety_gate_and_target_owner(self) -> None:
         timer = function_body("ParametricV2OnTimer")
@@ -165,4 +165,4 @@ class FirmwareSensorFaultPolicyTests(unittest.TestCase):
 
 
 if __name__ == "__main__":
-    unittest.main()
+    unittest.main

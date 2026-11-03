@@ -951,7 +951,7 @@ class MaintenanceService(QObject):
             self._manual_motion_state = ManualMotionState.DEADMAN_STOP
         elif reason == "interlock":
             self._manual_motion_state = ManualMotionState.SAFETY_STOP
-        elif reason in ("upper_limit", "lower_limit"):
+        elif reason in ("upper_limit", "lower_limit", "pendulum_angle_target"):
             self._manual_motion_state = ManualMotionState.SAFETY_STOP
         else:
             self._manual_motion_state = ManualMotionState.IDLE

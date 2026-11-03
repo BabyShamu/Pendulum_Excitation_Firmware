@@ -321,12 +321,9 @@ class FirmwareManualMotionContractTests(unittest.TestCase):
             "previousFault == 2U && LowerLimitPressed() != 0U",
             "lower_limit_still_active",
             "previousFault == 3U && AS5600_ReadAngle(&angle) != HAL_OK",
-            "previousFault == 4U",
-            "g_angleZeroValid == 0U || AS5600_ReadAngle(&angle) != HAL_OK",
-            "fabsf(RelativeAngleDegrees(angle)) >= PENDULUM_ANGLE_LIMIT_DEG",
-            "pendulum_angle_limit_active",
             "angle_sensor_unavailable",
-            "previousFault > 4U",
+            "previousFault > 3U",
+            "unknown_fault_code",
             "previousFault == 0U",
             "cleared=0",
             "g_closedLoopFault = 0U",
@@ -337,6 +334,11 @@ class FirmwareManualMotionContractTests(unittest.TestCase):
             "event: type=fault_cleared previous_fault=%u",
         ):
             self.assertIn(required_check, clear_command)
+        for removed_angle_fault_logic in (
+            "previousFault == 4U",
+            "pendulum_angle_limit",
+        ):
+            self.assertNotIn(removed_angle_fault_logic, clear_command)
         for forbidden_side_effect in (
             "Home()",
             "StepOne(",
@@ -792,14 +794,14 @@ class FirmwareManualMotionContractTests(unittest.TestCase):
         self.assertIn("StopParametricController(1U)", console)
         self.assertIn("StopParametricController(1U)", function_body("ProcessMaintenanceCommand"))
 
-    def test_global_pendulum_angle_limit_stops_every_motion_path_and_clears_only_by_fresh_safe_sample(self) -> None:
+    def test_pendulum_angle_target_stops_every_motion_path_without_latching_a_fault(self) -> None:
         safety = function_body("PendulumAngleSafetyPoll")
         for required in (
             "g_angleZeroValid == 0U",
             "g_latestAngleSampleValid == 0U",
             "AS5600_ReadAngle(&angle) == HAL_OK",
             "fabsf(g_latestAngleRelativeDeg) >= PENDULUM_ANGLE_LIMIT_DEG",
-            "PendulumAngleLimitTrip(g_latestAngleRelativeDeg)",
+            "PendulumAngleTargetReached(g_latestAngleRelativeDeg)",
         ):
             self.assertIn(required, safety)
 
@@ -807,19 +809,20 @@ class FirmwareManualMotionContractTests(unittest.TestCase):
         self.assertIn("if (status == HAL_OK)", sensor_read)
         self.assertIn("AS5600_RecordValidAngleSample(*angle)", function_body("AS5600_ReadAngleOnce"))
         self.assertIn("if (g_angleZeroValid == 0U)", function_body("AS5600_RecordValidAngleSample"))
-        self.assertIn("PendulumAngleLimitTrip(g_latestAngleRelativeDeg)", function_body("AS5600_RecordValidAngleSample"))
+        self.assertIn("PendulumAngleTargetReached(g_latestAngleRelativeDeg)", function_body("AS5600_RecordValidAngleSample"))
 
-        trip = function_body("PendulumAngleLimitTrip")
+        trip = function_body("PendulumAngleTargetReached")
         for stopped_state in (
-            "g_closedLoopFault = 4U",
             "g_run = 0U",
             "g_sineRunning = 0U",
             "g_parametricRunning = 0U",
+            "g_parametricV2Enabled = 0U",
             "g_parametricTestRunning = 0U",
             "g_parametricClosedLoopRunning = 0U",
             "g_phaseTrackedSineRunning = 0U",
-            "g_manualMotionDirection = 0U",
+            "g_arv2Running = 0U",
             "g_homingActive = 0U",
+            "g_tim6TrajectoryOwner = TIM6_TRAJECTORY_OWNER_NONE",
             "ManualStepTimerStop()",
             "ClosedLoopActuatorStop()",
         ):
@@ -828,12 +831,17 @@ class FirmwareManualMotionContractTests(unittest.TestCase):
         self.assertIn("g_closedLoopActuatorPhase == CLOSED_LOOP_PHASE_STEP_HIGH", trip)
         self.assertIn("g_positionSteps += (g_dir == DIR_UP) ? 1 : -1", trip)
         self.assertIn("if (g_closedLoopFault != 0U)", trip)
+        self.assertIn("ExperimentControllerIsActive()", trip)
+        self.assertIn("g_targetReachedPending = 1U", trip)
+        self.assertNotIn("g_closedLoopFault =", trip.replace("g_closedLoopFault !", ""))
         self.assertNotIn("ReturnToCenter()", trip)
         self.assertNotIn("ServoLatchCommand(", trip)
         self.assertIn(
-            "event: type=fault_appeared code=pendulum_angle_limit angle_deg=%.2f",
-            function_body("ReportClosedLoopFault"),
+            "event: type=target_reached angle_deg=%.2f",
+            function_body("ReportTargetReached"),
         )
+        self.assertIn("ReportTargetReached();", function_body("main"))
+        self.assertNotIn("pendulum_angle_limit", function_body("ReportClosedLoopFault"))
         self.assertIn("PendulumAngleSafetyPoll(PivotMotionIsActive());", function_body("main"))
         self.assertIn("PendulumAngleSafetyPoll(1U) == 0U", function_body("StepOne"))
         self.assertIn("g_pendulumAngleSafetyAvailable == 0U", function_body("ManualMotionSafetyStopReason"))
@@ -893,9 +901,8 @@ class FirmwareManualMotionContractTests(unittest.TestCase):
         angle_limit_clear = function_body("ProcessMaintenanceCommand").split(
             'if (strcmp(end, "fault_clear") == 0)', 1
         )[1].split('if (strncmp(end, "sine_start ", 11U) == 0)', 1)[0]
-        self.assertIn("previousFault == 4U", angle_limit_clear)
+        self.assertNotIn("previousFault == 4U", angle_limit_clear)
         self.assertIn("AS5600_ReadAngle(&angle) != HAL_OK", angle_limit_clear)
-        self.assertIn("fabsf(RelativeAngleDegrees(angle)) >= PENDULUM_ANGLE_LIMIT_DEG", angle_limit_clear)
         self.assertNotIn("Home()", angle_limit_clear)
         self.assertNotIn("ReturnToCenter()", angle_limit_clear)
         self.assertNotIn("ServoLatchCommand(", angle_limit_clear)
@@ -926,7 +933,7 @@ class FirmwareManualMotionContractTests(unittest.TestCase):
 
         read_once = function_body("AS5600_ReadAngleOnce")
         self.assertIn("AS5600_RecordValidAngleSample(*angle)", read_once)
-        self.assertNotIn("PendulumAngleLimitTrip", function_body("AS5600_ReadAngle"))
+        self.assertNotIn("PendulumAngleTargetReached", function_body("AS5600_ReadAngle"))
         record = function_body("AS5600_RecordValidAngleSample")
         for cached_value in (
             "g_latestAngleRaw = angle",
@@ -934,7 +941,7 @@ class FirmwareManualMotionContractTests(unittest.TestCase):
             "g_latestAngleSampleValid = 1U",
             "g_latestAngleRelativeDeg = RelativeAngleDegrees(angle)",
             "fabsf(g_latestAngleRelativeDeg) >= PENDULUM_ANGLE_LIMIT_DEG",
-            "PendulumAngleLimitTrip(g_latestAngleRelativeDeg)",
+            "PendulumAngleTargetReached(g_latestAngleRelativeDeg)",
         ):
             self.assertIn(cached_value, record)
 
@@ -978,4 +985,4 @@ class FirmwareManualMotionContractTests(unittest.TestCase):
 
 
 if __name__ == "__main__":
-    unittest.main()
+    unittes

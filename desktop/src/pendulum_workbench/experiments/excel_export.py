@@ -8,12 +8,13 @@ from pathlib import Path
 
 from pendulum_workbench.experiments.simulation_cache import inspect_simulation
 from pendulum_workbench.experiments.experiment_summary import experiment_summary
+from pendulum_workbench.experiments.target_metrics import SUCCESS_ANGLE_DEG
 
 EXPERIMENT_COLUMNS = [
     "Experiment ID", "Date", "Name", "Type", "Completion", "Archived",
     "Initial Angle (deg)", "Initial Omega (rad/s)",
     "Amplitude (mm)", "Frequency (Hz)", "Feedback Phase (deg)",
-    "Target Angle (deg)", "Target Achieved", "Target Time (s)", "Requested Duration (s)", "Actual Duration (s)",
+    "Target Angle (deg)", "Target Achieved", "Time to Success (s)", "Requested Duration (s)", "Actual Duration (s)",
     "Measured Peak Angle (deg)", "Measured Peak Time (s)",
     "Time to Target (s)", "Samples", "Raw Lines",
     "Simulation Status", "Comparison Status", "Angle RMSE (deg)",
@@ -99,9 +100,9 @@ def export_experiment_workbook(records, root: Path) -> Path:
             _number(details.get("commanded_amplitude_mm")),
             _number(details.get("commanded_frequency_hz")),
             _number(details.get("commanded_phase_deg")),
-            None,
+            SUCCESS_ANGLE_DEG,
             ("Yes" if summary["target_achieved"] else "No") if summary["target_achieved"] is not None else None,
-            None,
+            _number(summary["time_to_success_s"]),
             _number(details.get("requested_duration_s") or details.get("commanded_duration_s")),
             _number(details.get("actual_elapsed_duration_s")),
             summary["measured_peak_angle_deg"],

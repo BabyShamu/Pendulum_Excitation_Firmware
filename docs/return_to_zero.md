@@ -18,7 +18,8 @@ The supported motion modes are sine, legacy parametric, Parametric V2,
 time-limited V2 actuator tests, legacy Auto-Resonance, Auto-Resonance V2,
 phase-tracked sine, and bounded parametric closed-loop excitation. Their
 normal stop and completion paths request the same return mechanism. Protective
-faults, emergency stops, limit trips, angle-limit trips, sensor faults beyond
+faults, emergency stops, limit trips, the pendulum reaching the 90-degree
+target angle (`target_reached`), sensor faults beyond
 the permitted recovery policy, and lost homing abort the return instead of
 starting or continuing motion.
 

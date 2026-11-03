@@ -41,8 +41,41 @@ class ExperimentExcelExportTests(unittest.TestCase):
             self.assertEqual(row["Initial Angle (deg)"], 9.84)
             self.assertIsInstance(row["Actual Duration (s)"], float)
             self.assertIsNone(row["Amplitude (mm)"])
+            self.assertEqual(row["Target Angle (deg)"], 90.0)
+            self.assertIsNone(row["Time to Success (s)"])
             self.assertEqual(row["Simulation Status"], "Not simulated")
             self.assertEqual(row["Comparison Status"], "Not compared")
+
+    def test_time_to_success_is_exported_for_successful_runs(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            folder = root / "2026-11-03_AR"
+            folder.mkdir()
+            manifest = {
+                "experiment_id": "id-789", "name": "AR_success",
+                "created_at": "2026-11-03T09:30:00",
+                "completion_status": "COMPLETED", "peak_absolute_angle_deg": 90.4,
+                "experiment": {
+                    "experiment_mode": "AUTO_RESONANCE_PARAMETRIC",
+                    "measured_initial_angle_deg": 11.2,
+                    "requested_duration_s": 30,
+                    "actual_elapsed_duration_s": 8.6,
+                    "commanded_amplitude_mm": 7.5,
+                    "maximum_angle_deg": 90.4,
+                    "outcome": "SUCCESS",
+                    "completion_reason": "target_reached",
+                    "time_to_success_s": 8.42,
+                },
+            }
+            (folder / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+            saved = export_experiment_workbook([(folder, manifest)], root)
+            workbook = load_workbook(saved, data_only=True)
+            sheet = workbook["Experiments"]
+            headers = [cell.value for cell in sheet[1]]
+            row = {key: sheet.cell(2, i + 1).value for i, key in enumerate(headers)}
+            self.assertEqual(row["Target Angle (deg)"], 90.0)
+            self.assertEqual(row["Target Achieved"], "Yes")
+            self.assertEqual(row["Time to Success (s)"], 8.42)
 
     def test_saved_comparison_metrics_are_numeric(self):
         with tempfile.TemporaryDirectory() as temp:

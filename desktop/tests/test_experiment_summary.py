@@ -34,9 +34,35 @@ class ExperimentSummaryTests(unittest.TestCase):
             self.assertEqual(summary["maximum_angle_deg"], 82.62)
             self.assertEqual(summary["outcome"], "COMPLETED")
             self.assertFalse(summary["target_achieved"])
+            self.assertIsNone(summary["time_to_success_s"])
             self.assertEqual(summary["simulation_status"], "Not simulated")
             self.assertEqual(repr(manifest), before)
             self.assertFalse((directory / "manifest.json").exists())
+
+    def test_projection_exposes_time_to_success_for_successful_runs(self):
+        with tempfile.TemporaryDirectory() as temp:
+            directory = Path(temp) / "recording"
+            directory.mkdir()
+            manifest = {
+                "experiment_id": "success-id",
+                "name": "AR success",
+                "created_at": "2026-11-03T10:00:00",
+                "completion_status": "COMPLETED",
+                "peak_absolute_angle_deg": 90.4,
+                "experiment": {
+                    "experiment_mode": "AUTO_RESONANCE_PARAMETRIC",
+                    "measured_initial_angle_deg": 12.4,
+                    "actual_elapsed_duration_s": 8.6,
+                    "maximum_angle_deg": 90.4,
+                    "outcome": "SUCCESS",
+                    "completion_reason": "target_reached",
+                    "time_to_success_s": 8.42,
+                },
+            }
+            summary = experiment_summary(directory, manifest)
+            self.assertEqual(summary["outcome"], "SUCCESS")
+            self.assertTrue(summary["target_achieved"])
+            self.assertEqual(summary["time_to_success_s"], 8.42)
 
     def test_explicit_repository_root_is_preserved_by_workbench_ui(self):
         from pendulum_workbench.application.controller import WorkbenchController

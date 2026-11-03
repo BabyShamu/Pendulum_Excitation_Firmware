@@ -39,6 +39,7 @@ from pendulum_workbench.domain.experiment_run import (
     ExperimentMode,
     ExperimentRunState,
     PhaseTrackedSineDefinition,
+    SUCCESS_ANGLE_DEG,
     UnifiedParametricDefinition,
     VerticalSineDefinition,
 )
@@ -362,6 +363,11 @@ class ExperimentPage(QWidget):
         self.run_started_at_value = self._summary_value("runStartedAtValue")
         self.run_actual_duration_value = self._summary_value("runActualDurationValue")
         self.run_completion_reason_value = self._summary_value("runCompletionReasonValue")
+        self.run_outcome_value = self._summary_value("runOutcomeValue")
+        self.run_target_angle_value = self._summary_value("runTargetAngleValue")
+        self.run_max_angle_value = self._summary_value("runMaxAngleValue")
+        self.run_time_to_success_value = self._summary_value("runTimeToSuccessValue")
+        self.run_firmware_fault_value = self._summary_value("runFirmwareFaultValue")
         summary.addWidget(self._summary_key("NAME"), 0, 0)
         summary.addWidget(self.saved_name_value, 0, 1)
         summary.addWidget(self._summary_key("NOTES"), 0, 2)
@@ -384,6 +390,16 @@ class ExperimentPage(QWidget):
         summary.addWidget(self.run_actual_duration_value, 6, 1)
         summary.addWidget(self._summary_key("COMPLETION REASON"), 6, 2)
         summary.addWidget(self.run_completion_reason_value, 6, 3)
+        summary.addWidget(self._summary_key("OUTCOME"), 7, 0)
+        summary.addWidget(self.run_outcome_value, 7, 1)
+        summary.addWidget(self._summary_key("TARGET ANGLE"), 7, 2)
+        summary.addWidget(self.run_target_angle_value, 7, 3)
+        summary.addWidget(self._summary_key("MAX ANGLE"), 8, 0)
+        summary.addWidget(self.run_max_angle_value, 8, 1)
+        summary.addWidget(self._summary_key("TIME TO SUCCESS"), 8, 2)
+        summary.addWidget(self.run_time_to_success_value, 8, 3)
+        summary.addWidget(self._summary_key("FIRMWARE FAULT"), 9, 0)
+        summary.addWidget(self.run_firmware_fault_value, 9, 1)
         summary.setColumnStretch(1, 1)
         summary.setColumnStretch(3, 2)
         self.saved_experiment_summary.setVisible(True)
@@ -820,6 +836,22 @@ class ExperimentPage(QWidget):
             else f"{snapshot.actual_elapsed_duration_s:.3f} s"
         )
         self.run_completion_reason_value.setText(snapshot.completion_reason or "-")
+        self.run_outcome_value.setText(
+            snapshot.outcome.value if snapshot.outcome is not None else "-"
+        )
+        self.run_target_angle_value.setText(f"{SUCCESS_ANGLE_DEG:.1f} deg")
+        self.run_max_angle_value.setText(
+            "-" if snapshot.max_angle_deg is None else f"{snapshot.max_angle_deg:.2f} deg"
+        )
+        if snapshot.time_to_success_s is not None:
+            time_to_success_text = f"{snapshot.time_to_success_s:.2f} s"
+        elif snapshot.outcome is not None:
+            time_to_success_text = "N/A"
+        else:
+            time_to_success_text = "-"
+        self.run_time_to_success_value.setText(time_to_success_text)
+        firmware_fault = self.controller.state.snapshot.hardware_status.fault
+        self.run_firmware_fault_value.setText(firmware_fault or "None")
         source = snapshot.angle_source.value.upper()
         if snapshot.angle_source == AngleSource.PREDICTED and snapshot.prediction_age_ms is not None:
             source += f" ({snapshot.prediction_age_ms:.0f} ms)"
@@ -929,6 +961,33 @@ class ExperimentPage(QWidget):
         self.run_completion_reason_value.setText(
             str(experiment_metadata.get("completion_reason") or manifest.get("interruption_reason") or "-")
         )
+        outcome = experiment_metadata.get("outcome") or manifest.get("outcome")
+        self.run_outcome_value.setText(str(outcome) if outcome else "-")
+        self.run_target_angle_value.setText(f"{SUCCESS_ANGLE_DEG:.1f} deg")
+        maximum_angle = experiment_metadata.get(
+            "maximum_angle_deg", manifest.get("maximum_angle_deg")
+        )
+        self.run_max_angle_value.setText(
+            "-" if maximum_angle is None else f"{float(maximum_angle):.2f} deg"
+        )
+        time_to_success = experiment_metadata.get(
+            "time_to_success_s", manifest.get("time_to_success_s")
+        )
+        if time_to_success is not None:
+            time_to_success_text = f"{float(time_to_success):.2f} s"
+        elif outcome:
+            time_to_success_text = "N/A"
+        else:
+            time_to_success_text = "-"
+        self.run_time_to_success_value.setText(time_to_success_text)
+        completion_reason = str(experiment_metadata.get("completion_reason") or "")
+        for fault_prefix in ("safety_event:fault_appeared:", "fault_appeared:"):
+            if completion_reason.startswith(fault_prefix):
+                firmware_fault_text = completion_reason[len(fault_prefix):]
+                break
+        else:
+            firmware_fault_text = "None"
+        self.run_firmware_fault_value.setText(firmware_fault_text)
         self._experiment_directory = directory
         self.saved_experiment_summary.setVisible(True)
         self.open_recording_folder_button.setEnabled(directory.is_dir())

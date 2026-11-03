@@ -287,7 +287,7 @@ static uint8_t PendulumAngleSafetyPoll(uint8_t motionActive);
 static uint8_t PendulumAngleSafetyReadyForMotion(void);
 static uint8_t PivotMotionIsActive(void);
 static uint8_t ExperimentControllerIsActive(void);
-static void PendulumAngleLimitTrip(float angleDeg);
+static void PendulumAngleTargetReached(float angleDeg);
 static void PendulumAngleSensorFaultTrip(void);
 static const char *StepStopReasonName(uint8_t reason);
 static uint8_t ServoLatchPwmInitialize(void);
@@ -313,6 +313,7 @@ static void UpdateV2ActuatorTest(void);
 static void UpdateParametricTest(void);
 static void UpdateParametricClosedLoop(void);
 static void ReportClosedLoopFault(void);
+static void ReportTargetReached(void);
 static uint8_t ProcessMaintenanceCommand(char *arguments);
 static float ParametricTestDcBlockApprox(float input, float dt, uint8_t reset);
 static float ParametricTestAgc(float input, float *logGain);
@@ -444,7 +445,8 @@ static volatile uint8_t g_closedLoopFault = 0U;
 static volatile uint8_t g_closedLoopFaultPending = 0U;
 static volatile uint8_t g_pendulumAngleSafetyAvailable = 0U;
 static uint32_t g_pendulumAngleSafetyLastPollMs = 0U;
-static float g_pendulumAngleLimitFaultDeg = 0.0f;
+static float g_targetReachedDeg = 0.0f;
+static volatile uint8_t g_targetReachedPending = 0U;
 static volatile uint8_t g_latestAngleSampleValid = 0U;
 static volatile uint16_t g_latestAngleRaw = 0U;
 static float g_latestAngleRelativeDeg = 0.0f;
@@ -649,6 +651,7 @@ int main(void)
     {
         (void)PendulumAngleSafetyPoll(PivotMotionIsActive());
         ReportClosedLoopFault();
+        ReportTargetReached();
         if (g_parametricTestRunning == 0U && ClosedLoopActuatorIsActive() == 0U)
         {
             ReportSwitchChanges();
@@ -1021,10 +1024,10 @@ static void AS5600_RecordValidAngleSample(uint16_t angle)
         g_sensorSession.max_validated_angle_deg =
             fabsf(g_latestAngleRelativeDeg);
     }
-    if (g_closedLoopFault == 0U &&
-        fabsf(g_latestAngleRelativeDeg) >= PENDULUM_ANGLE_LIMIT_DEG)
+    if (fabsf(g_latestAngleRelativeDeg) >= PENDULUM_ANGLE_LIMIT_DEG)
     {
-        PendulumAngleLimitTrip(g_latestAngleRelativeDeg);
+        PendulumAngleTargetReached(g_latestAngleRelativeDeg);
+        g_pendulumAngleSafetyAvailable = 0U;
         return;
     }
     g_pendulumAngleSafetyAvailable =
@@ -1489,16 +1492,35 @@ static void DelayUs(uint32_t us)
     }
 }
 
-static void PendulumAngleLimitTrip(float angleDeg)
+/* Reaching PENDULUM_ANGLE_LIMIT_DEG is the experiment target, not a fault.
+ * This handler stops actuator motion immediately without latching a closed
+ * loop fault: position tracking and homing calibration are preserved, and a
+ * target_reached event is reported once per experiment. Motion never resumes
+ * by itself; a new experiment must be started explicitly. While the measured
+ * angle stays at or beyond the target, PendulumAngleSafetyPoll keeps motion
+ * gated (g_pendulumAngleSafetyAvailable == 0U) until a fresh sample below the
+ * target restores it. */
+static void PendulumAngleTargetReached(float angleDeg)
 {
+    uint8_t experimentActive;
+    uint8_t motionActive;
     uint32_t primask;
 
     if (g_returnToZeroState == RETURN_TO_ZERO_MOVING)
     {
-        AbortReturnToZero("pendulum_angle_limit");
+        AbortReturnToZero("target_reached");
     }
     if (g_closedLoopFault != 0U)
     {
+        /* A latched hardware fault keeps priority over the target event. */
+        return;
+    }
+    experimentActive = ExperimentControllerIsActive();
+    motionActive = PivotMotionIsActive();
+    if (experimentActive == 0U && motionActive == 0U)
+    {
+        /* Stationary actuator: the pendulum is free to swing beyond the
+         * target angle without any firmware action. */
         return;
     }
 
@@ -1512,25 +1534,36 @@ static void PendulumAngleLimitTrip(float angleDeg)
     {
         g_positionSteps += (g_dir == DIR_UP) ? 1 : -1;
     }
-    g_pendulumAngleLimitFaultDeg = angleDeg;
     g_pendulumAngleSafetyAvailable = 0U;
-    g_closedLoopFault = 4U;
-    g_closedLoopFaultPending = 1U;
-    g_manualMotionDirection = 0U;
     g_homingActive = 0U;
     g_run = 0U;
     g_sineRunning = 0U;
     g_parametricRunning = 0U;
+    g_parametricV2Enabled = 0U;
+    g_parametricV2SpeedHz = 0.0f;
     g_v2TestRunning = 0U;
     g_parametricTestRunning = 0U;
     g_parametricClosedLoopRunning = 0U;
     g_parametricClosedLoopExperimentMode = 0U;
     g_phaseTrackedSineRunning = 0U;
+    g_arv2Running = 0U;
+    g_parametricV2TargetSteps = g_positionSteps;
+    g_tim6TrajectoryOwner = TIM6_TRAJECTORY_OWNER_NONE;
     ManualStepTimerStop();
     ClosedLoopActuatorStop();
     if (primask == 0U)
     {
         __enable_irq();
+    }
+    if (g_manualMotionDirection != 0U)
+    {
+        StopManualMotion("pendulum_angle_target");
+    }
+
+    if (experimentActive != 0U && g_targetReachedPending == 0U)
+    {
+        g_targetReachedDeg = angleDeg;
+        g_targetReachedPending = 1U;
     }
 }
 
@@ -1599,7 +1632,11 @@ static uint8_t PendulumAngleSafetyPoll(uint8_t motionActive)
     {
         if (fabsf(g_latestAngleRelativeDeg) >= PENDULUM_ANGLE_LIMIT_DEG)
         {
-            PendulumAngleLimitTrip(g_latestAngleRelativeDeg);
+            /* Target angle reached: stop any active motion without latching
+             * a fault, and keep motion gated until a fresh sample below the
+             * target restores availability. */
+            PendulumAngleTargetReached(g_latestAngleRelativeDeg);
+            g_pendulumAngleSafetyAvailable = 0U;
             return 0U;
         }
         g_pendulumAngleSafetyAvailable = 1U;
@@ -1743,7 +1780,7 @@ static const char *StepStopReasonName(uint8_t reason)
         case STEP_STOP_REASON_ANGLE_SENSOR:
             return "angle_sensor_unavailable";
         case STEP_STOP_REASON_PENDULUM_ANGLE:
-            return "pendulum_angle_limit";
+            return "pendulum_angle_target";
         default:
             return "invalid_or_interlocked";
     }
@@ -1757,11 +1794,6 @@ static uint8_t StepOne(uint32_t hz, uint8_t stopUpper, uint8_t stopLower)
     if (hz == 0U)
     {
         g_stepStopReason = STEP_STOP_REASON_INVALID_RATE;
-        return 0U;
-    }
-    if (g_closedLoopFault == 4U)
-    {
-        g_stepStopReason = STEP_STOP_REASON_PENDULUM_ANGLE;
         return 0U;
     }
     if (g_closedLoopFault == 3U)
@@ -1778,9 +1810,11 @@ static uint8_t StepOne(uint32_t hz, uint8_t stopUpper, uint8_t stopLower)
     }
     if (PendulumAngleSafetyPoll(1U) == 0U)
     {
-        g_stepStopReason = (g_closedLoopFault == 4U)
-                               ? STEP_STOP_REASON_PENDULUM_ANGLE
-                               : STEP_STOP_REASON_ANGLE_SENSOR;
+        g_stepStopReason =
+            (g_closedLoopFault == 0U && g_latestAngleSampleValid != 0U &&
+             fabsf(g_latestAngleRelativeDeg) >= PENDULUM_ANGLE_LIMIT_DEG)
+                ? STEP_STOP_REASON_PENDULUM_ANGLE
+                : STEP_STOP_REASON_ANGLE_SENSOR;
         return 0U;
     }
     if (stopUpper != 0U && UpperLimitPressed() != 0U)
@@ -2448,8 +2482,9 @@ static void Home(void)
     {
         if (PendulumAngleSafetyPoll(1U) == 0U)
         {
-            if (g_closedLoopFault == 4U)
+            if (g_closedLoopFault == 0U && g_homingActive == 0U)
             {
+                UartPrint("homing stopped: pendulum angle target reached\r\n");
                 return;
             }
             if (g_pendulumAngleSafetyAvailable == 0U)
@@ -2492,8 +2527,9 @@ static void Home(void)
     {
         if (PendulumAngleSafetyPoll(1U) == 0U)
         {
-            if (g_closedLoopFault == 4U)
+            if (g_closedLoopFault == 0U && g_homingActive == 0U)
             {
+                UartPrint("homing stopped: pendulum angle target reached\r\n");
                 return;
             }
             if (g_pendulumAngleSafetyAvailable == 0U)
@@ -2544,8 +2580,9 @@ static void Home(void)
     {
         if (PendulumAngleSafetyPoll(1U) == 0U)
         {
-            if (g_closedLoopFault == 4U)
+            if (g_closedLoopFault == 0U && g_homingActive == 0U)
             {
+                UartPrint("homing stopped: pendulum angle target reached\r\n");
                 return;
             }
             if (g_pendulumAngleSafetyAvailable == 0U)
@@ -2557,8 +2594,13 @@ static void Home(void)
         }
         if (StepOne(HOMING_SPEED_HZ, 0U, 1U) == 0U)
         {
-            if (g_closedLoopFault == 4U || g_closedLoopFault == 3U)
+            if (g_closedLoopFault != 0U)
             {
+                return;
+            }
+            if (g_homingActive == 0U)
+            {
+                UartPrint("homing stopped: pendulum angle target reached\r\n");
                 return;
             }
             g_homingActive = 0U;
@@ -3861,15 +3903,39 @@ static void ReportClosedLoopFault(void)
         UartPrint("event: type=fault_appeared code=angle_sensor\r\n");
         UartPrint("closed loop stopped: angle sensor unavailable\r\n");
     }
-    else if (fault == 4U)
+}
+
+static void ReportTargetReached(void)
+{
+    float angleDeg;
+    uint8_t fault;
+
+    if (g_targetReachedPending == 0U)
     {
-        char message[112];
-        snprintf(message, sizeof(message),
-                 "event: type=fault_appeared code=pendulum_angle_limit angle_deg=%.2f\r\n",
-                 (double)g_pendulumAngleLimitFaultDeg);
-        UartPrint(message);
-        UartPrint("pivot motion stopped: pendulum angle limit reached\r\n");
+        return;
     }
+
+    __disable_irq();
+    angleDeg = g_targetReachedDeg;
+    g_targetReachedPending = 0U;
+    fault = g_closedLoopFault;
+    __enable_irq();
+
+    if (fault != 0U)
+    {
+        /* A hardware fault latched after the crossing keeps priority; the
+         * target_reached event is suppressed in favor of the fault event. */
+        return;
+    }
+
+    {
+        char message[96];
+        snprintf(message, sizeof(message),
+                 "event: type=target_reached angle_deg=%.2f\r\n",
+                 (double)angleDeg);
+        UartPrint(message);
+    }
+    UartPrint("pivot motion stopped: pendulum angle target reached\r\n");
 }
 
 static void UartPrint(const char *text)
@@ -4256,15 +4322,8 @@ static void SetAngleZero(void)
     }
     else
     {
-        if (g_closedLoopFault == 4U)
-        {
-            UartPrint("angle zero rejected: pendulum angle limit fault\r\n");
-        }
-        else
-        {
-            g_angleZeroValid = 0U;
-            UartPrint("angle zero unavailable\r\n");
-        }
+        g_angleZeroValid = 0U;
+        UartPrint("angle zero unavailable\r\n");
     }
 }
 
@@ -4564,17 +4623,7 @@ static uint8_t ProcessMaintenanceCommand(char *arguments)
         {
             error = "angle_sensor_unavailable";
         }
-        else if (previousFault == 4U &&
-                 (g_angleZeroValid == 0U || AS5600_ReadAngle(&angle) != HAL_OK))
-        {
-            error = "angle_sensor_unavailable";
-        }
-        else if (previousFault == 4U &&
-                 fabsf(RelativeAngleDegrees(angle)) >= PENDULUM_ANGLE_LIMIT_DEG)
-        {
-            error = "pendulum_angle_limit_active";
-        }
-        else if (previousFault > 4U)
+        else if (previousFault > 3U)
         {
             error = "unknown_fault_code";
         }
@@ -4603,11 +4652,6 @@ static uint8_t ProcessMaintenanceCommand(char *arguments)
             if (previousFault == 3U)
             {
                 g_parametricClosedLoopAngleFailureCount = 0U;
-            }
-            if (previousFault == 4U)
-            {
-                g_pendulumAngleSafetyAvailable = 1U;
-                g_pendulumAngleSafetyLastPollMs = HAL_GetTick();
             }
             if (primask == 0U)
             {
@@ -6058,13 +6102,14 @@ static void ProcessLine(char *line)
 
         if (strcmp(arguments, "stop") == 0)
         {
+            uint8_t wasRunning = g_sineRunning;
             g_parametricClosedLoopRunning = 0U;
             g_phaseTrackedSineRunning = 0U;
             ClosedLoopActuatorStop();
             g_sineRunning = 0U;
             g_tim6TrajectoryOwner = TIM6_TRAJECTORY_OWNER_NONE;
             g_run = 0U;
-            if (g_homed != 0U && g_closedLoopFault == 0U)
+            if (wasRunning != 0U && g_homed != 0U && g_closedLoopFault == 0U)
             {
                 ReturnToCenter();
             }

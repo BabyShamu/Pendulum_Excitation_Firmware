@@ -63,6 +63,7 @@ class ExperimentRunSnapshot:
     completion_reason: str = ""
     max_angle_deg: float | None = None
     outcome: ExperimentOutcome | None = None
+    time_to_success_s: float | None = None
     error_message: str = ""
 
 

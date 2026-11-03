@@ -17,7 +17,7 @@ from PySide6.QtWidgets import (
 
 from pendulum_workbench.experiments.repository import ExperimentRepository
 from pendulum_workbench.experiments.simulation_cache import inspect_simulation
-from pendulum_workbench.experiments.target_metrics import target_metrics
+from pendulum_workbench.experiments.target_metrics import SUCCESS_ANGLE_DEG, target_metrics
 from pendulum_workbench.experiments.experiment_summary import experiment_summary
 
 
@@ -114,7 +114,7 @@ class ExperimentManagerPage(QWidget):
         sections = (
             ("Overview", (("Name", "Experiment ID", "Created"), ("Mode", "Completion", "Archived"))),
             ("Excitation settings", (("Amplitude", "Frequency", "Phase"), ("Commanded duration", "Duration"))),
-            ("Recorded results", (("Initial angle", "Peak angle", "Maximum angle"), ("Result", "Samples", "Raw lines"), ("Peak time", "Outcome", "Completion reason"))),
+            ("Recorded results", (("Initial angle", "Peak angle", "Maximum angle"), ("Result", "Samples", "Raw lines"), ("Peak time", "Outcome", "Completion reason"), ("Time to success", "Target angle"))),
             ("Motor Configuration", (("Max motor speed", "Carriage velocity", "Acceleration"), ("Carriage acceleration", "Starting speed", "Motor calibration"), ("AR diagnostic rate", "Config status"))),
             ("Simulation", (("Simulation status", "Comparison status", "Simulation files"),)),
             ("Storage & notes", (("Notes", "Folder"),)),
@@ -382,6 +382,8 @@ class ExperimentManagerPage(QWidget):
             "Peak angle": self._display_number(manifest.get("peak_absolute_angle_deg"), "°"),
             "Amplification": self._display_number(amplification, "×"),
             "Peak time": self._display_number(peak_elapsed, " s"),
+            "Time to success": self._display_number(targets["time_to_success_s"], " s"),
+            "Target angle": f"{SUCCESS_ANGLE_DEG:.1f}°",
             "Samples": manifest.get("sample_count"),
             "Raw lines": manifest.get("raw_line_count"),
             "Max motor speed": motor_value("max_speed_steps_s", " steps/s", 0),
@@ -727,7 +729,4 @@ class ExperimentManagerPage(QWidget):
         QMessageBox.information(self, "Excel sync", f"Updated:\n{target}")
 
     def _write_excel(self):
-        from pendulum_workbench.experiments.excel_export import export_experiment_workbook
-        return export_experiment_workbook(
-            self.repository.list_manifests(), self.repository.root
-        )
+        from pendulum_workbench.experiments.excel_export import ex

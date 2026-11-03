@@ -49,6 +49,16 @@ class FirmwareProtocolParserTests(unittest.TestCase):
         self.assertFalse(response.ok)
         self.assertEqual(response.fields["error"], "blocking_fault")
 
+    def test_target_reached_event_preserves_signed_angle(self) -> None:
+        event = FirmwareProtocolParser.parse_device_event(
+            "event: type=target_reached angle_deg=-90.25\r\n"
+        )
+
+        self.assertIsNotNone(event)
+        self.assertEqual(event.name, "target_reached")
+        self.assertEqual(event.fields["angle_deg"], "-90.25")
+        self.assertEqual(float(event.fields["angle_deg"]), -90.25)
+
     def test_operational_event_and_diagnostic_are_separate(self) -> None:
         event = FirmwareProtocolParser.parse_device_event(
             "event: type=limit_state_changed upper=1 lower=0"
