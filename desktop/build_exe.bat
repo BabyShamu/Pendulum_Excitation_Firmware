@@ -12,6 +12,13 @@ set "BUILD_PYTHON=%CD%\.venv-build\Scripts\python.exe"
 "%BUILD_PYTHON%" -m pip install -e ".[build]"
 if errorlevel 1 goto failed
 
+"%BUILD_PYTHON%" -c "import matlab.engine" >nul 2>&1
+if errorlevel 1 (
+    echo Installing MATLAB Engine for Python into .venv-build...
+    "%BUILD_PYTHON%" install_matlab_engine.py
+    if errorlevel 1 goto failed
+)
+
 if exist "build" rmdir /s /q "build"
 if exist "build" goto failed
 if exist "dist" rmdir /s /q "dist"

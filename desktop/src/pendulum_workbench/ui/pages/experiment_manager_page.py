@@ -55,6 +55,7 @@ class ExperimentManagerPage(QWidget):
         self._matlab_process = None
         self._matlab_output = []
         self._matlab_log_path = None
+        self._matlab_used_shared = False
         self._active_simulation_folder = None
         self._settings = QSettings('PendulumWorkbench', 'PendulumWorkbench')
         layout = QVBoxLayout(self)
@@ -622,6 +623,7 @@ class ExperimentManagerPage(QWidget):
         self._matlab_output = []
         process = QProcess(self)
         self._matlab_process = process
+        self._matlab_used_shared = bool(use_shared)
         if use_shared:
             process.setProgram(sys.executable)
             if getattr(sys, "frozen", False):
@@ -684,10 +686,30 @@ class ExperimentManagerPage(QWidget):
             self.simulation_progress.setText("MATLAB: failed — inspect " + str(log_path))
             self._show_simscape_message(
                 "Simscape failed",
-                "MATLAB exited with code " + str(exit_code) +
-                ".\n\nSee the full diagnostic log:\n" + str(log_path),
+                self._describe_matlab_failure(exit_code) +
+                "\n\n(exit code " + str(exit_code) + ")\nFull diagnostic log:\n" + str(log_path),
                 warning=True,
             )
+
+    _SHARED_FAILURES = {
+        3: "MATLAB Engine for Python is not bundled in this Workbench build. "
+           "Run desktop\\install_matlab_engine.py and rebuild the EXE.",
+        4: "No shared MATLAB session is available. In the open MATLAB Command "
+           "Window run: matlab.engine.shareEngine  - then try again.",
+        5: "MATLAB started the simulation but it reported an error. "
+           "See the log for the MATLAB error message.",
+        6: "MATLAB Engine is incompatible with the Python runtime or the installed "
+           "MATLAB release (needs Python 3.9-3.13 and a MATLAB install with the "
+           "Engine library). Details are in the log.",
+        7: "The shared MATLAB session was found but the connection failed. "
+           "It may have closed or be a different MATLAB release; restart "
+           "matlab.engine.shareEngine and retry.",
+    }
+
+    def _describe_matlab_failure(self, exit_code):
+        if self._matlab_used_shared and exit_code in self._SHARED_FAILURES:
+            return self._SHARED_FAILURES[exit_code]
+        return "MATLAB exited with an error."
 
     def _on_matlab_error(self, error):
         if error == QProcess.ProcessError.FailedToStart:
