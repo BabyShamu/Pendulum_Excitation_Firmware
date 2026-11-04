@@ -15,8 +15,10 @@ from PySide6.QtWidgets import (
     QFormLayout, QGroupBox, QScrollArea, QGridLayout, QFrame, QHeaderView, QSplitter,
 )
 
+from pendulum_workbench.experiments.loader import ExperimentListLoader
 from pendulum_workbench.experiments.repository import ExperimentRepository
 from pendulum_workbench.experiments.simulation_cache import inspect_simulation
+from pendulum_workbench.experiments.stats_cache import ExperimentStatsCache
 from pendulum_workbench.experiments.target_metrics import SUCCESS_ANGLE_DEG, target_metrics
 from pendulum_workbench.experiments.experiment_summary import experiment_summary
 
@@ -46,6 +48,10 @@ class ExperimentManagerPage(QWidget):
         self.controller = controller
         self.repository = controller.experiment_recorder.repository
         self._records = []
+        self._stats_cache = ExperimentStatsCache()
+        self._loader: ExperimentListLoader | None = None
+        self._load_generation = 0
+        self._pending_selected_path: Path | None = None
         self._matlab_process = None
         self._matlab_output = []
         self._matlab_log_path = None
@@ -70,6 +76,10 @@ class ExperimentManagerPage(QWidget):
         export = QPushButton("Sync Excel")
         export.clicked.connect(self.export_excel)
         toolbar.addWidget(export)
+        self.loading_indicator = QLabel("Loading experiments…")
+        self.loading_indicator.setStyleSheet("color: #8b5b14; font-weight: 600;")
+        self.loading_indicator.setVisible(False)
+        toolbar.addWidget(self.loading_indicator)
         layout.addLayout(toolbar)
         self.table = QTableWidget(0, 10)
         self.table.setHorizontalHeaderLabels(["Date", "Experiment", "Mode", "Duration", "Initial angle", "Measured Max (°)", "Simscape Max (°)", "Result", "Status", "Simulation"])
@@ -174,20 +184,72 @@ class ExperimentManagerPage(QWidget):
         self.summary = QLabel()
         layout.addWidget(self.summary)
         controller.experiment_recorder.recording_finished.connect(lambda *_: self.refresh())
-        self.refresh()
+        # Load only when the page is first shown. Constructing the Workbench
+        # (or building it in tests) must never spawn a loader thread that
+        # competes with time-sensitive serial interactions on other pages.
+        self._initial_load_done = False
+
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        self.ensure_loaded()
+
+    def ensure_loaded(self) -> None:
+        """Trigger the initial experiment load if it has not happened yet.
+
+        Called when the page is shown. Tests that never show the page can call
+        this directly (or call refresh()) to populate the table.
+        """
+        if not self._initial_load_done:
+            self._initial_load_done = True
+            self.refresh()
 
     def refresh(self):
+        """Reload the experiment list without blocking the UI thread.
+
+        The manifest scan runs in a background loader; the table is repopulated
+        when the scan finishes. A new refresh supersedes any in-flight scan.
+        """
         self.repository = self.controller.experiment_recorder.repository
         selected = self._selected()
-        selected_path = selected[0] if selected else None
-        self._records = self.repository.list_manifests()
+        self._pending_selected_path = selected[0] if selected else None
+        self._load_generation += 1
+        if self._loader is not None:
+            self._loader.stop_and_wait()
+            self._loader.finished.disconnect(self._on_records_loaded)
+            self._loader.deleteLater()
+        loader = ExperimentListLoader(self.repository.root, self._load_generation)
+        self._loader = loader
+        loader.finished.connect(self._on_records_loaded)
+        self.loading_indicator.setVisible(True)
+        loader.start()
+
+    def _on_records_loaded(self, generation: int, records) -> None:
+        if generation != self._load_generation:
+            return
+        loader = self._loader
+        self._loader = None
+        if loader is not None:
+            loader.finished.disconnect(self._on_records_loaded)
+            loader.deleteLater()
+        self.loading_indicator.setVisible(False)
+        self._records = list(records)
         self._filter()
+        selected_path = self._pending_selected_path
+        self._pending_selected_path = None
         if selected_path is not None:
             for row in range(self.table.rowCount()):
                 item = self.table.item(row, 0)
                 if item is not None and Path(item.data(Qt.ItemDataRole.UserRole)) == selected_path:
                     self.table.selectRow(row)
                     break
+
+    def closeEvent(self, event) -> None:
+        if self._loader is not None:
+            self._loader.stop_and_wait()
+            self._loader.finished.disconnect(self._on_records_loaded)
+            self._loader.deleteLater()
+            self._loader = None
+        super().closeEvent(event)
 
     @staticmethod
     def _friendly_mode(mode: object) -> str:
@@ -214,25 +276,12 @@ class ExperimentManagerPage(QWidget):
             kind = str(details.get("experiment_mode") or "Recording")
             params = ", ".join(f"{k}={v}" for k, v in details.items()
                                if k != "experiment_mode" and isinstance(v, (str, int, float, bool)))
-            summary = experiment_summary(directory, manifest)
+            summary = self._stats_cache.summary(directory, manifest)
             duration = summary["duration_s"]
             peak = summary["maximum_angle_deg"]
             initial = summary["initial_angle_deg"]
-            targets = {
-                "maximum_angle_deg": summary["maximum_angle_deg"],
-                "outcome": summary["outcome"],
-            }
-            simulation_status = summary["simulation"]
-            simulated_max = self._simulation_max_angle(simulation_status)
-            _LOGGER.info(
-                "Experiment Library record: experiment_id=%s maximum_angle=%s "
-                "outcome=%s completion_reason=%s "
-                "recording_state=%s",
-                manifest.get("experiment_id"),
-                targets["maximum_angle_deg"],
-                targets["outcome"],
-                details.get("completion_reason"),
-                manifest.get("completion_status"),
+            _simulation_status, simulated_max = self._stats_cache.simulation(
+                directory, manifest
             )
             fields = [
                 str(manifest.get("created_at") or "")[:16].replace("T", " "),
@@ -267,31 +316,6 @@ class ExperimentManagerPage(QWidget):
         self.table.setSortingEnabled(True)
         self.summary.setText(f"{self.table.rowCount()} experiments shown")
         self._show_details()
-
-    @staticmethod
-    def _simulation_max_angle(simulation_status):
-        """Read the absolute maximum simulated angle from a valid saved CSV."""
-        if simulation_status.state != "ready":
-            return None
-        csv_path = simulation_status.folder / "simulation.csv"
-        maximum = None
-        try:
-            with csv_path.open("r", encoding="utf-8-sig", newline="") as source:
-                reader = csv.DictReader(source)
-                if "pendulum_angle_deg" not in (reader.fieldnames or []):
-                    return None
-                for row in reader:
-                    try:
-                        angle = float(row["pendulum_angle_deg"])
-                    except (ValueError, TypeError, KeyError):
-                        continue
-                    if math.isfinite(angle):
-                        magnitude = abs(angle)
-                        if maximum is None or magnitude > maximum:
-                            maximum = magnitude
-        except (OSError, UnicodeError, csv.Error):
-            return None
-        return maximum
 
     def _selected(self):
         row = self.table.currentRow()
@@ -333,7 +357,9 @@ class ExperimentManagerPage(QWidget):
                          and math.isfinite(initial_angle) and math.isfinite(peak_angle)
                          and abs(initial_angle) > 1e-6 else None)
         peak_elapsed = self._peak_elapsed_time(directory, manifest)
-        simulation_status = inspect_simulation(directory)
+        simulation_status, _simulated_max = self._stats_cache.simulation(
+            directory, manifest
+        )
         comparison_path = directory / "simulation" / "ar_comparison_summary.json"
         if not comparison_path.is_file():
             comparison_path = directory / "simulation" / "comparison_summary.json"
@@ -347,7 +373,7 @@ class ExperimentManagerPage(QWidget):
                     comparison_status = "Stale"
             except (OSError, ValueError, TypeError):
                 comparison_status = "Incomplete"
-        targets = target_metrics(directory, manifest)
+        targets = self._stats_cache.summary(directory, manifest)
         motor_config = manifest.get("motor_configuration")
         if not isinstance(motor_config, dict):
             motor_config = None
@@ -682,6 +708,7 @@ class ExperimentManagerPage(QWidget):
         updated["archived_at"] = datetime.now().astimezone().isoformat() if updated["archived"] else None
         try:
             self.repository.write_manifest(directory, updated)
+            self._stats_cache.discard(directory)
             self.refresh()
             self._sync_excel_if_available()
         except OSError as exc:
@@ -708,6 +735,7 @@ class ExperimentManagerPage(QWidget):
             return
         try:
             shutil.rmtree(directory)
+            self._stats_cache.discard(directory)
             self.refresh()
             self._sync_excel_if_available()
         except OSError as exc:

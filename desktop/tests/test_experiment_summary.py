@@ -91,6 +91,9 @@ class ExperimentSummaryTests(unittest.TestCase):
         from pendulum_workbench.experiments.repository import ExperimentRepository
         from pendulum_workbench.ui.main_window import MainWindow
 
+        import json
+        import time as _time
+
         app = QApplication.instance() or QApplication([])
         with tempfile.TemporaryDirectory() as temp:
             directory = Path(temp) / "recording"
@@ -101,19 +104,32 @@ class ExperimentSummaryTests(unittest.TestCase):
                 "created_at": "2026-11-02T12:00:00",
                 "completion_status": "COMPLETED",
                 "peak_absolute_angle_deg": 60.0,
+                "files": {
+                    "raw_serial_capture": "serial_capture.log",
+                    "normalized_telemetry": "telemetry.csv",
+                    "derived_data_directory": "derived/",
+                },
                 "experiment": {
                     "maximum_angle_deg": 95.0,
                     "completion_reason": "duration_elapsed",
                 },
             }
+            (directory / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+            (directory / "telemetry.csv").write_text(
+                "sample_index,time_s,angle_deg,position_mm,quality\n",
+                encoding="utf-8",
+            )
             repository = ExperimentRepository(Path(temp))
             controller = WorkbenchController(experiment_repository=repository)
             try:
                 window = MainWindow(controller)
                 try:
                     page = window.manager_page
-                    page._records = [(directory, manifest)]
-                    page._filter()
+                    page.ensure_loaded()  # triggers the deferred initial load
+                    deadline = _time.monotonic() + 3.0
+                    while page.table.rowCount() != 1 and _time.monotonic() < deadline:
+                        app.processEvents()
+                        _time.sleep(0.005)
                     self.assertEqual(page.table.rowCount(), 1)
                     self.assertEqual(page.table.item(0, 5).text(), "95.00°")
                     self.assertEqual(page.table.item(0, 7).text(), "SUCCESS")

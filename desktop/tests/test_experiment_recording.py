@@ -145,6 +145,8 @@ class ExperimentRecordingTests(unittest.TestCase):
             page = ExperimentManagerPage(controller)
             self.addCleanup(controller.shutdown)
             self.addCleanup(page.close)
+            page.ensure_loaded()  # triggers the deferred initial load
+            self.assertTrue(self.wait_for(lambda: page.table.rowCount() == 1))
             self.assertEqual(page.table.item(0, 5).text(), "82.62°")
             self.assertEqual(page.table.item(0, 7).text(), "COMPLETED")
             page.table.selectRow(0)

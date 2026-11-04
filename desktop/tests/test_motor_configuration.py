@@ -164,6 +164,8 @@ class MotorConfigurationDisplayTests(unittest.TestCase):
             page = ExperimentManagerPage(controller)
             self.addCleanup(controller.shutdown)
             self.addCleanup(page.close)
+            page.ensure_loaded()  # triggers the deferred initial load
+            self.assertTrue(self.wait_for(lambda: page.table.rowCount() == 1))
             page.table.selectRow(0)
 
             self.assertEqual(
@@ -195,6 +197,8 @@ class MotorConfigurationDisplayTests(unittest.TestCase):
             page = ExperimentManagerPage(controller)
             self.addCleanup(controller.shutdown)
             self.addCleanup(page.close)
+            page.ensure_loaded()  # triggers the deferred initial load
+            self.assertTrue(self.wait_for(lambda: page.table.rowCount() == 1))
             page.table.selectRow(0)
 
             for key in (
@@ -211,4 +215,4 @@ class MotorConfigurationDisplayTests(unittest.TestCase):
 
 
 if __name__ == "__main__":
-    unittest.main()
+    unittest
